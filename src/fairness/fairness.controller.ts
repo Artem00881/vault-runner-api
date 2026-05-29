@@ -28,7 +28,7 @@ export class FairnessController {
   /** Reveal + verification data for a finished round. */
   @Get("round/:id")
   async round(@Param("id") id: string) {
-    const round = await this.prisma.gameRound.findUnique({
+    const round = await this.prisma.round.findUnique({
       where: { id },
       include: { seed: true },
     });

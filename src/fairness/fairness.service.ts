@@ -44,6 +44,34 @@ export class FairnessService {
     return this.getCurrentCommit();
   }
 
+  /**
+   * Reserve the next unused seed for a new round (lowest chain_index >= 1 not
+   * yet linked to a round). The game engine runs rounds sequentially, so no
+   * concurrency on allocation.
+   */
+  async allocateSeed() {
+    await this.ensureChain();
+    const seed = await this.prisma.fairnessSeed.findFirst({
+      where: { chainIndex: { gte: 1 }, rounds: { none: {} } },
+      orderBy: { chainIndex: "asc" },
+    });
+    if (!seed) throw new Error("fairness_chain_exhausted");
+    return seed;
+  }
+
+  /** Compute the (hidden) crash for an allocated seed. */
+  crashForSeed(seed: { seed: string | null; salt: string | null }): number {
+    return computeCrash(seed.seed!, seed.salt!);
+  }
+
+  /** Mark a seed as publicly revealed (after its round crashes). */
+  async revealSeed(seedId: string) {
+    await this.prisma.fairnessSeed.update({
+      where: { id: seedId },
+      data: { revealedAt: new Date() },
+    });
+  }
+
   /** Public commit info: terminating hash + salt commitment. */
   async getCurrentCommit() {
     const commit = await this.prisma.fairnessSeed.findUnique({ where: { chainIndex: 0 } });
