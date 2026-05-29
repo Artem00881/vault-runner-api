@@ -29,9 +29,10 @@ afterAll(async () => {
 
 test("debit then credit update balance and write ledger rows", async () => {
   const w = await freshWallet(10000n);
-  await ledger.debit(w, 100n, "bet_debit", `t1:debit`, { refType: "bet", refId: randomUUID() });
+  const k = randomUUID();
+  await ledger.debit(w, 100n, "bet_debit", `t1:${k}:debit`, { refType: "bet", refId: randomUUID() });
   expect(await ledger.getBalance(w)).toBe(9900n);
-  await ledger.credit(w, 250n, "payout_credit", `t1:credit`);
+  await ledger.credit(w, 250n, "payout_credit", `t1:${k}:credit`);
   expect(await ledger.getBalance(w)).toBe(10150n);
 
   const rows = await prisma.ledgerTransaction.findMany({ where: { walletId: w } });
@@ -42,7 +43,7 @@ test("debit then credit update balance and write ledger rows", async () => {
 
 test("debit beyond balance is rejected and leaves balance unchanged", async () => {
   const w = await freshWallet(50n);
-  await expect(ledger.debit(w, 100n, "bet_debit", `t2:debit`)).rejects.toThrow("insufficient_balance");
+  await expect(ledger.debit(w, 100n, "bet_debit", `t2:${randomUUID()}`)).rejects.toThrow("insufficient_balance");
   expect(await ledger.getBalance(w)).toBe(50n);
   const rows = await prisma.ledgerTransaction.findMany({ where: { walletId: w } });
   expect(rows.length).toBe(0);
