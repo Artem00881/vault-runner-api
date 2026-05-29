@@ -7,6 +7,7 @@
     "dev": "bun --watch src/main.ts",
     "start": "bun run src/main.ts",
     "test": "bun test",
+    "ws:smoke": "bun scripts/ws-smoke.ts",
     "prisma:generate": "bunx prisma generate",
     "prisma:migrate": "bunx prisma migrate dev",
     "prisma:deploy": "bunx prisma migrate deploy",
@@ -18,15 +19,19 @@
     "@nestjs/core": "^10.4.4",
     "@nestjs/jwt": "^10.2.0",
     "@nestjs/platform-express": "^10.4.4",
+    "@nestjs/platform-socket.io": "^10.4.4",
+    "@nestjs/websockets": "^10.4.4",
     "@prisma/client": "^5.20.0",
     "ioredis": "^5.4.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "socket.io": "^4.8.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.16.0",
     "prisma": "^5.20.0",
+    "socket.io-client": "^4.8.0",
     "typescript": "^5.6.0"
   }
 }
