@@ -1,0 +1,128 @@
+// Vault Run — Stage 2 database schema
+// See docs/stage2-architecture.md (in the web repo) for the full design.
+// Money is stored as BIGINT in minor units (no floats). Multipliers are Decimal(10,2).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  username  String   @unique
+  isGuest   Boolean  @default(true) @map("is_guest")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  wallets Wallet[]
+  bets    Bet[]
+  profile Profile?
+
+  @@map("users")
+}
+
+model Wallet {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  currency  String   @default("DEMO")
+  balance   BigInt   @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions LedgerTransaction[]
+  bets         Bet[]
+
+  @@unique([userId, currency])
+  @@map("wallets")
+}
+
+model LedgerTransaction {
+  id             String   @id @default(uuid()) @db.Uuid
+  walletId       String   @map("wallet_id") @db.Uuid
+  type           String // deposit | withdrawal | bet_debit | payout_credit | refund | adjustment
+  amount         BigInt // signed; debit negative
+  balanceAfter   BigInt   @map("balance_after")
+  refType        String?  @map("ref_type")
+  refId          String?  @map("ref_id") @db.Uuid
+  idempotencyKey String   @unique @map("idempotency_key")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, createdAt(sort: Desc)])
+  @@map("ledger_transactions")
+}
+
+model FairnessSeed {
+  id         String    @id @default(uuid()) @db.Uuid
+  chainIndex Int       @unique @map("chain_index")
+  seedHash   String    @map("seed_hash") // SHA256(seed), the public commit
+  seed       String? // revealed only after the round it serves
+  salt       String?
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  revealedAt DateTime? @map("revealed_at") @db.Timestamptz(6)
+
+  rounds Round[]
+
+  @@map("fairness_seeds")
+}
+
+model Round {
+  id             String    @id @default(uuid()) @db.Uuid
+  seedId         String    @map("seed_id") @db.Uuid
+  nonce          BigInt
+  crashPoint     Decimal   @map("crash_point") @db.Decimal(10, 2) // hidden until crash
+  status         String    @default("betting") // betting|running|crashed|settling|completed
+  bettingOpensAt DateTime  @map("betting_opens_at") @db.Timestamptz(6)
+  startedAt      DateTime? @map("started_at") @db.Timestamptz(6)
+  crashedAt      DateTime? @map("crashed_at") @db.Timestamptz(6)
+  settledAt      DateTime? @map("settled_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  seed FairnessSeed @relation(fields: [seedId], references: [id])
+  bets Bet[]
+
+  @@index([createdAt(sort: Desc)])
+  @@map("game_rounds")
+}
+
+model Bet {
+  id          String    @id @default(uuid()) @db.Uuid
+  roundId     String    @map("round_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  walletId    String    @map("wallet_id") @db.Uuid
+  panel       String // A | B
+  amount      BigInt
+  autoCashout Decimal?  @map("auto_cashout") @db.Decimal(10, 2)
+  status      String    @default("active") // active|cashed_out|busted|cancelled
+  cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
+  payout      BigInt    @default(0)
+  debitTxId   String?   @map("debit_tx_id") @db.Uuid
+  payoutTxId  String?   @map("payout_tx_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  settledAt   DateTime? @map("settled_at") @db.Timestamptz(6)
+
+  round  Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, userId, panel])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("game_bets")
+}
+
+model Profile {
+  userId            String   @id @map("user_id") @db.Uuid
+  displayName       String   @map("display_name")
+  biggestMultiplier Decimal  @default(1.00) @map("biggest_multiplier") @db.Decimal(10, 2)
+  totalLoot         BigInt   @default(0) @map("total_loot")
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([biggestMultiplier(sort: Desc), totalLoot(sort: Desc)])
+  @@map("profiles")
+}
