@@ -5,8 +5,11 @@ import helmet from "helmet";
 import { AppModule } from "./app.module";
 
 async function bootstrap() {
-  const corsOrigin = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : "*";
-  const app = await NestFactory.create(AppModule, { cors: { origin: corsOrigin } });
+  const rawCors = process.env.CORS_ORIGIN?.trim();
+  // "*" / empty → allow any origin (reflect it); otherwise a comma-separated allowlist.
+  const corsOrigin: boolean | string[] =
+    !rawCors || rawCors === "*" ? true : rawCors.split(",").map((s) => s.trim());
+  const app = await NestFactory.create(AppModule, { cors: { origin: corsOrigin, credentials: true } });
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
   app.useWebSocketAdapter(new IoAdapter(app));
   const port = process.env.PORT ? Number(process.env.PORT) : 3001;
