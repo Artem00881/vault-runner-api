@@ -1,0 +1,49 @@
+# Vault Run — full production stack (API + Postgres + Redis).
+# Usage on the VPS:
+#   cp .env.production.example .env   # then edit secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vaultrun-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vault}
+      POSTGRES_DB: ${POSTGRES_DB:-vaultrun}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vault} -d ${POSTGRES_DB:-vaultrun}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vaultrun-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+
+  api:
+    build: .
+    container_name: vaultrun-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:-vault}@postgres:5432/${POSTGRES_DB:-vaultrun}?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:
