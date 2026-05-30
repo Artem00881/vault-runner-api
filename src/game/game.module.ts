@@ -8,10 +8,11 @@ import { GameEngineService } from "./game-engine.service";
 import { GameGateway } from "./game.gateway";
 import { BetsService } from "./bets.service";
 import { RoundsController } from "./rounds.controller";
+import { BetsController } from "./bets.controller";
 
 @Module({
   imports: [PrismaModule, RedisModule, FairnessModule, WalletModule, AuthModule],
-  controllers: [RoundsController],
+  controllers: [RoundsController, BetsController],
   providers: [GameEngineService, GameGateway, BetsService],
   exports: [GameEngineService, BetsService],
 })
