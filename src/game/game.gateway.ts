@@ -4,6 +4,7 @@ import {
   ConnectedSocket,
   MessageBody,
   OnGatewayConnection,
+  OnGatewayDisconnect,
   OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
@@ -29,10 +30,26 @@ function userRoom(userId: string) {
  * Real-time gateway: streams the authoritative round to clients and accepts
  * money-moving actions (bet / cash-out), all validated server-side.
  */
+const WS_MSG_LIMIT = 15; // messages per second per socket
+
 @WebSocketGateway({ cors: { origin: "*" } })
-export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModuleDestroy {
+export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server!: Server;
   private interval: ReturnType<typeof setInterval> | null = null;
+  private userSockets = new Map<string, string>(); // userId → socketId (one per user)
+  private msgRate = new Map<string, { n: number; t: number }>();
+
+  /** Simple per-socket token bucket; returns false when the socket is spamming. */
+  private allow(client: Socket): boolean {
+    const now = Date.now();
+    const r = this.msgRate.get(client.id);
+    if (!r || now - r.t > 1000) {
+      this.msgRate.set(client.id, { n: 1, t: now });
+      return true;
+    }
+    r.n++;
+    return r.n <= WS_MSG_LIMIT;
+  }
 
   constructor(
     @Inject(GameEngineService) private readonly engine: GameEngineService,
@@ -60,14 +77,29 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModule
     if (token) {
       try {
         const payload = await this.jwt.verifyAsync(token);
-        client.data.userId = payload.sub;
-        client.join(userRoom(payload.sub));
+        const userId = payload.sub as string;
+        client.data.userId = userId;
+        client.join(userRoom(userId));
+        // one active game socket per user — drop any previous one (multi-tab abuse)
+        const prev = this.userSockets.get(userId);
+        if (prev && prev !== client.id) {
+          this.server.sockets.sockets.get(prev)?.disconnect(true);
+        }
+        this.userSockets.set(userId, client.id);
       } catch {
         /* unauthenticated — read-only */
       }
     }
     const s = this.engine.getPublicState();
     if (s) client.emit("round_state", s);
+  }
+
+  handleDisconnect(client: Socket) {
+    const userId = client.data.userId as string | undefined;
+    if (userId && this.userSockets.get(userId) === client.id) {
+      this.userSockets.delete(userId);
+    }
+    this.msgRate.delete(client.id);
   }
 
   // ---- realtime drivers ----
@@ -101,6 +133,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModule
   // ---- client → server ----
   @SubscribeMessage("subscribe_round")
   onSubscribe(@ConnectedSocket() client: Socket) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
     const s = this.engine.getPublicState();
     if (s) client.emit("round_state", s);
     return { ok: true };
@@ -108,6 +141,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModule
 
   @SubscribeMessage("place_bet")
   async onPlaceBet(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
     const userId = client.data.userId as string | undefined;
     if (!userId) return { ok: false, reason: "not_authenticated" };
     const parsed = placeSchema.safeParse(body);
@@ -124,6 +158,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModule
 
   @SubscribeMessage("cancel_bet")
   async onCancelBet(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
     const userId = client.data.userId as string | undefined;
     if (!userId) return { ok: false, reason: "not_authenticated" };
     const parsed = panelSchema.safeParse(body);
@@ -138,6 +173,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnModule
 
   @SubscribeMessage("cash_out")
   async onCashOut(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
     const userId = client.data.userId as string | undefined;
     if (!userId) return { ok: false, reason: "not_authenticated" };
     const parsed = panelSchema.safeParse(body);
