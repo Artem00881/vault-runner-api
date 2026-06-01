@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
-import { LedgerService } from "../wallet/ledger.service";
+import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
 import { DEMO_CURRENCY } from "../auth/auth.service";
 import { GameEngineService } from "./game-engine.service";
 
@@ -35,7 +35,9 @@ const MAX_BET = 1_000_000n;
 export class BetsService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
-    @Inject(LedgerService) private readonly ledger: LedgerService,
+    // talks to the active WalletProvider (internal ledger today; operator wallet
+    // later) — not LedgerService directly, so the money source can be swapped.
+    @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
     @Inject(GameEngineService) private readonly engine: GameEngineService,
   ) {}
 
@@ -60,7 +62,7 @@ export class BetsService {
     const wallet = await this.wallet(userId);
     const betId = randomUUID();
     try {
-      const tx = await this.ledger.debit(wallet.id, amt, "bet_debit", `bet:${betId}:debit`, {
+      const tx = await this.wallet$.debit(wallet.id, amt, "bet_debit", `bet:${betId}:debit`, {
         refType: "bet",
         refId: betId,
       });
@@ -92,7 +94,7 @@ export class BetsService {
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", panel };
 
-    const refund = await this.ledger.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:refund`, {
+    const refund = await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:refund`, {
       refType: "bet",
       refId: bet.id,
     });
@@ -115,7 +117,7 @@ export class BetsService {
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", userId, panel };
 
     const payout = BigInt(Math.floor(Number(bet.amount) * mult));
-    const credit = await this.ledger.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
+    const credit = await this.wallet$.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
       refType: "bet",
       refId: bet.id,
     });

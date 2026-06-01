@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { Prisma, type LedgerTransaction } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import type { WalletProvider } from "./wallet-provider";
 
 export type LedgerType =
   | "deposit"
@@ -20,9 +21,13 @@ export interface LedgerRef {
  * Every money movement is one ledger row; `wallets.balance` is the cached total.
  * Guarantees: no negative balance, no double-apply (idempotency key), and a
  * row-level lock to serialize concurrent writes to the same wallet.
+ *
+ * This is the `InternalLedgerProvider` implementation of {@link WalletProvider}:
+ * the source of truth is our own DB (demo / play-money). The game talks to the
+ * WALLET_PROVIDER token, so a SeamlessOperatorWallet can replace it later.
  */
 @Injectable()
-export class LedgerService {
+export class LedgerService implements WalletProvider {
   constructor(private readonly prisma: PrismaService) {}
 
   /** Positive `amount`; stored as a negative ledger entry (debit). */
