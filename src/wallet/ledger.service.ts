@@ -47,6 +47,16 @@ export class LedgerService implements WalletProvider {
     return w.balance;
   }
 
+  /**
+   * No-op for the internal ledger: debit/credit here are single atomic DB
+   * transactions, so a money move either fully applied or didn't — there is
+   * never an ambiguous half-state to compensate. (The operator wallet provider
+   * overrides this with a real rollback call.) Kept to satisfy WalletProvider.
+   */
+  async rollback(): Promise<void> {
+    return;
+  }
+
   private async record(
     walletId: string,
     signedAmount: bigint,
