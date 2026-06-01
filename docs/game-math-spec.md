@@ -123,10 +123,18 @@ From `bets.service.ts`:
 payout = floor( amount · cashOutMultiplier )          // integer minor units
 ```
 
-- `amount` is in integer **minor units** (e.g. cents); payouts floor to minor
-  units — rounding is always **in the house's favour** (down).
+- `amount` is in integer **minor units** of the bet's currency (cents for EUR/USD,
+  10^-6 for USDT, satoshis for BTC, etc.); payouts floor to minor units —
+  rounding is always **in the house's favour** (down).
 - Net player result = `payout − amount` (the stake was debited at bet time).
 - Subject to max-win caps in §12.
+
+**Currency independence.** The math (crash distribution, RTP, multiplier curve,
+payout = stake × multiplier) is **currency-agnostic** — it operates purely on
+integer minor units. A 2x cash-out doubles the stake whether it is EUR, USD,
+USDT, or BTC. Only the **money limits** (§12) are per-currency, and they live in
+the operator's bet-level tables, not in the math. One math model → many
+currencies.
 
 ---
 
@@ -161,26 +169,41 @@ payout = floor( amount · cashOutMultiplier )          // integer minor units
 
 ---
 
-## 12. Max win / max multiplier / limits
+## 12. Max win / max multiplier / limits (multi-currency)
 
-**Real-money configuration** (the live demo uses play-money limits + a
-1,000,000x cap):
+The game is **multi-currency from day one**. The crash math is shared and
+currency-agnostic (§8); only these money limits are **per-currency**, configured
+in the operator's **bet-level tables**. An operator enables whichever currencies
+it offers; each carries its own row.
+
+**Currency-independent:**
 
 | Parameter | Value |
 |---|---|
-| Max multiplier | 10,000x |
-| Min bet | €0.10 |
-| Max bet | €100 |
-| Max win per bet | €10,000 |
-| Max win per player per round | €20,000 (2 panels × €10,000) |
-| Operator exposure cap | €100,000 per round |
+| Max multiplier | 10,000x (real-money) / 1,000,000x (demo) |
 
-- **Effective max multiplier per bet** = `€10,000 / bet`: €0.10→100,000x,
-  €1→10,000x, €10→1,000x, €100→100x. The per-bet cap limits the **absolute win**,
-  not RTP (see `simulation-report.md` §5).
+**Per-currency limits (bet-level tables).** EUR is the **reference** row; other
+rows are set per FX/operator policy and stored in minor units. Indicative values:
+
+| Currency | Minor unit | Min bet | Max bet | Max win / bet | Max win / player·round | Exposure cap / round |
+|---|---|---|---|---|---|---|
+| EUR (ref) | cent (10⁻²) | €0.10 | €100 | €10,000 | €20,000 | €100,000 |
+| USD | cent (10⁻²) | $0.10 | $100 | $10,000 | $20,000 | $100,000 |
+| USDT | 10⁻⁶ | 0.10 | 100 | 10,000 | 20,000 | 100,000 |
+| BTC | sat (10⁻⁸) | per FX | per FX | per FX | per FX | per FX |
+| ETH | wei-scaled | per FX | per FX | per FX | per FX | per FX |
+
+- **Effective max multiplier per bet** = `maxWinPerBet / bet` (currency-relative).
+  E.g. on the EUR row: €0.10→100,000x, €1→10,000x, €10→1,000x, €100→100x. The
+  per-bet cap limits the **absolute win**, not RTP (`simulation-report.md` §5).
+- **Max win per player per round** = 2 × max-win-per-bet (both panels).
 - **Operator exposure cap:** the engine rejects new bets once the round's
-  aggregate potential payout would exceed €100,000 (house bankroll safeguard;
-  Phase 1 of the roadmap).
+  aggregate potential payout (summed across players, per currency or in a
+  reference currency) would exceed the cap — house bankroll safeguard (roadmap
+  Phase 1).
+- Crypto rows convert via the operator's FX policy at launch; the spec does not
+  fix crypto thresholds (they track volatile FX). The live **demo** uses
+  play-money limits, not these.
 
 ---
 
@@ -233,7 +256,9 @@ Summary (full report: `simulation-report.md`):
 ## 16. Versioning
 
 - **v1.0** (2026-06-01) — initial spec; demo cap 1,000,000x, real-money config
-  10,000x / €10,000 max-win-per-bet. Math source: `crash.ts` (HOUSE_EDGE 0.03).
+  10,000x / €10,000 max-win-per-bet (EUR reference). Multi-currency from day one:
+  currency-agnostic math + per-currency bet-level tables. Math source:
+  `crash.ts` (HOUSE_EDGE 0.03).
 - Any change to `HOUSE_EDGE`, the crash formula, caps, rounding, or phase timing
   **must** bump this version and trigger a re-run of the Simulation Report and a
   re-certification review.
