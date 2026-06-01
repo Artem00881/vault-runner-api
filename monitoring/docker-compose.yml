@@ -1,0 +1,57 @@
+# VaultRun monitoring stack — Prometheus + node-exporter (+ Grafana, added in G-2).
+#
+# Deploy on the VPS (from the repo root):
+#   mkdir -p /etc/vaultrun/node-textfile
+#   docker compose -f monitoring/docker-compose.yml up -d
+#
+# Everything is bound to 127.0.0.1 — NOTHING is exposed to the public internet.
+# Reach the UIs via an SSH tunnel from your Mac, e.g.:
+#   ssh -L 9090:127.0.0.1:9090 -L 3000:127.0.0.1:3000 root@95.179.241.145
+#   then open http://localhost:9090 (Prometheus) / http://localhost:3000 (Grafana).
+#
+# Full docs: DEPLOY.md §10.
+name: vaultrun-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: vaultrun-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090" # localhost only — SSH tunnel, never public
+    networks:
+      - monitoring
+      - app # the API's network, so we can scrape vaultrun-api:3001 internally
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: vaultrun-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+      - --collector.textfile.directory=/textfile # backup dead-man's-switch metric (G-3)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+      - /etc/vaultrun/node-textfile:/textfile:ro
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+  app:
+    external: true
+    name: vault-runner-api_default # the network vaultrun-api runs on
+
+volumes:
+  prometheus-data:

@@ -236,6 +236,55 @@ silently-stopped backup is noticed.
 
 ---
 
+## 10. Monitoring (Prometheus + Grafana) — built 2026-06-02
+
+Self-hosted, **bound to localhost** (never public — reached via SSH tunnel).
+Config lives in the repo under `monitoring/` (infrastructure-as-code), so it's
+versioned + reproducible.
+
+```
+App (/metrics, loopback) ──► Prometheus (scrape+store) ──► Grafana (dashboards+alerts)
+node-exporter (CPU/RAM/disk + backup textfile) ──┘
+```
+
+**Repo files (`monitoring/`):**
+- `docker-compose.yml` — Prometheus (`:9090`), node-exporter, Grafana (`:3000`,
+  added in G-2). Project name `vaultrun-monitoring`. All host-ports bound to
+  `127.0.0.1`. Joins the API's external network `vault-runner-api_default` so
+  Prometheus can scrape `vaultrun-api:3001/metrics` internally (the API is
+  loopback-only, never scraped over the internet).
+- `prometheus/prometheus.yml` — scrape jobs: `vaultrun-api` (`/metrics`), `node`
+  (node-exporter), `prometheus`. 15s interval, 15d retention.
+
+**Deploy (on the VPS):**
+```bash
+cd ~/vault-runner-api && git pull
+mkdir -p /etc/vaultrun/node-textfile          # backup dead-man's-switch dir (G-3)
+docker compose -f monitoring/docker-compose.yml up -d
+```
+
+**Access (from your Mac — nothing is public):**
+```bash
+ssh -L 9090:127.0.0.1:9090 -L 3000:127.0.0.1:3000 root@95.179.241.145
+# then: http://localhost:9090 (Prometheus)  http://localhost:3000 (Grafana)
+```
+
+**Verify / debug:**
+```bash
+docker compose -f monitoring/docker-compose.yml ps
+# targets must be UP:
+curl -s 'http://127.0.0.1:9090/api/v1/targets' | grep -o '"health":"[a-z]*"' | sort | uniq -c
+docker logs vaultrun-prometheus --tail 30
+```
+If `vaultrun-api` target is DOWN: the network name changed (`docker inspect
+vaultrun-api -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'`) —
+update `networks.app.name` in `monitoring/docker-compose.yml`.
+
+**Status:** G-1 (Prometheus + node-exporter) ✓. G-2 (Grafana + dashboard) and
+G-3 (alerts incl. backup dead-man's-switch) — to follow.
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the
