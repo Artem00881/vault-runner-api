@@ -323,6 +323,25 @@ G-3 (Alertmanager → Telegram + backup dead-man's-switch) ✓.
 
 ---
 
+## 11. Error tracking (Sentry) — code 2026-06-02
+
+App-level error tracking via **`@sentry/bun`** (the Bun-native SDK). Captures
+unhandled + 5xx exceptions with stack traces + request path/method, plus
+process-level uncaughtException/unhandledRejection. **No-op unless `SENTRY_DSN`
+is set** — the app runs unchanged without it.
+
+- Code: `src/observability/sentry.ts` (`initSentry()` is the first call in
+  `main.ts`) + `src/observability/all-exceptions.filter.ts` (global filter →
+  Sentry for unexpected/5xx; normal 4xx client errors are NOT sent). Smoke:
+  `bun scripts/sentry-smoke.ts`.
+- **Enable:** create a Sentry project (platform **Bun** or Node), copy its DSN,
+  set `SENTRY_DSN=...` (optionally `SENTRY_RELEASE=<git-sha>`) in the VPS `.env`,
+  then redeploy (`docker compose -f docker-compose.prod.yml up -d --build`).
+- Complements Prometheus `vaultrun_errors_total` + the `ErrorSpike` alert (the
+  counts) with the actual error detail.
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the

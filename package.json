@@ -24,6 +24,7 @@
     "@nestjs/throttler": "^6.5.0",
     "@nestjs/websockets": "^10.4.4",
     "@prisma/client": "^5.20.0",
+    "@sentry/bun": "^10.55.0",
     "helmet": "^8.2.0",
     "ioredis": "^5.4.1",
     "prom-client": "^15.1.3",

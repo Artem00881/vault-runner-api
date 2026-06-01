@@ -3,8 +3,11 @@ import { NestFactory } from "@nestjs/core";
 import { IoAdapter } from "@nestjs/platform-socket.io";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
+import { initSentry } from "./observability/sentry";
+import { AllExceptionsFilter } from "./observability/all-exceptions.filter";
 
 async function bootstrap() {
+  initSentry(); // error tracking — no-op unless SENTRY_DSN is set
   const rawCors = process.env.CORS_ORIGIN?.trim();
   // "*" / empty → allow any origin (reflect it); otherwise a comma-separated allowlist.
   const corsOrigin: boolean | string[] =
@@ -17,6 +20,7 @@ async function bootstrap() {
   }
   const app = await NestFactory.create(AppModule, { cors: { origin: corsOrigin, credentials: true } });
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
+  app.useGlobalFilters(new AllExceptionsFilter());
   app.useWebSocketAdapter(new IoAdapter(app));
   const port = process.env.PORT ? Number(process.env.PORT) : 3001;
   await app.listen(port);
