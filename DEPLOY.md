@@ -83,11 +83,15 @@ curl http://localhost:3001/health                      # {"status":"ok",...}
 docker logs vaultrun-api --tail 20                      # "Game engine started"
 ```
 
-Open the firewall for the API port (and SSH):
+Enable the firewall — **SSH only** (the app must NOT be exposed publicly):
 ```bash
-ufw allow 22 && ufw allow 3001 && ufw --force enable
+ufw allow 22 && ufw --force enable
 ```
-Now `http://<YOUR_VPS_IP>:3001/health` works from anywhere.
+> ⚠️ Do **not** `ufw allow 3001`/`80`. In production the app binds to
+> `127.0.0.1:3001` (see `docker-compose.prod.yml`) and is reached only through a
+> Caddy reverse proxy behind Cloudflare. See **§8 Production security hardening**.
+> (Docker publishes ports via its own iptables rules that bypass ufw — the real
+> protection is the loopback bind, not a ufw rule.)
 
 Useful later:
 ```bash
@@ -98,30 +102,13 @@ docker compose -f docker-compose.prod.yml down          # stop (keeps data)
 
 ---
 
-## 6. HTTPS (required for the live web app)
+## 6. HTTPS + edge
 
-The web app is served over **HTTPS**, and browsers block a secure page from
-talking to an insecure (`http://` / `ws://`) backend. So for the public web app
-to connect, the API must be served over **HTTPS (wss://)**. This needs a domain
-(step 1) and a reverse proxy. **Caddy** does TLS automatically:
-
-```bash
-# install Caddy
-apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt update && apt install -y caddy
-
-# configure: proxy your domain → the API (Caddy gets a free Let's Encrypt cert)
-cat > /etc/caddy/Caddyfile <<'EOF'
-api.yourdomain.com {
-    reverse_proxy localhost:3001
-}
-EOF
-systemctl restart caddy
-```
-Now `https://api.yourdomain.com` is the secure API URL. (You can close port 3001
-to the public and only expose 80/443 via Caddy: `ufw delete allow 3001`.)
+`api.vaultrun.app` is proxied through **Cloudflare** (orange-cloud). Visitors↔
+Cloudflare is HTTPS via Cloudflare's edge cert. The Cloudflare↔origin leg and the
+origin firewall are hardened in **§8** below — that is the source of truth for the
+live networking setup. (An earlier version of this doc terminated TLS with a
+Caddy + Let's Encrypt cert and left port 3001 open; that is superseded by §8.)
 
 ---
 
@@ -141,6 +128,70 @@ VITE_API_URL=https://api.yourdomain.com    # or http://<IP>:3001 for quick HTTP 
 
 That's it — the deployed web app now plays against the live, server-authoritative
 backend.
+
+---
+
+## 8. Production security hardening (live setup)
+
+The origin is **never reachable directly** — only Cloudflare can connect, over an
+encrypted, mutually-authenticated channel. Built 2026-06-01.
+
+**Edge → origin path:** visitor → Cloudflare (proxied) → **Caddy on origin :443**
+(host process, TLS via a Cloudflare **Origin Certificate**) → `127.0.0.1:3001`
+(the Docker app, loopback-only).
+
+**Cloudflare dashboard (zone `vaultrun.app`):**
+- SSL/TLS → Overview → **Full (strict)** (was Flexible/cleartext).
+- SSL/TLS → Edge Certificates → **Always Use HTTPS = On**.
+- SSL/TLS → Origin Server → **Authenticated Origin Pulls → Zone-level = On**, with
+  a **custom client certificate uploaded** (our own CA→leaf, see below). Cloudflare
+  presents this leaf to the origin; Caddy requires+verifies it. (Global AOP — the
+  shared CF cert — is intentionally NOT used; per-zone custom cert is stronger.)
+
+**Origin TLS material** (`/etc/caddy/tls/`, all owned so Caddy can read the `.crt`s):
+- `origin.crt` / `origin.key` — Cloudflare **Origin Certificate** (server cert, 15y).
+- `cf-ca.crt` / `cf-ca.key` — our private CA (trust anchor for client-cert mTLS).
+- `cf-client.crt` / `cf-client.key` — leaf signed by `cf-ca`; this **leaf+key was
+  uploaded to Cloudflare** (Zone-level AOP). Caddy trusts `cf-ca.crt`.
+
+**`/etc/caddy/Caddyfile`:**
+```caddyfile
+{
+    auto_https disable_redirects
+}
+https://api.vaultrun.app {
+    tls /etc/caddy/tls/origin.crt /etc/caddy/tls/origin.key {
+        client_auth {
+            mode require_and_verify
+            trust_pool file /etc/caddy/tls/cf-ca.crt
+        }
+    }
+    reverse_proxy 127.0.0.1:3001
+}
+```
+
+**Firewall (ufw):** only `22` (SSH) and `443` **from Cloudflare IP ranges**. A
+weekly systemd timer keeps the CF allowlist current, fail-safe (skips on a bad
+fetch so it can never lock CF out):
+- `/usr/local/bin/cf-ufw-allow.sh` (add-only, idempotent; fetches cloudflare.com/ips-v4/v6)
+- `cf-ufw-allow.service` (oneshot) + `cf-ufw-allow.timer` (`OnCalendar=weekly`).
+
+**App exposure:** `docker-compose.prod.yml` publishes the API on `127.0.0.1:3001`
+only — **never** `0.0.0.0`. (Docker's published ports bypass ufw, so the loopback
+bind — not a firewall rule — is what keeps the app private.)
+
+**SSH:** key-only. `/etc/ssh/sshd_config.d/00-hardening.conf` (sorts before the
+cloud-init drop-in): `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+`PermitRootLogin prohibit-password`. Log in with the key (`ssh -i <key> root@IP`).
+Vultr **View Console** is the out-of-band fallback.
+
+**Verify (from any non-Cloudflare host):** `https://api.vaultrun.app/health` → 200;
+direct `http://<IP>:3001`, `:80`, and `https://<IP>:443` all time out (blocked).
+A TLS connection to origin :443 without the client cert is refused
+(`tlsv13 alert certificate required`).
+
+**Rollback levers:** Cloudflare SSL mode → Flexible (instant); restore
+`/etc/caddy/Caddyfile.bak*` + `systemctl reload caddy`; `docker-compose.prod.yml.bak`.
 
 ---
 

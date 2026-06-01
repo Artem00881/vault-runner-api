@@ -36,8 +36,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:-vault}@postgres:5432/${POSTGRES_DB:-vaultrun}?schema=public
       REDIS_URL: redis://redis:6379
       PORT: 3001
+    # Bind to loopback only — the app is NOT exposed to the public internet.
+    # A host-level Caddy reverse proxy (TLS + Cloudflare Authenticated Origin
+    # Pulls) terminates :443 and forwards to 127.0.0.1:3001. See DEPLOY.md
+    # "Production security hardening". Never publish this on 0.0.0.0.
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
