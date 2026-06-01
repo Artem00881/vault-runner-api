@@ -5,6 +5,7 @@ import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider"
 import { DEMO_CURRENCY } from "../auth/auth.service";
 import { GameEngineService } from "./game-engine.service";
 import { RiskService } from "./risk.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 export type Panel = "A" | "B";
 
@@ -38,6 +39,7 @@ export class BetsService {
     @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
     @Inject(GameEngineService) private readonly engine: GameEngineService,
     @Inject(RiskService) private readonly risk: RiskService,
+    @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
   private async wallet(userId: string) {
@@ -51,7 +53,7 @@ export class BetsService {
 
     const amt = BigInt(Math.floor(amount));
     const amtCheck = this.risk.checkBetAmount(amt);
-    if (!amtCheck.ok) return { ok: false, reason: amtCheck.reason, panel };
+    if (!amtCheck.ok) { this.metrics.recordRejected(amtCheck.reason); return { ok: false, reason: amtCheck.reason, panel }; }
 
     const roundId = state.roundId;
     const existing = await this.prisma.bet.findUnique({
@@ -67,7 +69,7 @@ export class BetsService {
     });
     const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
     const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
-    if (!expCheck.ok) return { ok: false, reason: expCheck.reason, panel };
+    if (!expCheck.ok) { this.metrics.recordRejected(expCheck.reason); return { ok: false, reason: expCheck.reason, panel }; }
 
     const wallet = await this.wallet(userId);
     const betId = randomUUID();
@@ -89,9 +91,12 @@ export class BetsService {
           debitTxId: tx.id,
         },
       });
+      this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
       return { ok: true, panel, balance: Number(tx.balanceAfter), betId };
     } catch (e: any) {
-      return { ok: false, reason: e?.message === "insufficient_balance" ? "insufficient_balance" : "bet_failed", panel };
+      const reason = e?.message === "insufficient_balance" ? "insufficient_balance" : "bet_failed";
+      this.metrics.recordRejected(reason);
+      return { ok: false, reason, panel };
     }
   }
 
@@ -150,6 +155,7 @@ export class BetsService {
       userId,
     );
 
+    this.metrics.recordPayout(Number(payout)); // payout → realized-RTP numerator
     return { ok: true, userId, panel, multiplier: mult, payout: Number(payout), balance: Number(credit.balanceAfter) };
   }
 

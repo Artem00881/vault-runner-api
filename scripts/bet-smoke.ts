@@ -1,6 +1,6 @@
 import { io } from "socket.io-client";
 
-const BASE = "http://localhost:3001";
+const BASE = process.env.SMOKE_BASE ?? `http://localhost:${process.env.PORT ?? 3001}`;
 
 async function main() {
   // 1) guest session
