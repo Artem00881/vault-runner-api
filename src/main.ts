@@ -9,6 +9,12 @@ async function bootstrap() {
   // "*" / empty → allow any origin (reflect it); otherwise a comma-separated allowlist.
   const corsOrigin: boolean | string[] =
     !rawCors || rawCors === "*" ? true : rawCors.split(",").map((s) => s.trim());
+  if (corsOrigin === true) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[security] CORS is open to ALL origins — set CORS_ORIGIN to a comma-separated allowlist (e.g. https://vaultrun.app) in production.",
+    );
+  }
   const app = await NestFactory.create(AppModule, { cors: { origin: corsOrigin, credentials: true } });
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
   app.useWebSocketAdapter(new IoAdapter(app));
