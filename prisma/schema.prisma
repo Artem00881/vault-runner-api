@@ -11,6 +11,49 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// A B2B operator (casino / aggregator) that embeds the game. Multi-tenant:
+// each operator has its own launch secret, currencies, limits and wallet API.
+// (Phase 0.3 — money pivot. The live demo runs without any operator row.)
+model Operator {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique // short slug, e.g. "demo-operator"
+  name         String
+  enabled      Boolean  @default(true)
+  launchSecret String   @map("launch_secret") // per-operator HMAC secret for launch tokens
+  currencies   String[] @default([]) // ISO/crypto codes this operator offers
+  walletApiUrl String?  @map("wallet_api_url") // operator seamless-wallet endpoint
+  walletApiKey String?  @map("wallet_api_key") // key WE use to call THEM
+  callbackUrl  String?  @map("callback_url") // return-to-lobby URL
+  ipWhitelist  String[] @default([]) @map("ip_whitelist")
+  betLimits    Json?    @map("bet_limits") // per-currency bet-level tables
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sessions GameSession[]
+
+  @@map("operators")
+}
+
+// One game launch = one player session resolved from a signed launch token.
+// Binds an operator-side player+currency to a local wallet (the per-operator
+// reconciliation journal anchor) and records the token jti for one-time use.
+model GameSession {
+  id          String   @id @default(uuid()) @db.Uuid
+  operatorId  String   @map("operator_id") @db.Uuid
+  playerId    String   @map("player_id") // operator-side player id
+  currency    String
+  locale      String   @default("en")
+  walletId    String   @map("wallet_id") @db.Uuid // local journal wallet
+  launchJti   String   @unique @map("launch_jti") // token id → one-time use
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+
+  operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([operatorId, playerId])
+  @@map("game_sessions")
+}
+
 model User {
   id        String   @id @default(uuid()) @db.Uuid
   username  String   @unique
