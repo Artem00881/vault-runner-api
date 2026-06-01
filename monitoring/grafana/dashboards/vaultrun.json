@@ -1,0 +1,155 @@
+{
+  "uid": "vaultrun-overview",
+  "title": "VaultRun — Overview",
+  "tags": ["vaultrun"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Realized RTP (cumulative)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.9 },
+              { "color": "green", "value": 0.95 },
+              { "color": "yellow", "value": 0.99 },
+              { "color": "red", "value": 1.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "vaultrun_realized_rtp", "legendFormat": "RTP" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "RTP over time vs target 97%",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 3, "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "target 97%" }, "properties": [ { "id": "custom.lineStyle", "value": { "dash": [8, 6], "fill": "dash" } }, { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "vaultrun_realized_rtp", "legendFormat": "cumulative" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(vaultrun_payout_minor_total[30m])) / clamp_min(sum(rate(vaultrun_stake_minor_total[30m])), 1)", "legendFormat": "30m window" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "0.97", "legendFormat": "target 97%" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Throughput (per minute)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(vaultrun_bets_total[5m]) * 60", "legendFormat": "bets/min" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(vaultrun_cashouts_total[5m]) * 60", "legendFormat": "cashouts/min" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(vaultrun_rounds_total[5m]) * 60", "legendFormat": "rounds/min" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Stake vs Payout (minor units / min)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(vaultrun_stake_minor_total[5m]) * 60", "legendFormat": "stake/min" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(vaultrun_payout_minor_total[5m]) * 60", "legendFormat": "payout/min" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Bets rejected (by reason)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (reason) (rate(vaultrun_bets_rejected_total[5m]))", "legendFormat": "{{reason}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Errors (by where)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (where) (rate(vaultrun_errors_total[5m]))", "legendFormat": "{{where}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "WebSocket connections",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "vaultrun_ws_connections", "legendFormat": "connections" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Settlement latency (ms)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(vaultrun_settlement_latency_ms_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.90, sum(rate(vaultrun_settlement_latency_ms_bucket[5m])) by (le))", "legendFormat": "p90" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(vaultrun_settlement_latency_ms_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Host CPU & RAM (%)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "CPU %" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100", "legendFormat": "RAM %" }
+      ]
+    }
+  ]
+}

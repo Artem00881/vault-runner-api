@@ -255,13 +255,23 @@ node-exporter (CPU/RAM/disk + backup textfile) ──┘
   loopback-only, never scraped over the internet).
 - `prometheus/prometheus.yml` — scrape jobs: `vaultrun-api` (`/metrics`), `node`
   (node-exporter), `prometheus`. 15s interval, 15d retention.
+- `grafana/provisioning/datasources/datasource.yml` — auto-wires the Prometheus
+  datasource (uid `prometheus`).
+- `grafana/provisioning/dashboards/dashboards.yml` + `grafana/dashboards/vaultrun.json`
+  — the provisioned **"VaultRun — Overview"** dashboard (realized RTP vs 97%,
+  throughput, stake/payout, rejections, errors, WS, settlement latency, host CPU/RAM).
+- `.env` (gitignored) — Grafana admin user/password (`GF_SECURITY_ADMIN_*`); copy
+  from `.env.example`.
 
 **Deploy (on the VPS):**
 ```bash
 cd ~/vault-runner-api && git pull
 mkdir -p /etc/vaultrun/node-textfile          # backup dead-man's-switch dir (G-3)
+cp -n monitoring/.env.example monitoring/.env && nano monitoring/.env   # set GF_SECURITY_ADMIN_PASSWORD
 docker compose -f monitoring/docker-compose.yml up -d
 ```
+Grafana login: open the tunnelled `http://localhost:3000`, user/password from
+`monitoring/.env`. The datasource + "VaultRun — Overview" dashboard auto-load.
 
 **Access (from your Mac — nothing is public):**
 ```bash
@@ -280,8 +290,9 @@ If `vaultrun-api` target is DOWN: the network name changed (`docker inspect
 vaultrun-api -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'`) —
 update `networks.app.name` in `monitoring/docker-compose.yml`.
 
-**Status:** G-1 (Prometheus + node-exporter) ✓. G-2 (Grafana + dashboard) and
-G-3 (alerts incl. backup dead-man's-switch) — to follow.
+**Status:** G-1 (Prometheus + node-exporter) ✓, G-2 (Grafana + provisioned
+"VaultRun — Overview" dashboard) ✓. G-3 (alerts incl. backup dead-man's-switch)
+— to follow.
 
 ---
 
