@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PrismaService } from "../prisma/prisma.service";
 import { RedisService } from "../redis/redis.service";
 import { FairnessService } from "../fairness/fairness.service";
+import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
 
 export type Phase = "waiting" | "betting" | "running" | "crashed" | "settling" | "completed";
 
@@ -48,6 +49,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RedisService) private readonly redis: RedisService,
     @Inject(FairnessService) private readonly fairness: FairnessService,
+    @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
   ) {}
 
   onModuleInit() {
@@ -64,8 +66,50 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     if (this.running) return;
     this.running = true;
     await this.fairness.ensureChain();
+    await this.recoverInterruptedRounds(); // close any round left hanging by a restart
     this.log.log("Game engine started");
     await this.enterWaiting();
+  }
+
+  /**
+   * Crash-safe restart: a round left in betting/running/crashed/settling when the
+   * process died is "zombie" — the in-memory loop is gone but the DB row + its
+   * bets are still open. On boot we close every such round and refund its
+   * still-active bets (idempotent `bet:{id}:restart_refund`, so a double boot
+   * can't double-pay). New rounds only start after this.
+   */
+  private async recoverInterruptedRounds() {
+    const OPEN: Phase[] = ["waiting", "betting", "running", "crashed", "settling"];
+    const stuck = await this.prisma.round.findMany({
+      where: { status: { in: OPEN as string[] } },
+      select: { id: true },
+    });
+    if (stuck.length === 0) return;
+    this.log.warn(`recovering ${stuck.length} interrupted round(s) from a restart`);
+
+    for (const r of stuck) {
+      const activeBets = await this.prisma.bet.findMany({
+        where: { roundId: r.id, status: "active" },
+      });
+      for (const bet of activeBets) {
+        try {
+          await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
+            refType: "bet",
+            refId: bet.id,
+          });
+          await this.prisma.bet.update({
+            where: { id: bet.id },
+            data: { status: "cancelled", settledAt: new Date() },
+          });
+        } catch (e: any) {
+          this.log.error(`restart refund failed for bet ${bet.id}: ${e?.message}`);
+        }
+      }
+      await this.prisma.round.update({
+        where: { id: r.id },
+        data: { status: "completed", settledAt: new Date() },
+      });
+    }
   }
 
   stop() {

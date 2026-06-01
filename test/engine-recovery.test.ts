@@ -1,0 +1,94 @@
+import { test, expect, beforeAll, afterAll } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { PrismaService } from "../src/prisma/prisma.service";
+import { LedgerService } from "../src/wallet/ledger.service";
+import { GameEngineService } from "../src/game/game-engine.service";
+
+// We test recoverInterruptedRounds in isolation: construct the engine with real
+// Prisma + the internal ledger as the wallet provider, leave fairness/redis as
+// stubs (recovery doesn't use them), and drive the private method directly.
+const prisma = new PrismaService();
+const ledger = new LedgerService(prisma);
+const redisStub: any = { client: { set: async () => {} } };
+const fairnessStub: any = {};
+const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger);
+const recover = () => (engine as any).recoverInterruptedRounds();
+
+async function seedRound() {
+  // a fairness seed + round are needed for the FK
+  const seed = await prisma.fairnessSeed.create({
+    data: { chainIndex: Math.floor(Math.random() * 1e9), seedHash: "h" + randomUUID() },
+  });
+  const round = await prisma.round.create({
+    data: {
+      seedId: seed.id,
+      nonce: 1n,
+      crashPoint: 2.0,
+      status: "running", // a round interrupted mid-flight
+      bettingOpensAt: new Date(),
+    },
+  });
+  return round.id;
+}
+
+async function fundedWallet(balance: bigint): Promise<string> {
+  const id = randomUUID();
+  const u = await prisma.user.create({
+    data: {
+      id,
+      username: "rec_" + id.slice(0, 12),
+      wallets: { create: { currency: "DEMO", balance } },
+      profile: { create: { displayName: "rec" } },
+    },
+    include: { wallets: true },
+  });
+  return u.wallets[0].id;
+}
+
+beforeAll(async () => { await prisma.$connect(); });
+afterAll(async () => { await prisma.$disconnect(); });
+
+test("recovery refunds active bets of an interrupted round and closes it", async () => {
+  const roundId = await seedRound();
+  const walletId = await fundedWallet(9900n); // already debited 100 for the bet
+  const userId = (await prisma.wallet.findUniqueOrThrow({ where: { id: walletId } })).userId;
+  const betId = randomUUID();
+  await prisma.bet.create({
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "active" },
+  });
+
+  await recover();
+
+  // bet refunded → balance back to 10000, bet cancelled, round completed
+  expect(await ledger.getBalance(walletId)).toBe(10000n);
+  expect((await prisma.bet.findUniqueOrThrow({ where: { id: betId } })).status).toBe("cancelled");
+  expect((await prisma.round.findUniqueOrThrow({ where: { id: roundId } })).status).toBe("completed");
+});
+
+test("recovery is idempotent — a second run does not double-refund", async () => {
+  const roundId = await seedRound();
+  const walletId = await fundedWallet(9800n);
+  const userId = (await prisma.wallet.findUniqueOrThrow({ where: { id: walletId } })).userId;
+  const betId = randomUUID();
+  await prisma.bet.create({
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 200n, status: "active" },
+  });
+
+  await recover();
+  const afterFirst = await ledger.getBalance(walletId);
+  await recover(); // run again (e.g. a crash-loop on boot)
+  const afterSecond = await ledger.getBalance(walletId);
+
+  expect(afterFirst).toBe(10000n);
+  expect(afterSecond).toBe(10000n); // not 10200 — the refund key is idempotent
+});
+
+test("recovery with no interrupted rounds is a no-op", async () => {
+  // mark any leftover open rounds done first, then a clean run shouldn't throw
+  await prisma.round.updateMany({
+    where: { status: { in: ["waiting", "betting", "running", "crashed", "settling"] } },
+    data: { status: "completed" },
+  });
+  await recover(); // should simply return
+  expect(true).toBe(true);
+});
