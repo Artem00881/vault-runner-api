@@ -23,6 +23,7 @@ services:
       - --storage.tsdb.retention.time=15d
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090" # localhost only — SSH tunnel, never public
@@ -67,6 +68,16 @@ services:
     depends_on:
       - prometheus
 
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: vaultrun-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - monitoring # reached by Prometheus at alertmanager:9093; not exposed
+
 networks:
   monitoring:
   app:
@@ -76,3 +87,4 @@ networks:
 volumes:
   prometheus-data:
   grafana-data:
+  alertmanager-data:

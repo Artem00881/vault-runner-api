@@ -1,0 +1,17 @@
+# Copy to monitoring/alertmanager/alertmanager.yml on the VPS and fill in your
+# Telegram bot token + chat id. The real file is gitignored (it holds a secret).
+# See DEPLOY.md §10 for how to create the bot + get the chat id.
+route:
+  receiver: telegram
+  group_by: ["alertname"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token: "PASTE_BOT_TOKEN_HERE" # from @BotFather
+        chat_id: PASTE_CHAT_ID_HERE # integer, e.g. 123456789 (no quotes)
+        parse_mode: HTML
+        send_resolved: true

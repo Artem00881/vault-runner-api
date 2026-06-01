@@ -1,0 +1,62 @@
+# VaultRun alert rules. Fired by Prometheus, delivered by Alertmanager → Telegram.
+# See DEPLOY.md §10.
+groups:
+  - name: vaultrun
+    rules:
+      # Backup dead-man's-switch: the backup script writes
+      # vaultrun_backup_last_success_timestamp_seconds on every success (DEPLOY.md
+      # §9). If it stops (or the metric is absent), the backups silently broke.
+      - alert: BackupStale
+        expr: (time() - vaultrun_backup_last_success_timestamp_seconds) > 7 * 3600
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "DB backup is stale (>7h)"
+          description: "No successful encrypted DB backup to R2 in over 7 hours."
+
+      - alert: BackupMetricMissing
+        expr: absent(vaultrun_backup_last_success_timestamp_seconds)
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "Backup metric missing"
+          description: "node-exporter is not exposing the backup success metric — the backup job may never have run since boot."
+
+      - alert: ApiDown
+        expr: up{job="vaultrun-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "VaultRun API is down"
+          description: "Prometheus cannot scrape the API /metrics for 2 minutes."
+
+      # Engine stalled = no rounds completing (e.g. fairness chain exhausted).
+      - alert: EngineStalled
+        expr: rate(vaultrun_rounds_total[15m]) == 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Game engine not producing rounds"
+          description: "No rounds completed in 15 minutes — engine may be stuck (e.g. fairness chain exhausted)."
+
+      - alert: ErrorSpike
+        expr: sum(rate(vaultrun_errors_total[5m])) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Error rate elevated"
+          description: "Handled errors > 1/s for 5 minutes."
+
+      - alert: HostDiskLow
+        expr: min(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) < 0.15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Host disk < 15% free"
+
+      - alert: HostMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.92
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Host memory > 92% used"

@@ -231,8 +231,15 @@ docker exec vaultrun-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" createdb -U
 docker exec -i vaultrun-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -U "$POSTGRES_USER" -h 127.0.0.1 -d vaultrun_restore' < /tmp/restore/db.dump
 ```
 
-**TODO (with monitoring):** a backup-failure alert (dead-man's-switch) so a
-silently-stopped backup is noticed.
+**Dead-man's-switch:** on every success the script also writes a Prometheus
+textfile metric for node-exporter (§10):
+```bash
+printf 'vaultrun_backup_last_success_timestamp_seconds %s\n' "$(date +%s)" \
+  > /etc/vaultrun/node-textfile/vaultrun_backup.prom.tmp \
+  && mv /etc/vaultrun/node-textfile/vaultrun_backup.prom.tmp \
+        /etc/vaultrun/node-textfile/vaultrun_backup.prom
+```
+If backups silently stop, the `BackupStale` alert fires (§10).
 
 ---
 
@@ -290,9 +297,29 @@ If `vaultrun-api` target is DOWN: the network name changed (`docker inspect
 vaultrun-api -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'`) —
 update `networks.app.name` in `monitoring/docker-compose.yml`.
 
-**Status:** G-1 (Prometheus + node-exporter) ✓, G-2 (Grafana + provisioned
-"VaultRun — Overview" dashboard) ✓. G-3 (alerts incl. backup dead-man's-switch)
-— to follow.
+**Alerting (G-3): Prometheus rules → Alertmanager → Telegram.**
+- `prometheus/alerts.yml` — rules: `BackupStale` (no backup metric fresh <7h),
+  `BackupMetricMissing`, `ApiDown`, `EngineStalled` (no rounds 15m — e.g. fairness
+  chain exhausted), `ErrorSpike`, `HostDiskLow`, `HostMemoryHigh`.
+- `alertmanager/alertmanager.yml` (gitignored; copy from `.yml.example`) — routes
+  to a Telegram bot. The dead-man's-switch metric is written by the backup script
+  (§9) into `/etc/vaultrun/node-textfile/` and exposed by node-exporter.
+
+**Create the Telegram bot (one-time):**
+1. In Telegram, message **@BotFather** → `/newbot` → follow prompts → copy the
+   **bot token**.
+2. Message your new bot anything (so it may DM you), then open
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser → copy
+   `result[].message.chat.id` (an integer). (Or message **@userinfobot** for your id.)
+3. On the VPS: `cp monitoring/alertmanager/alertmanager.yml.example
+   monitoring/alertmanager/alertmanager.yml` and paste the token + chat id.
+
+**Deploy alerting:** `docker compose -f monitoring/docker-compose.yml up -d`
+(adds Alertmanager, reloads Prometheus rules). Check rules at
+`http://127.0.0.1:9090/alerts`, Alertmanager at scrape-internal `alertmanager:9093`.
+
+**Status:** G-1 (Prometheus + node-exporter) ✓, G-2 (Grafana + dashboard) ✓,
+G-3 (Alertmanager → Telegram + backup dead-man's-switch) ✓.
 
 ---
 
