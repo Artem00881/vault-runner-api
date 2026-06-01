@@ -76,7 +76,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
 
   async rollback(walletId: string, idempotencyKey: string, ref?: LedgerRef): Promise<void> {
     const s = await this.resolveSession(walletId);
-    await this.operator.rollback({
+    await this.operator.rollback(s.operatorId, {
       playerId: s.playerId,
       currency: s.currency,
       transactionId: idempotencyKey,
@@ -87,7 +87,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
 
   async getBalance(walletId: string): Promise<bigint> {
     const s = await this.resolveSession(walletId);
-    const bal = await this.operator.balance(s.playerId, s.currency);
+    const bal = await this.operator.balance(s.operatorId, s.playerId, s.currency);
     return BigInt(Math.trunc(bal));
   }
 
@@ -112,7 +112,10 @@ export class SeamlessOperatorWallet implements WalletProvider {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
-        const res = kind === "bet" ? await this.operator.bet(req) : await this.operator.win(req);
+        const res =
+          kind === "bet"
+            ? await this.operator.bet(s.operatorId, req)
+            : await this.operator.win(s.operatorId, req);
         return { id: res.operatorTxId, balanceAfter: BigInt(Math.trunc(res.balance)) };
       } catch (e) {
         lastErr = e;
@@ -142,7 +145,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
   /** Best-effort rollback; never throws (we're already in a failure path). */
   private async safeRollback(s: OperatorSession, transactionId: string, ref?: LedgerRef) {
     try {
-      await this.operator.rollback({
+      await this.operator.rollback(s.operatorId, {
         playerId: s.playerId,
         currency: s.currency,
         transactionId,

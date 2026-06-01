@@ -56,12 +56,17 @@ export interface OperatorWalletResponse {
  * The calls our SeamlessOperatorWallet makes against the operator. A real
  * implementation issues HTTP/JSON (or gRPC) requests; the mock implements the
  * same shape in-memory for tests.
+ *
+ * The leading `operatorId` is OUR multi-tenant ROUTING key — it tells the client
+ * which operator's `walletApiUrl` + `walletApiKey` to dial. It is NOT part of
+ * the wire payload published to operators (they already know who they are); the
+ * request bodies above stay the clean operator-facing contract.
  */
 export interface OperatorWalletApi {
-  balance(playerId: string, currency: string): Promise<number>;
-  bet(req: OperatorBetRequest): Promise<OperatorWalletResponse>;
-  win(req: OperatorWinRequest): Promise<OperatorWalletResponse>;
-  rollback(req: OperatorRollbackRequest): Promise<OperatorWalletResponse>;
+  balance(operatorId: string, playerId: string, currency: string): Promise<number>;
+  bet(operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse>;
+  win(operatorId: string, req: OperatorWinRequest): Promise<OperatorWalletResponse>;
+  rollback(operatorId: string, req: OperatorRollbackRequest): Promise<OperatorWalletResponse>;
 }
 
 /** Operator-side error categories our provider must handle distinctly. */

@@ -45,7 +45,7 @@ export class MockOperator implements OperatorWalletApi {
 
   private key(playerId: string, currency: string) { return `${playerId}:${currency}`; }
 
-  async balance(playerId: string, currency: string): Promise<number> {
+  async balance(_operatorId: string, playerId: string, currency: string): Promise<number> {
     this.calls.balance++;
     return this.balances.get(this.key(playerId, currency)) ?? 0;
   }
@@ -95,17 +95,17 @@ export class MockOperator implements OperatorWalletApi {
     return this.apply(txId, playerId, currency, delta);
   }
 
-  async bet(req: OperatorBetRequest): Promise<OperatorWalletResponse> {
+  async bet(_operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse> {
     this.calls.bet++;
     return this.run(req.transactionId, req.playerId, req.currency, -req.amount);
   }
 
-  async win(req: OperatorWinRequest): Promise<OperatorWalletResponse> {
+  async win(_operatorId: string, req: OperatorWinRequest): Promise<OperatorWalletResponse> {
     this.calls.win++;
     return this.run(req.transactionId, req.playerId, req.currency, +req.amount);
   }
 
-  async rollback(req: OperatorRollbackRequest): Promise<OperatorWalletResponse> {
+  async rollback(_operatorId: string, req: OperatorRollbackRequest): Promise<OperatorWalletResponse> {
     this.calls.rollback++;
     // Undo the named transaction if it was applied; idempotent on its own txId.
     const orig = this.applied.get(req.transactionId);
