@@ -195,6 +195,47 @@ A TLS connection to origin :443 without the client cert is refused
 
 ---
 
+## 9. Backups (encrypted, off-site) — built 2026-06-01
+
+Automated, **client-side-encrypted**, **off-site** PostgreSQL backups with a
+**tested restore**. (These are frequent encrypted snapshots, RPO = 6 h. True
+continuous PITR via WAL archiving is a planned real-money-stage upgrade — it
+needs `archive_command` on the live DB + archive monitoring.)
+
+**Pipeline** (`/usr/local/bin/vaultrun-backup.sh`, run by `vaultrun-backup.timer`,
+`OnCalendar=*-*-* 00/6:00:00`): `docker exec … pg_dump -Fc` (custom/compressed) →
+`age -R <pubkey>` (encrypt) → `rclone copy` → **Cloudflare R2** bucket
+`vaultrun-backups/db/`, then `rclone delete --min-age 30d` (retention).
+
+**Encryption (age):**
+- `/etc/vaultrun/backup-age-pub.txt` — public key, used by the script to encrypt.
+- `/etc/vaultrun/backup-age-key.txt` — **private key** (chmod 600). A copy is also
+  stored **off-server in 1Password** (+ a 2nd independent copy). **Restoring needs
+  this private key** — without it, backups are unrecoverable.
+
+**Off-site store (Cloudflare R2):** rclone remote `r2`
+(`/root/.config/rclone/rclone.conf`, chmod 600) → endpoint
+`https://<account_id>.r2.cloudflarestorage.com`, bucket `vaultrun-backups`,
+auth = an R2 API token (Object Read & Write). R2 free tier covers it (zero egress).
+**Use the official rclone build (v1.74+)** — the apt 1.60 emits spurious
+`501 NotImplemented` on R2 uploads (`curl https://rclone.org/install.sh | bash`).
+
+**Restore procedure (verified):**
+```bash
+mkdir -p /tmp/restore
+LATEST=$(rclone lsf r2:vaultrun-backups/db/ | sort | tail -1)
+rclone copy "r2:vaultrun-backups/db/$LATEST" /tmp/restore/
+age -d -i /etc/vaultrun/backup-age-key.txt "/tmp/restore/$LATEST" > /tmp/restore/db.dump
+# into a SCRATCH db (never the live one) to verify, or into the real db for DR:
+docker exec vaultrun-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" createdb -U "$POSTGRES_USER" -h 127.0.0.1 vaultrun_restore'
+docker exec -i vaultrun-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -U "$POSTGRES_USER" -h 127.0.0.1 -d vaultrun_restore' < /tmp/restore/db.dump
+```
+
+**TODO (with monitoring):** a backup-failure alert (dead-man's-switch) so a
+silently-stopped backup is noticed.
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the
