@@ -4,6 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
 import { DEMO_CURRENCY } from "../auth/auth.service";
 import { GameEngineService } from "./game-engine.service";
+import { RiskService } from "./risk.service";
 
 export type Panel = "A" | "B";
 
@@ -24,9 +25,6 @@ export interface CashoutResult {
   balance?: number;
 }
 
-const MIN_BET = 1n;
-const MAX_BET = 1_000_000n;
-
 /**
  * All money-moving bet operations, validated against the authoritative engine
  * (server clock decides phase) and applied through the idempotent ledger.
@@ -39,6 +37,7 @@ export class BetsService {
     // later) — not LedgerService directly, so the money source can be swapped.
     @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
     @Inject(GameEngineService) private readonly engine: GameEngineService,
+    @Inject(RiskService) private readonly risk: RiskService,
   ) {}
 
   private async wallet(userId: string) {
@@ -51,13 +50,24 @@ export class BetsService {
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
     const amt = BigInt(Math.floor(amount));
-    if (amt < MIN_BET || amt > MAX_BET) return { ok: false, reason: "invalid_amount", panel };
+    const amtCheck = this.risk.checkBetAmount(amt);
+    if (!amtCheck.ok) return { ok: false, reason: amtCheck.reason, panel };
 
     const roundId = state.roundId;
     const existing = await this.prisma.bet.findUnique({
       where: { roundId_userId_panel: { roundId, userId, panel } },
     });
     if (existing) return { ok: false, reason: "already_bet", panel };
+
+    // House risk: reject if this bet would push the round's worst-case payout
+    // past the bankroll exposure cap (computed from all active bets this round).
+    const roundBets = await this.prisma.bet.findMany({
+      where: { roundId, status: "active" },
+      select: { amount: true },
+    });
+    const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
+    const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
+    if (!expCheck.ok) return { ok: false, reason: expCheck.reason, panel };
 
     const wallet = await this.wallet(userId);
     const betId = randomUUID();
@@ -116,7 +126,9 @@ export class BetsService {
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", userId, panel };
 
-    const payout = BigInt(Math.floor(Number(bet.amount) * mult));
+    // payout = stake × multiplier, clamped to the per-bet max-win cap (house safeguard)
+    const rawPayout = BigInt(Math.floor(Number(bet.amount) * mult));
+    const payout = this.risk.capPayout(rawPayout);
     const credit = await this.wallet$.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
       refType: "bet",
       refId: bet.id,
