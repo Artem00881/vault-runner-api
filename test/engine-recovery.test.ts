@@ -14,6 +14,13 @@ const fairnessStub: any = {};
 const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger);
 const recover = () => (engine as any).recoverInterruptedRounds();
 
+// Track everything we create so afterAll can purge it — otherwise these
+// synthetic rounds (closed with a null salt, never revealed) accumulate in the
+// shared dev DB and break engine-fairness, which scans real persisted rounds.
+const createdRoundIds: string[] = [];
+const createdSeedIds: string[] = [];
+const createdUserIds: string[] = [];
+
 async function seedRound() {
   // a fairness seed + round are needed for the FK
   const seed = await prisma.fairnessSeed.create({
@@ -28,6 +35,8 @@ async function seedRound() {
       bettingOpensAt: new Date(),
     },
   });
+  createdSeedIds.push(seed.id);
+  createdRoundIds.push(round.id);
   return round.id;
 }
 
@@ -42,11 +51,27 @@ async function fundedWallet(balance: bigint): Promise<string> {
     },
     include: { wallets: true },
   });
+  createdUserIds.push(id);
   return u.wallets[0].id;
 }
 
 beforeAll(async () => { await prisma.$connect(); });
-afterAll(async () => { await prisma.$disconnect(); });
+afterAll(async () => {
+  // Best-effort cleanup of this run's synthetic rows (FK-safe order:
+  // rounds cascade their bets; users cascade their wallets + ledger txns;
+  // fairness seeds are deletable once no round references them).
+  try {
+    if (createdRoundIds.length)
+      await prisma.round.deleteMany({ where: { id: { in: createdRoundIds } } });
+    if (createdSeedIds.length)
+      await prisma.fairnessSeed.deleteMany({ where: { id: { in: createdSeedIds } } });
+    if (createdUserIds.length)
+      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  } catch {
+    // never fail the suite on cleanup
+  }
+  await prisma.$disconnect();
+});
 
 test("recovery refunds active bets of an interrupted round and closes it", async () => {
   const roundId = await seedRound();
