@@ -147,31 +147,55 @@ functions; reproduce with `computeCrash` + `verifyChainLink`.)
 
 ---
 
-## 8. Planned upgrade — blockchain-anchored salt (real money)
+## 8. Blockchain-anchored salt (grind-proof) — IMPLEMENTED
 
-The current `DailySaltProvider` is standard provably-fair, but the salt is
-operator-chosen. For real money we will swap to **`BlockHashSaltProvider`** to
-make crash points **grind-proof** — the operator cannot pre-search seeds for a
-favourable salt because the salt does not exist yet at commit time:
+The salt can be the hash of a **future finalized Ethereum block**, making crash
+points **grind-proof**: the operator cannot pre-search seeds for a favourable
+salt because the salt does not exist yet when the chain is committed.
 
-1. **Commit in advance:** publish (a) the terminating hash of the seed chain for
-   the next *N* rounds and (b) a **target future block height** on a public
-   chain (e.g. Bitcoin/Ethereum).
-2. **Salt = that block's hash**, known only once the block is mined — *after*
-   the commitment. Nobody (including us) can predict it at commit time, so seeds
-   can't be ground against it.
-3. **Anchor** the chain-head commitment in a public transaction / timestamped
-   post, so the commitment itself is provably pre-block.
+**Epochs.** The seed chain is split into epochs (`FairnessChain`). Each epoch is an
+independent provably-fair chain with its own public commit (`seed[0]`) and its own
+salt. When an epoch runs out the engine rolls over to the next one — no stall.
 
-This is a **one-class swap** behind the existing `SaltProvider` interface — the
-seed chain, crash formula, reveal flow, and this verification process are
-unchanged; only the salt's *source* becomes a public, unpredictable block hash.
-(Roadmap Phase 2.) Optional add-on: a **per-player client seed** the player can
-set/rotate, folded into the HMAC for extra individual assurance.
+**How a block-salt epoch is committed and revealed:**
 
-> **Status:** §1–§7 describe the system as it works **today**. §8 is the planned
-> real-money upgrade — not yet deployed. The verification UX for players is
-> identical before and after; only the salt source and trust guarantee improve.
+1. **Commit (before the block exists):** a new epoch publishes (a) its chain head
+   `seed[0]` and (b) a **target Ethereum block height** = current finalized head +
+   `ETH_SALT_LEAD_BLOCKS` (default 10). Both are visible in advance at
+   `GET /api/fairness/current` → `nextEpoch` (status `pending`).
+2. **Arm (after the block finalizes):** once that block is **finalized**, its hash
+   becomes the epoch's salt (status `armed`). Finalized blocks are reorg-safe — the
+   value can never change. The oracle cross-checks the hash across several public
+   Ethereum RPCs and requires agreement, so no single endpoint can spoof it.
+3. **Serve & reveal:** when the previous epoch ends, the armed epoch becomes
+   `active` and serves rounds. Each round still reveals its seed on crash, and
+   anyone recomputes `crash = f(HMAC_SHA256(seed, salt))` with `salt` = the public
+   block hash — checkable against any Ethereum explorer.
+
+Because the chain head was committed **before** the target block existed, neither
+the operator nor a player could have ground the seeds against the salt.
+
+**Reliability.** If the salt isn't available when an epoch must start (cold start,
+or an oracle outage), the engine falls back to a **random** salt for that epoch
+(transparently — `saltSource: "random"`) so the game never stalls, and resumes
+block-salt epochs as soon as the oracle recovers.
+
+**Verify a block-salt round:** take the round's revealed `seed` + the epoch's
+`salt`, confirm `salt` equals the published Ethereum block's hash (e.g. on a block
+explorer), then recompute the crash (§5) — exactly as in §7.
+
+**Implementation:** `src/fairness/eth-block.ts` (finalized-block oracle, multi-RPC
+agreement), `EthBlockSaltProvider` in `salt.provider.ts`, epoch orchestration
+(pending → armed → active) in `fairness.service.ts`. Enabled with
+`SALT_PROVIDER_TYPE=eth-block`. Optional add-on (future): a **per-player client
+seed** folded into the HMAC for extra individual assurance.
+
+> **Status:** §1–§7 describe the core scheme. §8 (block-hash salt) is **built and
+> validated against Ethereum mainnet** (2026-06): a real future block was committed
+> in advance, armed with the real finalized hash, and served verifiable rounds. The
+> play-money demo runs the random-salt provider by default; block-salt is one env
+> flip (`SALT_PROVIDER_TYPE=eth-block`) away. Player verification UX is identical
+> either way — only the salt source and trust guarantee improve.
 
 ---
 
