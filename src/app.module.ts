@@ -1,7 +1,8 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
-import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { ThrottlerModule } from "@nestjs/throttler";
+import { IpThrottlerGuard } from "./common/ip-throttler.guard";
 import { PrismaModule } from "./prisma/prisma.module";
 import { RedisModule } from "./redis/redis.module";
 import { AuthModule } from "./auth/auth.module";
@@ -16,7 +17,13 @@ import { HealthController } from "./health/health.controller";
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]), // 120 req/min/IP
+    ThrottlerModule.forRoot([
+      {
+        // Tunable per environment (prod default 120/min/IP); raise for load tests.
+        ttl: Number(process.env.THROTTLE_TTL_MS ?? 60_000),
+        limit: Number(process.env.THROTTLE_LIMIT ?? 120),
+      },
+    ]),
     PrismaModule,
     RedisModule,
     AuthModule,
@@ -28,6 +35,6 @@ import { HealthController } from "./health/health.controller";
     MetricsModule,
   ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [{ provide: APP_GUARD, useClass: IpThrottlerGuard }],
 })
 export class AppModule {}
