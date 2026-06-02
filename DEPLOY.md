@@ -54,33 +54,33 @@ password.)
 
 ## 4. Configure secrets
 
-```bash
-cp .env.production.example .env
-nano .env
-```
-Set:
-- `POSTGRES_PASSWORD` → a long random password.
-- `JWT_SECRET` → a long random string (e.g. `openssl rand -hex 32`).
-- `CORS_ORIGIN` → your web app's URL (e.g. `https://your-app.lovable.app`).
-  Use `*` only for quick testing.
+Production secrets (`POSTGRES_PASSWORD`, `JWT_SECRET`, `SENTRY_DSN`) are **not**
+kept in a `.env` file on the server — they live in **1Password** and are injected
+at deploy time. See **§12 Secrets management (1Password)** for the one-time setup.
 
-Save (Ctrl+O, Enter, Ctrl+X).
+Non-secret config (`CORS_ORIGIN`, `GAME_CURRENCY`, `POSTGRES_USER/DB`,
+`WALLET_PROVIDER_TYPE`) has safe production defaults baked into
+`docker-compose.prod.yml`; override only if you need to.
 
 ---
 
 ## 5. Launch
 
+Deploy through the **`op-compose.sh`** wrapper so secrets are injected from
+1Password (see §12). Do **not** call `docker compose -f docker-compose.prod.yml …`
+directly in prod — it will fail the `:?` guard with "POSTGRES_PASSWORD not set".
+
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+./op-compose.sh up -d --build
 ```
 This builds the API image, starts Postgres + Redis, runs database migrations
 automatically, and starts the server on port **3001**.
 
 Check it:
 ```bash
-docker compose -f docker-compose.prod.yml ps          # all "Up", postgres healthy
-curl http://localhost:3001/health                      # {"status":"ok",...}
-docker logs vaultrun-api --tail 20                      # "Game engine started"
+./op-compose.sh ps                  # all "Up", postgres healthy
+curl http://localhost:3001/health   # {"status":"ok",...}
+docker logs vaultrun-api --tail 20  # "Game engine started"
 ```
 
 Enable the firewall — **SSH only** (the app must NOT be exposed publicly):
@@ -95,9 +95,10 @@ ufw allow 22 && ufw --force enable
 
 Useful later:
 ```bash
-docker compose -f docker-compose.prod.yml logs -f api   # live logs
-docker compose -f docker-compose.prod.yml up -d --build # redeploy after git pull
-docker compose -f docker-compose.prod.yml down          # stop (keeps data)
+./op-compose.sh logs -f api         # live logs
+./op-compose.sh up -d --build       # redeploy after git pull
+./op-compose.sh down                # stop (keeps data)
+docker restart vaultrun-api         # plain restart (no compose re-eval, no op needed)
 ```
 
 ---
@@ -335,10 +336,60 @@ is set** — the app runs unchanged without it.
   Sentry for unexpected/5xx; normal 4xx client errors are NOT sent). Smoke:
   `bun scripts/sentry-smoke.ts`.
 - **Enable:** create a Sentry project (platform **Bun** or Node), copy its DSN,
-  set `SENTRY_DSN=...` (optionally `SENTRY_RELEASE=<git-sha>`) in the VPS `.env`,
-  then redeploy (`docker compose -f docker-compose.prod.yml up -d --build`).
+  store it in 1Password as `op://VaultRun-Prod/SENTRY_DSN/password` (§12; optionally
+  `SENTRY_RELEASE=<git-sha>`), then redeploy (`./op-compose.sh up -d --build`).
 - Complements Prometheus `vaultrun_errors_total` + the `ErrorSpike` alert (the
   counts) with the actual error detail.
+
+---
+
+## 12. Secrets management (1Password) — built 2026-06-02
+
+Production secrets live in the **1Password** vault **`VaultRun-Prod`** and are
+injected into the stack **at deploy time only** — nothing secret is written to
+disk. Closes the Phase-1 "secrets → manager" item.
+
+**What's where**
+- 1Password vault `VaultRun-Prod`, three items (type *Password*): `POSTGRES_PASSWORD`,
+  `JWT_SECRET`, `SENTRY_DSN` (value in the `password` field).
+- `op.prod.env` (in the repo, **not secret** — only `op://…` references).
+- `op-compose.sh` (wrapper): loads the service-account token and runs
+  `op run --env-file=op.prod.env -- docker compose -f docker-compose.prod.yml "$@"`.
+  `op run` resolves the references and hands the values to compose as in-memory env
+  vars; `docker-compose.prod.yml` reads them via `${VAR}` interpolation with `:?`
+  guards (a missing secret fails the deploy loudly instead of starting degraded).
+- **Service-account token** at `/etc/vaultrun/op-sa-token` (chmod 600, root) — the
+  single "secret zero" on the box; the service account has **read-only** access to
+  the `VaultRun-Prod` vault.
+- `op` CLI installed from the official 1Password apt repo (package `1password-cli`).
+
+**Deploy / ops** — always via the wrapper:
+```bash
+cd ~/vault-runner-api && git pull
+./op-compose.sh up -d --build      # deploy / redeploy
+./op-compose.sh ps                 # status
+./op-compose.sh logs -f api        # logs
+docker restart vaultrun-api        # plain restart needs no op (uses stored config)
+```
+**Reboot-safe:** Docker stores the already-resolved env in the container config, so
+`restart: unless-stopped` brings the stack back after a reboot **without** needing
+1Password — `op` is only needed when you run `./op-compose.sh up`.
+
+**Rotate a secret** (e.g. `JWT_SECRET`): change the value in 1Password →
+`./op-compose.sh up -d --force-recreate`. To rotate the **DB** password you must also
+`ALTER USER` on Postgres (its password only re-inits on an empty data dir).
+
+**First-time setup** (already done for prod, 2026-06-02):
+1. Create the vault `VaultRun-Prod` + the three *Password* items.
+2. Create a 1Password **service account** (a Teams/Business feature) with read
+   access to that vault; place its token at `/etc/vaultrun/op-sa-token` (chmod 600).
+3. Install the CLI: add the 1Password apt repo → `apt install 1password-cli`.
+4. Verify references resolve **without printing secrets**:
+   `OP_SERVICE_ACCOUNT_TOKEN=$(cat /etc/vaultrun/op-sa-token) op run --env-file=op.prod.env -- sh -c 'echo ${#JWT_SECRET}'`
+5. `./op-compose.sh up -d`, confirm `/health`, then remove any old plaintext `.env`.
+
+**Recover a `.env`** (emergency/local only): `op inject -i op.prod.env -o .env` with
+the token set — but prefer the wrapper so nothing ever hits disk.
 
 ---
 
