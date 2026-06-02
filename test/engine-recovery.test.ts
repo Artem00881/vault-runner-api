@@ -20,11 +20,21 @@ const recover = () => (engine as any).recoverInterruptedRounds();
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];
 const createdUserIds: string[] = [];
+const createdChainIds: string[] = [];
 
 async function seedRound() {
-  // a fairness seed + round are needed for the FK
+  // a fairness chain + seed + round are needed for the FKs
+  const chain = await prisma.fairnessChain.create({
+    data: {
+      epoch: 1_000_000 + Math.floor(Math.random() * 1_000_000), // synthetic, avoids real epochs
+      commitHash: "c" + randomUUID(),
+      length: 2,
+      salt: "s" + randomUUID(),
+      status: "exhausted",
+    },
+  });
   const seed = await prisma.fairnessSeed.create({
-    data: { chainIndex: Math.floor(Math.random() * 1e9), seedHash: "h" + randomUUID() },
+    data: { chainId: chain.id, chainIndex: 1, seedHash: "h" + randomUUID() },
   });
   const round = await prisma.round.create({
     data: {
@@ -35,6 +45,7 @@ async function seedRound() {
       bettingOpensAt: new Date(),
     },
   });
+  createdChainIds.push(chain.id);
   createdSeedIds.push(seed.id);
   createdRoundIds.push(round.id);
   return round.id;
@@ -65,6 +76,8 @@ afterAll(async () => {
       await prisma.round.deleteMany({ where: { id: { in: createdRoundIds } } });
     if (createdSeedIds.length)
       await prisma.fairnessSeed.deleteMany({ where: { id: { in: createdSeedIds } } });
+    if (createdChainIds.length)
+      await prisma.fairnessChain.deleteMany({ where: { id: { in: createdChainIds } } });
     if (createdUserIds.length)
       await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   } catch {

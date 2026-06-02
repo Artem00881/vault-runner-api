@@ -30,7 +30,7 @@ export class FairnessController {
   async round(@Param("id") id: string) {
     const round = await this.prisma.round.findUnique({
       where: { id },
-      include: { seed: true },
+      include: { seed: { include: { chain: true } } },
     });
     if (!round) throw new NotFoundException("round_not_found");
 
@@ -40,7 +40,7 @@ export class FairnessController {
     }
 
     const seed = round.seed.seed!;
-    const salt = round.seed.salt!;
+    const salt = round.seed.chain.salt!;
     const { crash, linkVerified } = this.fairness.verify(seed, salt);
     return {
       roundId: round.id,

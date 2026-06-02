@@ -99,17 +99,41 @@ model LedgerTransaction {
   @@map("ledger_transactions")
 }
 
+// One provably-fair "epoch": a seed chain with its own public commit + salt.
+// Epochs let the engine roll over to a fresh chain seamlessly (no exhaustion
+// stall) and let the salt source vary per epoch (random today; a blockchain
+// block-hash later — grind-proof).
+model FairnessChain {
+  id          String    @id @default(uuid()) @db.Uuid
+  epoch       Int       @unique
+  commitHash  String    @map("commit_hash") // seed[0] of this epoch (public commit)
+  length      Int
+  saltSource  String    @default("random") @map("salt_source") // "random" | "eth-block"
+  targetChain String?   @map("target_chain") // e.g. "ethereum" (block-hash salt)
+  targetBlock BigInt?   @map("target_block") // committed future block number
+  salt        String? // known at once (random) or after finality (eth-block)
+  status      String    @default("pending") // pending | active | exhausted
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  armedAt     DateTime? @map("armed_at") @db.Timestamptz(6) // when the salt became known
+
+  seeds FairnessSeed[]
+
+  @@map("fairness_chains")
+}
+
 model FairnessSeed {
   id         String    @id @default(uuid()) @db.Uuid
-  chainIndex Int       @unique @map("chain_index")
-  seedHash   String    @map("seed_hash") // SHA256(seed), the public commit
+  chainId    String    @map("chain_id") @db.Uuid
+  chainIndex Int       @map("chain_index")
+  seedHash   String    @map("seed_hash") // SHA256(seed) === previous seed (chain link)
   seed       String? // revealed only after the round it serves
-  salt       String?
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   revealedAt DateTime? @map("revealed_at") @db.Timestamptz(6)
 
+  chain  FairnessChain @relation(fields: [chainId], references: [id])
   rounds Round[]
 
+  @@unique([chainId, chainIndex])
   @@map("fairness_seeds")
 }
 

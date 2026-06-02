@@ -56,6 +56,7 @@ services:
       OPERATOR_WALLET_TIMEOUT_MS: "${OPERATOR_WALLET_TIMEOUT_MS:-3000}"
       THROTTLE_LIMIT: "${THROTTLE_LIMIT:-120}"
       THROTTLE_TTL_MS: "${THROTTLE_TTL_MS:-60000}"
+      FAIRNESS_CHAIN_LENGTH: "${FAIRNESS_CHAIN_LENGTH:-10000}"
     # Bind to loopback only — the app is NOT exposed to the public internet.
     # A host-level Caddy reverse proxy (TLS + Cloudflare Authenticated Origin
     # Pulls) terminates :443 and forwards to 127.0.0.1:3001. See DEPLOY.md

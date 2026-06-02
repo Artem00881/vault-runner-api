@@ -13,7 +13,7 @@ afterAll(async () => prisma.$disconnect());
 test("persisted round crash points match the provably-fair recomputation", async () => {
   const rounds = await prisma.round.findMany({
     where: { status: { in: ["crashed", "settling", "completed"] } },
-    include: { seed: true },
+    include: { seed: { include: { chain: true } } },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
@@ -28,8 +28,8 @@ test("persisted round crash points match the provably-fair recomputation", async
     // Only revealed rounds are verifiable. Skip any whose seed/salt is not
     // revealed yet — e.g. synthetic rounds other tests leave behind (the
     // recovery test closes rounds without ever revealing a salt).
-    if (!r.seed?.seed || !r.seed?.salt) continue;
-    const recomputed = computeCrash(r.seed.seed, r.seed.salt);
+    if (!r.seed?.seed || !r.seed?.chain?.salt) continue;
+    const recomputed = computeCrash(r.seed.seed, r.seed.chain.salt);
     expect(Number(r.crashPoint)).toBe(recomputed);
     verified++;
   }
