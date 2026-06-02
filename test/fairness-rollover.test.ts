@@ -48,8 +48,8 @@ test("active epoch exhaustion rolls over to a fresh epoch (no stall)", async () 
 
   process.env.FAIRNESS_CHAIN_LENGTH = "3"; // tiny epochs: seeds [0,1,2]; only 1,2 are playable
 
-  // --- Epoch A ---
-  await fairness.ensureChain(3);
+  // --- Epoch A --- (length comes from FAIRNESS_CHAIN_LENGTH set above)
+  await fairness.ensureChain();
   const a = await fairness.getCurrentCommit();
   expect(a).not.toBeNull();
   const chainA = await prisma.fairnessChain.findFirst({ where: { epoch: a!.epoch } });

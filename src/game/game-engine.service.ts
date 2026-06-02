@@ -167,6 +167,9 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async enterWaiting() {
+    // Best-effort fairness upkeep (arm pending epochs, pre-commit the next epoch)
+    // — fire-and-forget so it never delays the round; it guards its own errors.
+    void this.fairness.maintain();
     // Allocate the seed + compute the (hidden) crash, then open a fresh round.
     const seed = await this.fairness.allocateSeed();
     const crashPoint = this.fairness.crashForSeed(seed);
