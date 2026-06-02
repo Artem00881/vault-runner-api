@@ -1,16 +1,26 @@
 # Vault Run — full production stack (API + Postgres + Redis).
-# Usage on the VPS:
-#   cp .env.production.example .env   # then edit secrets
-#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Secrets (POSTGRES_PASSWORD, JWT_SECRET, SENTRY_DSN) are NOT stored on disk.
+# They are injected at deploy time from 1Password by the op-compose.sh wrapper,
+# which runs `op run` to resolve the op:// references in op.prod.env and pass the
+# values into this compose run as environment variables. See DEPLOY.md §12.
+#
+# Usage on the VPS — ALWAYS go through the wrapper so secrets are injected:
+#   ./op-compose.sh up -d --build     # deploy / redeploy
+#   ./op-compose.sh ps                # status
+#   ./op-compose.sh logs -f api       # logs
+#
+# Running `docker compose -f docker-compose.prod.yml ...` directly will fail with
+# "POSTGRES_PASSWORD not set" — that is the intended fail-safe (secrets missing).
 services:
   postgres:
     image: postgres:16-alpine
     container_name: vaultrun-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-vault}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vault}
-      POSTGRES_DB: ${POSTGRES_DB:-vaultrun}
+      POSTGRES_USER: "${POSTGRES_USER:-vault}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set - deploy via ./op-compose.sh}"
+      POSTGRES_DB: "${POSTGRES_DB:-vaultrun}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -31,11 +41,19 @@ services:
     build: .
     container_name: vaultrun-api
     restart: unless-stopped
-    env_file: .env
+    # No env_file — secrets come from 1Password via op-compose.sh (op run), and
+    # non-secret config has safe production defaults below.
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:-vault}@postgres:5432/${POSTGRES_DB:-vaultrun}?schema=public
-      REDIS_URL: redis://redis:6379
-      PORT: 3001
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set - deploy via ./op-compose.sh}@postgres:5432/${POSTGRES_DB:-vaultrun}?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      PORT: "3001"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET not set - deploy via ./op-compose.sh}"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+      SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
+      CORS_ORIGIN: "${CORS_ORIGIN:-https://vaultrun.app}"
+      GAME_CURRENCY: "${GAME_CURRENCY:-DEMO}"
+      WALLET_PROVIDER_TYPE: "${WALLET_PROVIDER_TYPE:-internal}"
+      OPERATOR_WALLET_TIMEOUT_MS: "${OPERATOR_WALLET_TIMEOUT_MS:-3000}"
     # Bind to loopback only — the app is NOT exposed to the public internet.
     # A host-level Caddy reverse proxy (TLS + Cloudflare Authenticated Origin
     # Pulls) terminates :443 and forwards to 127.0.0.1:3001. See DEPLOY.md
