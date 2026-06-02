@@ -5,10 +5,13 @@
 // hash across several public RPC endpoints and only trusts a value when enough
 // of them agree, so no single endpoint can spoof a salt.
 
+// Reputable keyless public mainnet RPCs (verified reachable 2026-06). Override
+// with ETH_RPC_URLS. The oracle requires >=2 of them to agree on a hash.
 const DEFAULT_RPCS = [
   "https://ethereum-rpc.publicnode.com",
-  "https://cloudflare-eth.com",
-  "https://rpc.ankr.com/eth",
+  "https://eth.drpc.org",
+  "https://eth-mainnet.public.blastapi.io",
+  "https://eth-pokt.nodies.app",
 ];
 
 function rpcUrls(): string[] {
