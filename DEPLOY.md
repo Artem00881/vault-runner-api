@@ -393,6 +393,62 @@ the token set — but prefer the wrapper so nothing ever hits disk.
 
 ---
 
+## 13. Staging environment — built 2026-06-02
+
+A separate, **isolated** copy of the stack for load/chaos testing and pre-prod
+validation — never against the live demo DB.
+
+**Host:** a dedicated **Hetzner Cloud** VPS (CPX22 — 2 vCPU AMD / 4 GB, Falkenstein,
+Ubuntu 24.04), IP `178.105.149.146`. SSH `ssh vaultrun-staging` (Mac alias → root +
+the same `~/.ssh/vaultrun_ed25519` key). Key-only SSH, ufw 22 + 443-from-Cloudflare,
+Docker + `op` CLI installed exactly like prod.
+
+**Stack:** the SAME `docker-compose.prod.yml`, deployed via **`op-compose.staging.sh`**
+(thin wrapper that sets `OP_ENV_FILE=op.staging.env`). Secrets come from a separate
+1Password vault **`VaultRun-Staging`** (`POSTGRES_PASSWORD`, `JWT_SECRET`; staging runs
+without Sentry) via its own read-only service-account token at
+`/etc/vaultrun/op-sa-token` on the staging box. Own Postgres/Redis volumes — fully
+isolated from prod.
+
+**Edge:** mirrors prod exactly — host **Caddy** :443 with the same Cloudflare Origin
+cert (`*.vaultrun.app` covers it) + **mTLS** (`require_and_verify`, trust `cf-ca.crt`),
+behind Cloudflare (Full strict + zone-level Authenticated Origin Pulls). Public URL
+**https://staging-api.vaultrun.app** (Cloudflare A record `staging-api` → staging IP,
+proxied). `cf-ufw-allow.timer` keeps :443 open only to Cloudflare IPs.
+
+**Deploy / redeploy:**
+```bash
+ssh vaultrun-staging
+cd ~/vault-runner-api && git pull
+./op-compose.staging.sh up -d --build
+curl -s http://127.0.0.1:3001/health                 # local
+curl -s https://staging-api.vaultrun.app/health      # through the edge
+```
+
+**Load testing (k6).** Run ON the staging box against localhost (bypasses Cloudflare;
+writes to the staging DB, never prod). Raise the per-IP rate limit for a single-source
+test, then revert:
+```bash
+cd ~/vault-runner-api
+THROTTLE_LIMIT=2000000 ./op-compose.staging.sh up -d        # raise limit for the test
+docker run --rm --network host -e BASE_URL=http://localhost:3001 -e VUS=50 \
+  -v "$PWD/load:/load" grafana/k6 run /load/k6-http.js
+./op-compose.staging.sh up -d                              # revert to prod-default (120/min)
+```
+Result 2026-06-02: **0% errors, read p95≈34 ms at 50 VUs / ~186 req/s** (gates
+p95<200 / p99<500 — passed comfortably). Chaos: Postgres-down → `/health` 503 →
+recovers; API restart → engine recovers in-flight rounds (Phase 1.4). The WebSocket
+bet/cash-out hot path is load-tested separately with `bun scripts/load-test.ts`.
+
+**Rate limiting** (`THROTTLE_LIMIT` / `THROTTLE_TTL_MS`). The API rate-limits per
+**real client IP** — `CF-Connecting-IP` behind the mTLS edge (see
+`src/common/ip-throttler.guard.ts`), default 120 requests / 60 s. Both are env-tunable
+(wired into `docker-compose.prod.yml`); raise `THROTTLE_LIMIT` for single-source load
+tests. Without this the throttler would track the reverse-proxy IP and rate-limit all
+users as one bucket.
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the
