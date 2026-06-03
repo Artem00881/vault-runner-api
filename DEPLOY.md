@@ -308,11 +308,15 @@ update `networks.app.name` in `monitoring/docker-compose.yml`.
   to a Telegram bot. The dead-man's-switch metric is written by the backup script
   (§9) into `/etc/vaultrun/node-textfile/` and exposed by node-exporter.
 - **After editing `alerts.yml`** (adding/changing a rule — e.g. `PayoutsPending`/
-  `PayoutStuck`) you must **reload Prometheus** on the monitoring host for it to take
-  effect: `git pull` on the VPS, then either `curl -X POST
-  http://127.0.0.1:9090/-/reload` or `docker compose -f monitoring/docker-compose.yml
-  up -d` (recreates Prometheus). The metrics those rules read ship with the normal
-  backend deploy.
+  `PayoutStuck`) you must reload the rules on the monitoring host for them to take
+  effect: `git pull` on the VPS, then **restart the Prometheus container**:
+  `docker compose -f monitoring/docker-compose.yml restart prometheus`. Confirm the
+  rule is live: `curl -s http://127.0.0.1:9090/api/v1/rules | grep PayoutStuck`.
+  **OPS GOTCHA (verified on prod 2026-06-03):** the hot-reload endpoint
+  `curl -X POST http://127.0.0.1:9090/-/reload` returns **HTTP 403** here — our
+  Prometheus is **NOT** started with `--web.enable-lifecycle`, so `/-/reload` is
+  disabled. Use the `restart prometheus` command above instead (do NOT rely on
+  `/-/reload`). The metrics those rules read ship with the normal backend deploy.
 
 **Create the Telegram bot (one-time):**
 1. In Telegram, message **@BotFather** → `/newbot` → follow prompts → copy the
@@ -324,7 +328,9 @@ update `networks.app.name` in `monitoring/docker-compose.yml`.
    monitoring/alertmanager/alertmanager.yml` and paste the token + chat id.
 
 **Deploy alerting:** `docker compose -f monitoring/docker-compose.yml up -d`
-(adds Alertmanager, reloads Prometheus rules). Check rules at
+(adds Alertmanager). To pick up changed Prometheus **rules**, restart that container
+(`docker compose -f monitoring/docker-compose.yml restart prometheus`) — the
+`/-/reload` endpoint is disabled here (see the OPS GOTCHA above). Check rules at
 `http://127.0.0.1:9090/alerts`, Alertmanager at scrape-internal `alertmanager:9093`.
 
 **Status:** G-1 (Prometheus + node-exporter) ✓, G-2 (Grafana + dashboard) ✓,
