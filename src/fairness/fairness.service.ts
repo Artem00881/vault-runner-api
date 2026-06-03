@@ -11,6 +11,17 @@ function chainLength(): number {
   return Number.isFinite(env) && env >= 2 ? env : 10_000;
 }
 
+/**
+ * Real-money grind-proofing guard (audit M6). When set, the engine will NEVER open
+ * rounds on a server-generated random-salt fallback (which would be grindable) or
+ * orphan a pre-committed block epoch — it STALLS until the committed block salt
+ * resolves. Default OFF: the demo/play-money build favours availability (a transparent
+ * random fallback, surfaced via saltSource) since there's no real money to grind for.
+ */
+function requireBlockSalt(): boolean {
+  return process.env.FAIRNESS_REQUIRE_BLOCK_SALT === "true";
+}
+
 function sha256OfUtf8(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
@@ -45,12 +56,22 @@ export class FairnessService {
 
   /** Return the active epoch, creating/promoting one if needed (random fallback). */
   private async ensureActiveChain() {
+    const strict = requireBlockSalt();
     const active = await this.findActive();
-    if (active) return active;
+    // Strict (real-money): never SERVE a non-block-salt epoch — retire a pre-existing
+    // random active/armed epoch (e.g. one left by a play→real-money flip) and roll to a
+    // block epoch, instead of serving up to a full chain of grindable rounds (audit M6/M1).
+    if (active) {
+      if (strict && active.saltSource !== "eth-block") await this.retireChain(active);
+      else return active;
+    }
 
     // Promote an already-armed epoch (salt known) to active.
     const armed = await this.prisma.fairnessChain.findFirst({ where: { status: "armed" }, orderBy: { epoch: "asc" } });
-    if (armed) return this.promote(armed.id);
+    if (armed) {
+      if (strict && armed.saltSource !== "eth-block") await this.retireChain(armed);
+      else return this.promote(armed.id);
+    }
 
     // Try to arm a pending epoch now (its block may already be finalized).
     const pending = await this.prisma.fairnessChain.findFirst({ where: { status: "pending" }, orderBy: { epoch: "asc" } });
@@ -62,9 +83,15 @@ export class FairnessService {
       }
     }
 
-    // Nothing servable → open a fresh active epoch (random fallback if the real
-    // salt isn't ready, so play starts immediately).
+    // Nothing servable → open a fresh active epoch (random fallback if the real salt
+    // isn't ready; strict refuses the random fallback → returns null so the caller stalls).
     return this.createEpoch(true);
+  }
+
+  /** Retire a chain (mark exhausted) — drops a non-block-salt epoch under strict mode. */
+  private async retireChain(chain: { id: string; epoch: number; saltSource: string }) {
+    await this.prisma.fairnessChain.update({ where: { id: chain.id }, data: { status: "exhausted" } });
+    this.log.warn(`epoch ${chain.epoch}: "${chain.saltSource}"-salt epoch retired under FAIRNESS_REQUIRE_BLOCK_SALT (not grind-proof)`);
   }
 
   private async promote(id: string) {
@@ -80,15 +107,28 @@ export class FairnessService {
   private async createEpoch(activate: boolean) {
     const max = await this.prisma.fairnessChain.aggregate({ _max: { epoch: true } });
     const epoch = (max._max.epoch ?? -1) + 1;
+    const strict = requireBlockSalt();
 
     let c: SaltCommitment;
     try {
       c = await this.saltProvider.commit();
     } catch (e) {
+      // Real-money: don't mint a grindable random epoch — stall until the oracle is back.
+      if (strict) {
+        this.log.warn(`epoch ${epoch}: salt commit failed and FAIRNESS_REQUIRE_BLOCK_SALT set — refusing random fallback (${String(e)})`);
+        return null;
+      }
       this.log.warn(`epoch ${epoch}: salt commit failed (${String(e)}) → random fallback`);
       c = await this.fallback.commit();
     }
     if (activate && !c.salt) {
+      // The committed (block) salt isn't resolved yet. In real-money mode do NOT substitute
+      // a grindable random salt or orphan the pre-committed block epoch — return null so the
+      // caller stalls and retries until the block finalizes (audit M6).
+      if (strict) {
+        this.log.warn(`epoch ${epoch}: ${c.source} salt not ready and FAIRNESS_REQUIRE_BLOCK_SALT set — stalling, no random fallback`);
+        return null;
+      }
       this.log.warn(`epoch ${epoch}: ${c.source} salt not ready → random fallback so play continues`);
       c = await this.fallback.commit();
     }
@@ -180,11 +220,13 @@ export class FairnessService {
    */
   async allocateSeed() {
     const chain = await this.ensureActiveChain();
+    if (!chain) return null; // STALL: real-money guard, committed block salt not ready (audit M6)
     let seed = await this.nextUnusedSeed(chain.id);
     if (!seed) {
       await this.prisma.fairnessChain.update({ where: { id: chain.id }, data: { status: "exhausted" } });
       this.log.warn(`fairness epoch ${chain.epoch} exhausted → rolling over`);
       const next = await this.ensureActiveChain(); // promotes armed / arms pending / fallback
+      if (!next) return null; // STALL on rollover: the next block epoch hasn't resolved yet
       seed = await this.nextUnusedSeed(next.id);
       if (!seed) throw new Error("fairness_chain_exhausted"); // unreachable (fresh epoch)
     }

@@ -247,6 +247,14 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     void this.fairness.maintain();
     // Allocate the seed + compute the (hidden) crash, then open a fresh round.
     const seed = await this.fairness.allocateSeed();
+    if (!seed) {
+      // No servable epoch yet — real-money is waiting for the committed block salt to
+      // resolve (audit M6). Never open a round on a grindable random salt; retry shortly
+      // (the maintain() above arms the block epoch once its block finalizes). Not an error.
+      this.log.warn("fairness: awaiting committed block salt before opening a round (FAIRNESS_REQUIRE_BLOCK_SALT)");
+      this.schedule(1500, () => this.safe(() => this.enterWaiting()));
+      return;
+    }
     const crashPoint = this.fairness.crashForSeed(seed);
     const round = await this.prisma.round.create({
       data: {
