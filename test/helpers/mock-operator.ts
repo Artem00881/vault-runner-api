@@ -65,7 +65,10 @@ export class MockOperator implements OperatorWalletApi {
     const after = bal + delta;
     if (after < 0) throw new OperatorInsufficientFunds();
     this.balances.set(k, after);
-    const res: OperatorWalletResponse = { operatorTxId: randomUUID(), balance: after };
+    // operatorTxId is an arbitrary operator-side string, NOT a uuid (Bet.debitTxId/
+    // payoutTxId are text) — keep the mock realistic so any DB-backed operator test
+    // exercises the non-uuid path instead of accidentally passing on a uuid.
+    const res: OperatorWalletResponse = { operatorTxId: "op-tx-" + randomUUID(), balance: after };
     this.applied.set(txId, res);
     this.deltas.set(txId, delta); // remember for an exact rollback
     return res;
@@ -120,7 +123,7 @@ export class MockOperator implements OperatorWalletApi {
       this.applied.delete(req.transactionId);
       this.deltas.delete(req.transactionId);
     }
-    return { operatorTxId: randomUUID(), balance: this.balances.get(k) ?? 0 };
+    return { operatorTxId: "op-tx-" + randomUUID(), balance: this.balances.get(k) ?? 0 };
   }
 
   /** test helper */
