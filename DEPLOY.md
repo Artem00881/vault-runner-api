@@ -301,10 +301,18 @@ update `networks.app.name` in `monitoring/docker-compose.yml`.
 **Alerting (G-3): Prometheus rules → Alertmanager → Telegram.**
 - `prometheus/alerts.yml` — rules: `BackupStale` (no backup metric fresh <7h),
   `BackupMetricMissing`, `ApiDown`, `EngineStalled` (no rounds 15m — e.g. fairness
-  chain exhausted), `ErrorSpike`, `HostDiskLow`, `HostMemoryHigh`.
+  chain exhausted), `ErrorSpike`, `HostDiskLow`, `HostMemoryHigh`, `PayoutsPending`
+  (`vaultrun_pending_payouts > 0` for 15m), `PayoutStuck`
+  (`vaultrun_pending_payout_oldest_seconds > 3600`).
 - `alertmanager/alertmanager.yml` (gitignored; copy from `.yml.example`) — routes
   to a Telegram bot. The dead-man's-switch metric is written by the backup script
   (§9) into `/etc/vaultrun/node-textfile/` and exposed by node-exporter.
+- **After editing `alerts.yml`** (adding/changing a rule — e.g. `PayoutsPending`/
+  `PayoutStuck`) you must **reload Prometheus** on the monitoring host for it to take
+  effect: `git pull` on the VPS, then either `curl -X POST
+  http://127.0.0.1:9090/-/reload` or `docker compose -f monitoring/docker-compose.yml
+  up -d` (recreates Prometheus). The metrics those rules read ship with the normal
+  backend deploy.
 
 **Create the Telegram bot (one-time):**
 1. In Telegram, message **@BotFather** → `/newbot` → follow prompts → copy the

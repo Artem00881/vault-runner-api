@@ -76,52 +76,92 @@ export class BetsService {
     const existing = await this.prisma.bet.findUnique({
       where: { roundId_userId_panel: { roundId, userId, panel } },
     });
-    if (existing) return { ok: false, reason: "already_bet", panel };
-
-    // House risk: reject if this bet would push the round's worst-case payout
-    // past the bankroll exposure cap (computed from all active bets this round).
-    const roundBets = await this.prisma.bet.findMany({
-      where: { roundId, status: "active" },
-      select: { amount: true },
-    });
-    const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
-    const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
-    if (!expCheck.ok) { this.metrics.recordRejected(expCheck.reason); return { ok: false, reason: expCheck.reason, panel }; }
+    // A non-'reserving' row = a real prior bet → reject. A 'reserving' row may be a
+    // concurrent in-flight attempt or one whose debit is failing (about to be
+    // released) — don't hard-reject a retry here; the in-lock unique insert (P2002)
+    // is the authoritative dedup (audit H1 review).
+    if (existing && existing.status !== "reserving") return { ok: false, reason: "already_bet", panel };
 
     const wallet = await this.wallet(userId);
     const betId = randomUUID();
-    // Idempotency key is bound to the LOGICAL bet (round+user+panel), not the
-    // per-attempt id, so a concurrent/retried duplicate dedups in the ledger
-    // instead of charging twice for one bet (audit C1).
-    const debitKey = `bet:${roundId}:${userId}:${panel}:debit`;
+
+    // PHASE 1 — RESERVE (audit H1). Serialize all placeBet for THIS round on a
+    // per-round advisory lock so the exposure check + the reservation are atomic:
+    // concurrent bets can no longer all read the same low exposure and collectively
+    // blow past the bankroll cap. We insert a "reserving" slot (not yet debited) and
+    // release the lock at tx end — we do NOT hold it across the debit (a slow
+    // operator-wallet call must never freeze the whole round's betting window).
+    let rejectReason: string | null = null;
     try {
-      const tx = await this.wallet$.debit(wallet.id, amt, "bet_debit", debitKey, {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${roundId}))`;
+        const roundBets = await tx.bet.findMany({
+          where: { roundId, status: { in: ["active", "reserving"] } },
+          select: { amount: true },
+        });
+        const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
+        const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
+        if (!expCheck.ok) { rejectReason = expCheck.reason; throw new Error("reserve_rejected"); }
+        await tx.bet.create({
+          data: {
+            id: betId,
+            roundId,
+            userId,
+            walletId: wallet.id,
+            panel,
+            amount: amt,
+            autoCashout: autoCashout ?? null,
+            status: "reserving",
+          },
+        });
+      });
+    } catch (e: any) {
+      if (rejectReason) { this.metrics.recordRejected(rejectReason); return { ok: false, reason: rejectReason, panel }; }
+      // Lost a concurrent race for the same (round,user,panel) — the slot exists.
+      if (e?.code === "P2002") return { ok: false, reason: "already_bet", panel };
+      this.metrics.recordRejected("bet_failed");
+      return { ok: false, reason: "bet_failed", panel };
+    }
+
+    // PHASE 2 — DEBIT (outside the lock). Idempotency key is bound to the LOGICAL
+    // bet (round+user+panel), not the per-attempt id, so a concurrent/retried
+    // duplicate dedups in the ledger instead of charging twice (audit C1).
+    const debitKey = `bet:${roundId}:${userId}:${panel}:debit`;
+    let tx: WalletTxResult;
+    try {
+      tx = await this.wallet$.debit(wallet.id, amt, "bet_debit", debitKey, {
         refType: "bet",
         refId: betId,
       });
-      await this.prisma.bet.create({
-        data: {
-          id: betId,
-          roundId,
-          userId,
-          walletId: wallet.id,
-          panel,
-          amount: amt,
-          autoCashout: autoCashout ?? null,
-          status: "active",
-          debitTxId: tx.id,
-        },
-      });
-      this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
-      return { ok: true, panel, balance: Number(tx.balanceAfter), betId, currency: wallet.currency };
     } catch (e: any) {
-      // Lost a concurrent race for the same (round,user,panel): the bet row
-      // already exists (P2002) and the debit above was deduped — no double charge.
-      if (e?.code === "P2002") return { ok: false, reason: "already_bet", panel };
+      // Debit FAILED → NO money moved → release the reservation (drop the slot so
+      // its exposure is freed for other bets).
+      await this.prisma.bet.delete({ where: { id: betId } }).catch(() => {});
       const reason = e?.message === "insufficient_balance" ? "insufficient_balance" : "bet_failed";
       this.metrics.recordRejected(reason);
       return { ok: false, reason, panel };
     }
+
+    // Debit SUCCEEDED (money moved). Activate the slot — and NEVER delete on a
+    // failure here, or we'd strand a real debit (money out, no bet). Retry the
+    // local flip; if it persistently fails, stamp the txId best-effort and leave
+    // the row RECOVERABLE — boot recovery refunds a 'reserving' bet that carries a
+    // ledger debit (audit H1 review: don't destroy a paid bet).
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.prisma.bet.update({ where: { id: betId }, data: { status: "active", debitTxId: tx.id } });
+        this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
+        return { ok: true, panel, balance: Number(tx.balanceAfter), betId, currency: wallet.currency };
+      } catch (e: any) {
+        if (attempt >= 3) {
+          await this.prisma.bet.update({ where: { id: betId }, data: { debitTxId: tx.id } }).catch(() => {});
+          this.metrics.recordError("bet_activate");
+          this.log.error(`bet ${betId} debited (tx ${tx.id}) but activation failed — left recoverable for refund`);
+          return { ok: false, reason: "bet_failed", panel };
+        }
+      }
+    }
+    return { ok: false, reason: "bet_failed", panel }; // unreachable (loop returns)
   }
 
   /** Cancel an active bet before the round starts (refund). */

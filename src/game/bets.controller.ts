@@ -45,7 +45,8 @@ export class BetsController {
   @Get("history")
   async history(@CurrentUserId() userId: string) {
     const rows = await this.prisma.bet.findMany({
-      where: { userId },
+      // exclude the transient pre-debit 'reserving' state — not a placed bet yet.
+      where: { userId, status: { not: "reserving" } },
       orderBy: { createdAt: "desc" },
       take: 50,
     });

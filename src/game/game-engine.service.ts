@@ -79,6 +79,8 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
    * can't double-pay). New rounds only start after this.
    */
   private async recoverInterruptedRounds() {
+    // H1: refund/clear stale 'reserving' bets first (regardless of round status).
+    await this.recoverReservingBets();
     const OPEN: Phase[] = ["waiting", "betting", "running", "crashed", "settling"];
     const stuck = await this.prisma.round.findMany({
       where: { status: { in: OPEN as string[] } },
@@ -109,6 +111,55 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
         where: { id: r.id },
         data: { status: "completed", settledAt: new Date() },
       });
+    }
+  }
+
+  /**
+   * H1 recovery: 'reserving' bets are stale on boot (no placeBet is in flight
+   * before the engine starts). A reserving row whose debit actually applied
+   * (money moved but the flip to active never completed) is REFUNDED; one with no
+   * ledger debit moved no money — just drop it. The LEDGER (deterministic debit
+   * key) is the source of truth, so this is robust even if debitTxId was never
+   * stamped. Runs regardless of round status (an orphan can sit on a completed
+   * round). Idempotent refund key, so a double boot can't double-refund.
+   */
+  private async recoverReservingBets() {
+    const reserving = await this.prisma.bet.findMany({ where: { status: "reserving" } });
+    if (reserving.length === 0) return;
+    this.log.warn(`recovering ${reserving.length} stale 'reserving' bet(s)`);
+    for (const bet of reserving) {
+      const debitKey = `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`;
+      // Undo any OPERATOR-side charge for this slot first: rollback is idempotent —
+      // it no-ops if the operator never applied the debit and reverses it if it did
+      // (the Phase-0.2 ambiguity model). For the internal ledger this is a no-op
+      // (internal refunds happen via the credit below). This is what makes recovery
+      // correct in OPERATOR mode, where the debit writes NO local ledger row
+      // (audit H1 re-review, Finding 1).
+      try {
+        await this.wallet$.rollback(bet.walletId, debitKey, { refType: "bet", refId: bet.id });
+      } catch (e: any) {
+        this.log.error(`reserving rollback failed for bet ${bet.id}: ${e?.message}`);
+      }
+      // Internal ledger: if the debit actually applied (a ledger row exists), refund
+      // it (idempotent restart_refund — a double boot can't double-pay).
+      const debited = await this.prisma.ledgerTransaction.findUnique({ where: { idempotencyKey: debitKey } });
+      if (debited) {
+        try {
+          await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
+            refType: "bet",
+            refId: bet.id,
+          });
+          await this.prisma.bet.update({
+            where: { id: bet.id },
+            data: { status: "cancelled", settledAt: new Date() },
+          });
+        } catch (e: any) {
+          this.log.error(`reserving refund failed for bet ${bet.id}: ${e?.message}`);
+        }
+      } else {
+        // No internal debit — any operator charge was rolled back above; drop the slot.
+        await this.prisma.bet.delete({ where: { id: bet.id } }).catch(() => {});
+      }
     }
   }
 
