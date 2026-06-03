@@ -149,12 +149,29 @@ export class BetsService {
     // ledger debit (audit H1 review: don't destroy a paid bet).
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await this.prisma.bet.update({ where: { id: betId }, data: { status: "active", debitTxId: tx.id } });
+        // Flip is a compare-and-swap on 'reserving' (mirrors the cashOut claim, audit M1).
+        // If recovery reclaimed this slot concurrently (a stranded-sweep flipped it out of
+        // 'reserving' → 'cancelling'), count===0 — DON'T leave a phantom active bet; recovery
+        // reverses the debit. (Unreachable under the age gate; defense-in-depth for
+        // operator/scale, audit Low-1.)
+        const flip = await this.prisma.bet.updateMany({
+          where: { id: betId, status: "reserving" },
+          data: { status: "active", debitTxId: tx.id },
+        });
+        if (flip.count === 0) {
+          this.metrics.recordError("bet_activate");
+          this.log.warn(`bet ${betId} reclaimed by recovery during activation — reporting failed (debit reversed by recovery)`);
+          return { ok: false, reason: "bet_failed", panel };
+        }
         this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
         return { ok: true, panel, balance: Number(tx.balanceAfter), betId, currency: wallet.currency };
       } catch (e: any) {
         if (attempt >= 3) {
-          await this.prisma.bet.update({ where: { id: betId }, data: { debitTxId: tx.id } }).catch(() => {});
+          // Transient DB failure flipping the row — stamp the txId best-effort (only while
+          // still 'reserving') and leave the row recoverable for the refund (audit H1).
+          await this.prisma.bet
+            .updateMany({ where: { id: betId, status: "reserving" }, data: { debitTxId: tx.id } })
+            .catch(() => {});
           this.metrics.recordError("bet_activate");
           this.log.error(`bet ${betId} debited (tx ${tx.id}) but activation failed — left recoverable for refund`);
           return { ok: false, reason: "bet_failed", panel };

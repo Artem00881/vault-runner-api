@@ -116,64 +116,75 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * H1 recovery: reverse a stranded 'reserving' slot. One whose debit actually
-   * applied (money moved but the flip to active never completed) is REFUNDED; one
-   * with no ledger debit moved no money — just drop it. The LEDGER (deterministic
-   * debit key) is the source of truth, so this is robust even if debitTxId was
-   * never stamped. Operator charges are reversed via the idempotent wallet$.rollback
-   * first (no-op internal). Runs regardless of round status (an orphan can sit on a
-   * completed round). Idempotent refund key, so a double pass can't double-refund.
+   * Recovery for stranded reservation slots ('reserving') and any left mid-reversal
+   * ('cancelling'). A slot whose debit actually applied (money moved but the flip to
+   * 'active' never completed) is REFUNDED; one with no ledger debit moved no money —
+   * just drop it. The LEDGER (deterministic debit key) is the source of truth, so this
+   * is robust even if debitTxId was never stamped. Operator charges are reversed via the
+   * idempotent wallet$.rollback (no-op internal). Idempotent refund key, so a double pass
+   * can't double-refund. Runs regardless of round status.
+   *
+   * Claim-first (audit Low-1): each slot is atomically claimed 'reserving' → 'cancelling'
+   * (a recoverable in-progress state, like payout_pending) BEFORE any money is reversed.
+   * A slot that concurrently flipped to 'active' (a real activation — placeBet's flip is
+   * ALSO a CAS on 'reserving') loses the claim and is NEVER reversed, so recovery is
+   * correct INDEPENDENT of the age-gate timing margin. A crash/failure mid-reversal
+   * leaves the row 'cancelling', which a later pass re-selects and re-reverses
+   * (idempotent) — never stranding an owed refund.
    *
    * @param olderThanMs only recover slots older than this (by createdAt). 0 (the
-   *   default, used at boot) recovers ALL reserving slots — safe there because no
-   *   placeBet is in flight before the engine starts. The periodic gateway sweep
-   *   passes a threshold (RESERVING_STALE_SEC) so a placeBet legitimately mid-flight
-   *   (reserve→debit→activate, a few seconds) is NEVER swept — only genuinely
-   *   stranded slots are. Returns how many were processed.
+   *   default, used at boot) recovers ALL slots — safe there because no placeBet is in
+   *   flight before the engine starts. The periodic gateway sweep passes a threshold
+   *   (RESERVING_STALE_SEC) so a placeBet legitimately mid-flight is never swept. Returns
+   *   how many slots were reversed.
    */
   async recoverReservingBets(olderThanMs = 0): Promise<number> {
-    const where: Prisma.BetWhereInput = { status: "reserving" };
+    const where: Prisma.BetWhereInput = { status: { in: ["reserving", "cancelling"] } };
     if (olderThanMs > 0) where.createdAt = { lt: new Date(Date.now() - olderThanMs) };
-    const reserving = await this.prisma.bet.findMany({ where });
-    if (reserving.length === 0) return 0;
+    const slots = await this.prisma.bet.findMany({ where });
+    if (slots.length === 0) return 0;
     this.log.warn(
-      `recovering ${reserving.length} ${olderThanMs > 0 ? `stale (>${Math.round(olderThanMs / 1000)}s) ` : ""}'reserving' bet(s)`,
+      `recovering ${slots.length} ${olderThanMs > 0 ? `stale (>${Math.round(olderThanMs / 1000)}s) ` : ""}'reserving'/'cancelling' slot(s)`,
     );
-    for (const bet of reserving) {
+    let recovered = 0;
+    for (const bet of slots) {
       const debitKey = `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`;
-      // Undo any OPERATOR-side charge for this slot first: rollback is idempotent —
-      // it no-ops if the operator never applied the debit and reverses it if it did
-      // (the Phase-0.2 ambiguity model). For the internal ledger this is a no-op
-      // (internal refunds happen via the credit below). This is what makes recovery
-      // correct in OPERATOR mode, where the debit writes NO local ledger row
-      // (audit H1 re-review, Finding 1).
-      try {
-        await this.wallet$.rollback(bet.walletId, debitKey, { refType: "bet", refId: bet.id });
-      } catch (e: any) {
-        this.log.error(`reserving rollback failed for bet ${bet.id}: ${e?.message}`);
+      // CLAIM atomically: 'reserving' → 'cancelling' only if STILL reserving. A slot that
+      // concurrently flipped to 'active' (placeBet's flip is ALSO a CAS on 'reserving')
+      // loses here and is left untouched — recovery never reverses a live bet (audit
+      // Low-1). A row already 'cancelling' was claimed by a prior pass that crashed/failed
+      // mid-reversal → fall through and re-attempt the idempotent reversal.
+      if (bet.status === "reserving") {
+        const claim = await this.prisma.bet.updateMany({
+          where: { id: bet.id, status: "reserving" },
+          data: { status: "cancelling" },
+        });
+        if (claim.count === 0) continue; // raced to 'active' — leave the live bet alone
       }
-      // Internal ledger: if the debit actually applied (a ledger row exists), refund
-      // it (idempotent restart_refund — a double boot can't double-pay).
-      const debited = await this.prisma.ledgerTransaction.findUnique({ where: { idempotencyKey: debitKey } });
-      if (debited) {
-        try {
+      try {
+        // Reverse any OPERATOR-side charge (idempotent; no-op internal / if never applied).
+        await this.wallet$.rollback(bet.walletId, debitKey, { refType: "bet", refId: bet.id });
+        // Internal ledger: if the debit actually applied, refund it (idempotent restart
+        // key, so a double pass can't double-pay), then finalize 'cancelling' → 'cancelled'.
+        const debited = await this.prisma.ledgerTransaction.findUnique({ where: { idempotencyKey: debitKey } });
+        if (debited) {
           await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
             refType: "bet",
             refId: bet.id,
           });
-          await this.prisma.bet.update({
-            where: { id: bet.id },
-            data: { status: "cancelled", settledAt: new Date() },
-          });
-        } catch (e: any) {
-          this.log.error(`reserving refund failed for bet ${bet.id}: ${e?.message}`);
+          await this.prisma.bet.update({ where: { id: bet.id }, data: { status: "cancelled", settledAt: new Date() } });
+        } else {
+          // No internal debit moved money — drop the now-claimed slot.
+          await this.prisma.bet.delete({ where: { id: bet.id } }).catch(() => {});
         }
-      } else {
-        // No internal debit — any operator charge was rolled back above; drop the slot.
-        await this.prisma.bet.delete({ where: { id: bet.id } }).catch(() => {});
+        recovered++;
+      } catch (e: any) {
+        // Reversal failed AFTER claiming — leave the row 'cancelling' so a later pass
+        // (sweep or boot) re-attempts the idempotent reversal; never strand an owed refund.
+        this.log.error(`reserving recovery failed for bet ${bet.id}: ${e?.message} — left 'cancelling' for retry`);
       }
     }
-    return reserving.length;
+    return recovered;
   }
 
   stop() {

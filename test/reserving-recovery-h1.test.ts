@@ -215,19 +215,25 @@ test("H1: real placeBet — debit succeeds but activation update throws → bet 
   const roundId = await seedBettingRound();
   const { userId, walletId } = await fundedUser(10_000n);
 
-  // A prisma whose bet.update ALWAYS throws (simulates the post-debit activation
-  // failing — DB blip / row lock / connection drop). Everything else is the real
-  // prisma so the reserve insert ($transaction → bet.create) and the ledger debit
-  // (real money movement) actually happen. placeBet calls this.prisma.bet.update
-  // up to 3x to flip 'reserving'→'active', then once more (caught) to stamp
-  // debitTxId — all throw — so the row must survive as 'reserving'.
+  // A prisma whose bet.updateMany ALWAYS throws (simulates the post-debit
+  // activation failing — DB blip / row lock / connection drop). placeBet's PHASE 2
+  // flip 'reserving'→'active' is a compare-and-swap via bet.updateMany (audit
+  // Low-1), and so is the best-effort debitTxId stamp on failure — so BOTH go
+  // through updateMany and must throw to reproduce the activation-failure state.
+  // (bet.update is also stubbed to throw, belt-and-suspenders, in case the flip is
+  // ever changed back.) Everything else is the real prisma so the reserve insert
+  // (PHASE 1 runs in $transaction → tx.bet.create, the interactive-tx client, NOT
+  // this.prisma.bet, so it is NOT intercepted here) and the ledger debit (real
+  // money movement) actually happen. placeBet calls bet.updateMany up to 3x to
+  // flip, then once more (caught) to stamp debitTxId — all throw — so the row must
+  // survive as 'reserving'.
   const failingPrisma: any = new Proxy(prisma, {
     get(target, prop, receiver) {
       if (prop === "bet") {
         const realBet = (target as any).bet;
         return new Proxy(realBet, {
           get(bt, p, r) {
-            if (p === "update") {
+            if (p === "update" || p === "updateMany") {
               return async () => {
                 throw new Error("simulated activation failure (DB blip)");
               };
