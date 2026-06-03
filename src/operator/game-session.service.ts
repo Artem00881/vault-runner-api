@@ -1,9 +1,20 @@
 import { Injectable, Inject } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
+import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LaunchTokenService } from "./launch-token.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
+
+// Operator session ("play") tokens are SHORT-lived (re-launch to refresh), unlike
+// 30-day guest tokens — this limits how long a leaked session token is usable, and the
+// sessionId is re-validated against a live GameSession at WS connect (audit L-C2.2).
+// Env-tunable but CLAMPED to 60s..24h so neither a too-low nor an absurdly-high
+// (control-weakening) value can take effect; out-of-range/non-numeric → default 4h.
+const SESSION_TOKEN_TTL_SEC = (() => {
+  const n = Number(process.env.SESSION_TOKEN_TTL_SEC);
+  return Number.isFinite(n) && n >= 60 && n <= 86400 ? n : 14400;
+})();
 
 /**
  * Turns a verified launch token into a live game session, and resolves a local
@@ -33,17 +44,30 @@ export class GameSessionService {
       where: { currency: v.currency, user: { username: tag } },
     });
     if (!wallet) {
-      const user = await this.prisma.user.create({
-        data: {
-          id: randomUUID(),
-          username: tag,
-          isGuest: false,
-          wallets: { create: { currency: v.currency, balance: 0n } }, // journal anchor
-          profile: { create: { displayName: `Player ${v.playerId.slice(0, 6)}` } },
-        },
-        include: { wallets: true },
-      });
-      wallet = user.wallets[0];
+      try {
+        const user = await this.prisma.user.create({
+          data: {
+            id: randomUUID(),
+            username: tag,
+            isGuest: false,
+            wallets: { create: { currency: v.currency, balance: 0n } }, // journal anchor
+            profile: { create: { displayName: `Player ${v.playerId.slice(0, 6)}` } },
+          },
+          include: { wallets: true },
+        });
+        wallet = user.wallets[0];
+      } catch (e) {
+        // Concurrent FIRST launch for this player won the race and created the
+        // user+wallet (username is UNIQUE) — re-find it instead of 500-ing the
+        // second launch (audit L-C2.1: concurrent first-launch is idempotent).
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+          wallet = await this.prisma.wallet.findFirstOrThrow({
+            where: { currency: v.currency, user: { username: tag } },
+          });
+        } else {
+          throw e;
+        }
+      }
     }
 
     // Consume the jti by recording the session (unique launchJti enforces
@@ -64,15 +88,18 @@ export class GameSessionService {
     // verifies it identically. `sub` is the LOCAL user id (the socket/bet
     // identity); the bet path resolves THIS user's own wallet (its currency),
     // and in operator mode money routes to the operator via resolver() below.
-    const playToken = await this.jwt.signAsync({
-      sub: wallet.userId,
-      walletId: wallet.id, // the session's bound wallet — placeBet resolves THIS one (audit M-C2.1)
-      currency: v.currency,
-      operatorId: v.operatorId,
-      playerId: v.playerId,
-      sessionId: session.id,
-      kind: "operator",
-    });
+    const playToken = await this.jwt.signAsync(
+      {
+        sub: wallet.userId,
+        walletId: wallet.id, // the session's bound wallet — placeBet resolves THIS one (audit M-C2.1)
+        currency: v.currency,
+        operatorId: v.operatorId,
+        playerId: v.playerId,
+        sessionId: session.id,
+        kind: "operator",
+      },
+      { expiresIn: SESSION_TOKEN_TTL_SEC }, // short-lived session token (audit L-C2.2)
+    );
 
     return {
       token: playToken,
@@ -81,6 +108,15 @@ export class GameSessionService {
       currency: v.currency,
       locale: v.locale,
     };
+  }
+
+  /**
+   * Is this session id still a live GameSession? The WebSocket gateway calls this at
+   * connect for an operator session token, so a revoked/removed session is rejected
+   * even though the (short-lived) JWT itself may not yet have expired (audit L-C2.2).
+   */
+  async isLive(sessionId: string): Promise<boolean> {
+    return (await this.prisma.gameSession.count({ where: { id: sessionId } })) > 0;
   }
 
   /**

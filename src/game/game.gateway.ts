@@ -13,6 +13,7 @@ import {
 import type { Server, Socket } from "socket.io";
 import { GameEngineService } from "./game-engine.service";
 import { BetsService, type Panel } from "./bets.service";
+import { GameSessionService } from "../operator/game-session.service";
 import { placeSchema, panelSchema } from "./ws-schemas";
 
 function userRoom(userId: string) {
@@ -71,6 +72,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @Inject(GameEngineService) private readonly engine: GameEngineService,
     @Inject(BetsService) private readonly bets: BetsService,
     @Inject(JwtService) private readonly jwt: JwtService,
+    @Inject(GameSessionService) private readonly sessions: GameSessionService,
   ) {}
 
   afterInit(server: Server) {
@@ -160,6 +162,13 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     if (token) {
       try {
         const payload = await this.jwt.verifyAsync(token);
+        // An operator session token must still map to a LIVE GameSession (audit L-C2.2):
+        // a revoked/removed session is rejected even if its short-lived JWT hasn't
+        // expired yet. Guests carry no sessionId and skip this.
+        if (payload.kind === "operator" && payload.sessionId) {
+          const live = await this.sessions.isLive(payload.sessionId as string);
+          if (!live) throw new Error("session_not_live");
+        }
         const userId = payload.sub as string;
         client.data.userId = userId;
         // An operator session token binds a specific journal wallet — placeBet resolves
