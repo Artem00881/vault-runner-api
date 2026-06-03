@@ -35,6 +35,8 @@ const WS_CORS_ORIGIN: boolean | string[] =
 export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server!: Server;
   private interval: ReturnType<typeof setInterval> | null = null;
+  private reconcileInterval: ReturnType<typeof setInterval> | null = null;
+  private reconciling = false; // guards against overlapping reconcile cycles (H2)
   private userSockets = new Map<string, string>(); // userId → socketId (one per user)
   private msgRate = new Map<string, { n: number; t: number }>();
 
@@ -64,10 +66,32 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     e.on("settled", (p) => server.emit("round_settled", p));
 
     this.interval = setInterval(() => this.onTick(), 120);
+    // H2: in operator mode, retry payouts stuck in payout_pending (a won cash-out
+    // whose operator credit we couldn't confirm) — a sweep at startup (recovers
+    // promptly after a restart) then every 30s. No-op otherwise.
+    if (process.env.WALLET_PROVIDER_TYPE === "operator") {
+      void this.runReconcile();
+      this.reconcileInterval = setInterval(() => void this.runReconcile(), 30_000);
+    }
+  }
+
+  /** Reconcile pending payouts, guarded against overlapping cycles — a slow cycle
+   *  over a degraded operator can run longer than the 30s interval (audit H2). */
+  private async runReconcile() {
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try {
+      await this.bets.reconcilePendingPayouts();
+    } catch {
+      /* per-bet failures are already recorded inside reconcilePendingPayouts */
+    } finally {
+      this.reconciling = false;
+    }
   }
 
   onModuleDestroy() {
     if (this.interval) clearInterval(this.interval);
+    if (this.reconcileInterval) clearInterval(this.reconcileInterval);
   }
 
   async handleConnection(client: Socket) {
@@ -117,8 +141,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         multiplier: c.multiplier,
         payout: c.payout,
         auto: true,
+        pending: c.pending,
       });
-      this.server.to(userRoom(c.userId!)).emit("balance_updated", { currency: c.currency ?? "DEMO", balance: c.balance });
+      // Don't emit a balance when the payout is unconfirmed (operator-mode pending).
+      if (c.balance !== undefined) {
+        this.server.to(userRoom(c.userId!)).emit("balance_updated", { currency: c.currency ?? "DEMO", balance: c.balance });
+      }
     }
   }
 

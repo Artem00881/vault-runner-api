@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
-import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
+import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wallet/wallet-provider";
 import { GameEngineService } from "./game-engine.service";
 import { RiskService } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
@@ -25,6 +25,8 @@ export interface CashoutResult {
   payout?: number;
   balance?: number;
   currency?: string;
+  /** operator-mode: the win is recorded but not yet confirmed (H2 reconciler). */
+  pending?: boolean;
 }
 
 /**
@@ -162,15 +164,28 @@ export class BetsService {
     });
     if (claim.count === 0) return { ok: false, reason: "no_active_bet", userId, panel };
 
-    // NOTE (audit H2, operator track): in operator mode `credit` can throw on an
-    // ambiguous timeout, leaving the bet claimed-but-unpaid. A compensation/retry
-    // path must be designed (with the money-path-auditor) before enabling
-    // WALLET_PROVIDER_TYPE=operator. The internal ledger credit does not throw.
-    const credit = await this.wallet$.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
-      refType: "bet",
-      refId: bet.id,
-    });
-    // link the cashed-out bet to its payout tx for reconciliation (was unset).
+    // Pay the win. A WON payout must NEVER be clawed back: in operator mode the
+    // provider retries the idempotent credit and, if it still can't confirm,
+    // throws "payout_pending" (H2) instead of rolling back. We then leave the bet
+    // recoverable (status payout_pending — settleRound skips non-active bets, so
+    // a crash won't bust it) for reconcilePendingPayouts() to re-issue. The
+    // internal ledger credit never throws, so this only bites in operator mode.
+    let credit: WalletTxResult;
+    try {
+      credit = await this.wallet$.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
+        refType: "bet",
+        refId: bet.id,
+      });
+    } catch (e: any) {
+      // A claimed win must NEVER be lost. Whatever the provider threw (operator
+      // "payout_pending", or any other error), leave the bet RECOVERABLE for the
+      // reconciler — never cashed_out-but-unpaid-and-invisible. (The internal
+      // ledger credit never throws, so this is operator-mode only.)
+      if (e?.message !== "payout_pending") this.metrics.recordError("cashout_credit");
+      await this.prisma.bet.update({ where: { id: bet.id }, data: { status: "payout_pending" } });
+      return { ok: true, userId, panel, multiplier: mult, payout: Number(payout), currency: bet.wallet.currency, pending: true };
+    }
+    // confirmed → link the payout tx for reconciliation (was unset).
     await this.prisma.bet.update({ where: { id: bet.id }, data: { payoutTxId: credit.id } });
 
     // update leaderboard stats (loot += payout, biggest = max)
@@ -223,5 +238,49 @@ export class BetsService {
       data: { status: "busted", settledAt: new Date() },
     });
     return active.map((b) => ({ userId: b.userId, panel: b.panel as Panel }));
+  }
+
+  /**
+   * Re-issue idempotent payouts for bets stuck in `payout_pending` (operator-mode
+   * H2 recovery). Safe to call repeatedly: the operator dedups on the payout key,
+   * so a win that already applied during a timeout simply confirms, and one that
+   * didn't gets paid now. On confirmation the bet is finalised (cashed_out +
+   * payoutTxId + leaderboard, counted toward realized RTP). Returns how many were
+   * recovered. No-op when nothing is pending (the internal ledger never pends).
+   */
+  async reconcilePendingPayouts(limit = 50): Promise<number> {
+    const pending = await this.prisma.bet.findMany({ where: { status: "payout_pending" }, take: limit });
+    let recovered = 0;
+    for (const bet of pending) {
+      try {
+        const credit = await this.wallet$.credit(bet.walletId, bet.payout, "payout_credit", `bet:${bet.id}:payout`, {
+          refType: "bet",
+          refId: bet.id,
+        });
+        // Finalise atomically; if a concurrent cycle already did, skip (so the
+        // leaderboard is never double-counted).
+        const done = await this.prisma.bet.updateMany({
+          where: { id: bet.id, status: "payout_pending" },
+          data: { status: "cashed_out", payoutTxId: credit.id },
+        });
+        if (done.count === 0) continue;
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE profiles
+             SET total_loot = total_loot + $1,
+                 biggest_multiplier = GREATEST(biggest_multiplier, $2),
+                 updated_at = now()
+           WHERE user_id = $3::uuid`,
+          Number(bet.payout),
+          Number(bet.cashoutMult ?? 1),
+          bet.userId,
+        );
+        this.metrics.recordPayout(Number(bet.payout)); // confirmed now → RTP numerator
+        recovered++;
+      } catch {
+        // Still unconfirmed (operator down) — leave payout_pending; retry next cycle.
+        this.metrics.recordError("payout_reconcile");
+      }
+    }
+    return recovered;
   }
 }

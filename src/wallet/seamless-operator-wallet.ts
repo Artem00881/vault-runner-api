@@ -91,7 +91,13 @@ export class SeamlessOperatorWallet implements WalletProvider {
     return BigInt(Math.trunc(bal));
   }
 
-  /** Core debit/credit with retry + compensating rollback on ambiguity. */
+  /**
+   * Core debit/credit with a per-direction failure policy. A DEBIT (bet) is
+   * compensated on ambiguity (rollback + reject). A CREDIT (win) is NEVER rolled
+   * back — that would claw back an earned payout the operator may have applied;
+   * instead it retries (idempotent) and surfaces "payout_pending" if unconfirmed,
+   * for the caller's reconciler to re-issue (audit H2).
+   */
   private async move(
     kind: "bet" | "win",
     s: OperatorSession,
@@ -120,6 +126,16 @@ export class SeamlessOperatorWallet implements WalletProvider {
       } catch (e) {
         lastErr = e;
 
+        // WIN (credit): never roll back a won payout. Retry the idempotent win
+        // (the operator dedups on transactionId); if it stays unconfirmed,
+        // surface "payout_pending" (NO rollback) so the caller records it for the
+        // reconciler to re-issue (audit H2).
+        if (kind === "win") {
+          if (attempt >= this.maxRetries) throw new BadRequestException("payout_pending");
+          continue;
+        }
+
+        // BET (debit) — Phase 0.2 model, unchanged below.
         // Clean business rejection — don't retry, surface as-is.
         if (e instanceof OperatorInsufficientFunds) {
           throw new BadRequestException("insufficient_balance");
