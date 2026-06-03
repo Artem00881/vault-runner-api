@@ -6,9 +6,11 @@ import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
 
 const prisma = new PrismaService();
-const jwt = new JwtService({});
+// A default secret so GameSessionService can sign the session ("play") token;
+// LaunchTokenService passes the per-operator secret explicitly, overriding this.
+const jwt = new JwtService({ secret: "test-secret" });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch);
+const sessions = new GameSessionService(prisma, launch, jwt);
 
 async function freshOperator(enabled = true) {
   return prisma.operator.create({

@@ -2,7 +2,6 @@ import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
-import { DEMO_CURRENCY } from "../auth/auth.service";
 import { GameEngineService } from "./game-engine.service";
 import { RiskService } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
@@ -15,6 +14,7 @@ export interface BetResult {
   panel: Panel;
   balance?: number;
   betId?: string;
+  currency?: string;
 }
 export interface CashoutResult {
   ok: boolean;
@@ -24,6 +24,7 @@ export interface CashoutResult {
   multiplier?: number;
   payout?: number;
   balance?: number;
+  currency?: string;
 }
 
 /**
@@ -42,8 +43,15 @@ export class BetsService {
     @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
+  // A user has exactly one wallet — by construction (guests: one DEMO wallet;
+  // operator players are keyed per op:{operatorId}:{playerId}:{currency}, so each
+  // is a distinct user with one wallet). Resolve by userId — NOT a hardcoded
+  // currency — so operator-mode (non-DEMO) players resolve their own wallet
+  // instead of throwing (audit C2). NB: if multi-currency-PER-USER is ever added
+  // (Phase 3), switch to session-walletId resolution — findFirst would otherwise
+  // pick an arbitrary wallet (audit M-C2.1).
   private async wallet(userId: string) {
-    return this.prisma.wallet.findFirstOrThrow({ where: { userId, currency: DEMO_CURRENCY } });
+    return this.prisma.wallet.findFirstOrThrow({ where: { userId } });
   }
 
   /** Place a bet on the CURRENT round during the betting window. */
@@ -96,7 +104,7 @@ export class BetsService {
         },
       });
       this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
-      return { ok: true, panel, balance: Number(tx.balanceAfter), betId };
+      return { ok: true, panel, balance: Number(tx.balanceAfter), betId, currency: wallet.currency };
     } catch (e: any) {
       // Lost a concurrent race for the same (round,user,panel): the bet row
       // already exists (P2002) and the debit above was deduped — no double charge.
@@ -113,6 +121,7 @@ export class BetsService {
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
     const bet = await this.prisma.bet.findUnique({
       where: { roundId_userId_panel: { roundId: state.roundId, userId, panel } },
+      include: { wallet: { select: { currency: true } } },
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", panel };
 
@@ -121,7 +130,7 @@ export class BetsService {
       refId: bet.id,
     });
     await this.prisma.bet.update({ where: { id: bet.id }, data: { status: "cancelled", settledAt: new Date() } });
-    return { ok: true, panel, balance: Number(refund.balanceAfter) };
+    return { ok: true, panel, balance: Number(refund.balanceAfter), currency: bet.wallet.currency };
   }
 
   /**
@@ -135,6 +144,7 @@ export class BetsService {
     const mult = atMultiplier ?? this.engine.currentMultiplier();
     const bet = await this.prisma.bet.findUnique({
       where: { roundId_userId_panel: { roundId: state.roundId, userId, panel } },
+      include: { wallet: { select: { currency: true } } },
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", userId, panel };
 
@@ -176,7 +186,7 @@ export class BetsService {
     );
 
     this.metrics.recordPayout(Number(payout)); // payout → realized-RTP numerator
-    return { ok: true, userId, panel, multiplier: mult, payout: Number(payout), balance: Number(credit.balanceAfter) };
+    return { ok: true, userId, panel, multiplier: mult, payout: Number(payout), balance: Number(credit.balanceAfter), currency: bet.wallet.currency };
   }
 
   /** Auto-cash any active bets whose target has been reached this tick. */

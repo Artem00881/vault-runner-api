@@ -118,7 +118,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         payout: c.payout,
         auto: true,
       });
-      this.server.to(userRoom(c.userId!)).emit("balance_updated", { currency: "DEMO", balance: c.balance });
+      this.server.to(userRoom(c.userId!)).emit("balance_updated", { currency: c.currency ?? "DEMO", balance: c.balance });
     }
   }
 
@@ -150,7 +150,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {
-      client.emit("balance_updated", { currency: "DEMO", balance: r.balance });
+      client.emit("balance_updated", { currency: r.currency ?? "DEMO", balance: r.balance });
     }
     return r;
   }
@@ -165,7 +165,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const r = await this.bets.cancelBet(userId, parsed.data.panel as Panel);
     client.emit(r.ok ? "bet_cancelled" : "bet_rejected", r);
     if (r.ok && r.balance !== undefined) {
-      client.emit("balance_updated", { currency: "DEMO", balance: r.balance });
+      client.emit("balance_updated", { currency: r.currency ?? "DEMO", balance: r.balance });
     }
     return r;
   }
@@ -180,7 +180,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const r = await this.bets.cashOut(userId, parsed.data.panel as Panel);
     client.emit(r.ok ? "cashout_accepted" : "cashout_rejected", r);
     if (r.ok && r.balance !== undefined) {
-      client.emit("balance_updated", { currency: "DEMO", balance: r.balance });
+      client.emit("balance_updated", { currency: r.currency ?? "DEMO", balance: r.balance });
     }
     return r;
   }

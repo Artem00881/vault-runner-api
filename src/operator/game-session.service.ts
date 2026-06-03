@@ -1,4 +1,5 @@
 import { Injectable, Inject } from "@nestjs/common";
+import { JwtService } from "@nestjs/jwt";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LaunchTokenService } from "./launch-token.service";
@@ -18,6 +19,7 @@ export class GameSessionService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(LaunchTokenService) private readonly launch: LaunchTokenService,
+    @Inject(JwtService) private readonly jwt: JwtService,
   ) {}
 
   /** Open the game from an operator launch token → create (consume) a session. */
@@ -57,15 +59,42 @@ export class GameSessionService {
       },
     });
 
-    return { sessionId: session.id, walletId: wallet.id, currency: v.currency, locale: v.locale };
+    // Issue a SESSION ("play") token the client uses for the WebSocket handshake
+    // — signed with OUR JWT_SECRET (same as a guest token) so the gateway
+    // verifies it identically. `sub` is the LOCAL user id (the socket/bet
+    // identity); the bet path resolves THIS user's own wallet (its currency),
+    // and in operator mode money routes to the operator via resolver() below.
+    const playToken = await this.jwt.signAsync({
+      sub: wallet.userId,
+      currency: v.currency,
+      operatorId: v.operatorId,
+      playerId: v.playerId,
+      sessionId: session.id,
+      kind: "operator",
+    });
+
+    return {
+      token: playToken,
+      sessionId: session.id,
+      walletId: wallet.id,
+      currency: v.currency,
+      locale: v.locale,
+    };
   }
 
-  /** SessionResolver for SeamlessOperatorWallet: walletId → operator session. */
+  /**
+   * SessionResolver for SeamlessOperatorWallet: walletId → operator session.
+   * Every GameSession for a given walletId shares the SAME (operatorId,
+   * playerId, currency) by construction (the wallet is keyed to one operator
+   * player+currency), so any session yields identical routing — we take the
+   * most recent by createdAt. (NB: GameSession.lastSeenAt is @updatedAt but is
+   * never written, so it must NOT be used to order — audit M-C2.2.)
+   */
   resolver(): SessionResolver {
     return async (walletId: string): Promise<OperatorSession> => {
       const session = await this.prisma.gameSession.findFirstOrThrow({
         where: { walletId },
-        orderBy: { lastSeenAt: "desc" },
+        orderBy: { createdAt: "desc" },
       });
       return {
         operatorId: session.operatorId,
