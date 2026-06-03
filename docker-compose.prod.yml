@@ -63,6 +63,10 @@ services:
       SALT_PROVIDER_TYPE: "${SALT_PROVIDER_TYPE:-random}"
       ETH_RPC_URLS: "${ETH_RPC_URLS:-}"
       ETH_SALT_LEAD_BLOCKS: "${ETH_SALT_LEAD_BLOCKS:-10}"
+      ETH_RPC_TIMEOUT_MS: "${ETH_RPC_TIMEOUT_MS:-5000}"
+      # Min CONFIGURED eth RPCs the oracle will trust (audit M5). Default 2 so prod never
+      # trusts a single RPC; a REAL-MONEY eth-block deploy should raise this to >=3.
+      ETH_RPC_MIN: "${ETH_RPC_MIN:-2}"
       # Bearer token protecting /metrics (audit H5). Unset = open (origin is
       # Cloudflare/loopback-only); set via 1Password (op.prod.env) to lock it.
       # Prometheus sends the matching bearer (monitoring/prometheus/prometheus.yml).

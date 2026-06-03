@@ -2,11 +2,12 @@
 //
 // Reads only the FINALIZED chain (post-Merge), so the values it returns are
 // reorg-safe — a finalized block can never be re-orged out. It cross-checks the
-// hash across several public RPC endpoints and only trusts a value when enough
-// of them agree, so no single endpoint can spoof a salt.
+// hash across several public RPC endpoints and only trusts a value when a MAJORITY
+// of the CONFIGURED endpoints agree, so a minority of colluding/compromised RPCs can
+// never spoof a salt (audit M5).
 
 // Reputable keyless public mainnet RPCs (verified reachable 2026-06). Override
-// with ETH_RPC_URLS. The oracle requires >=2 of them to agree on a hash.
+// with ETH_RPC_URLS. The oracle requires floor(N/2)+1 of them to agree on a hash.
 const DEFAULT_RPCS = [
   "https://ethereum-rpc.publicnode.com",
   "https://eth.drpc.org",
@@ -17,6 +18,16 @@ const DEFAULT_RPCS = [
 function rpcUrls(): string[] {
   const env = process.env.ETH_RPC_URLS?.trim();
   return env ? env.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_RPCS;
+}
+
+/**
+ * Minimum number of CONFIGURED RPCs the oracle will trust. Default 1 (dev/demo can
+ * run a small fleet); a REAL-MONEY deploy MUST set ETH_RPC_MIN >= 3 so the majority
+ * quorum (floor(N/2)+1) can't be met by just one or two endpoints (audit M5).
+ */
+function minRpcs(): number {
+  const n = Number(process.env.ETH_RPC_MIN);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
 }
 
 function timeoutMs(): number {
@@ -70,6 +81,17 @@ export async function finalizedBlockNumber(): Promise<number> {
  */
 export async function finalizedBlockHash(target: number): Promise<string | null> {
   const urls = rpcUrls();
+  // Fail closed on an under-provisioned fleet (real-money sets ETH_RPC_MIN>=3) so the
+  // majority quorum can't be satisfied by one or two endpoints (audit M5).
+  if (urls.length < minRpcs()) {
+    throw new Error(
+      `eth oracle: ${urls.length} RPC(s) configured < required minimum ${minRpcs()} (set ETH_RPC_URLS / ETH_RPC_MIN)`,
+    );
+  }
+  // Quorum is a MAJORITY of CONFIGURED RPCs, not of responders: a down/compromised RPC
+  // counts AGAINST the quorum, so a minority can never inject a salt (audit M5).
+  const need = Math.floor(urls.length / 2) + 1;
+
   const tag = "0x" + target.toString(16);
   const votes = new Map<string, number>(); // hash -> agreeing RPC count
   let finalizedSomewhere = false;
@@ -82,16 +104,23 @@ export async function finalizedBlockHash(target: number): Promise<string | null>
       const blk = await getBlock(url, tag);
       if (blk?.hash) votes.set(blk.hash, (votes.get(blk.hash) ?? 0) + 1);
     } catch {
-      // skip this RPC
+      // skip this RPC — it simply doesn't count toward the (configured-majority) quorum
     }
   }
 
   if (!finalizedSomewhere) return null; // future block — not finalized anywhere yet
 
-  // Require agreement (>=2 endpoints, or 1 if only a single RPC is configured).
-  const need = Math.min(2, urls.length);
+  // Pick the top hash, then REFUSE if two hashes tie for that top count (ambiguous,
+  // computed order-independently) and require a configured-majority. Else null this pass.
   let best: string | null = null;
   let bestN = 0;
-  for (const [h, n] of votes) if (n > bestN) ((best = h), (bestN = n));
+  for (const [h, n] of votes) {
+    if (n > bestN) {
+      best = h;
+      bestN = n;
+    }
+  }
+  const tiedForTop = [...votes.values()].filter((n) => n === bestN).length > 1;
+  if (bestN === 0 || tiedForTop) return null; // no votes, or an ambiguous top tie
   return bestN >= need ? best : null;
 }
