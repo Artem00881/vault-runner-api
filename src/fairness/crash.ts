@@ -15,7 +15,9 @@ export const HOUSE_EDGE = 0.03;
 
 const E = 2n ** 52n; // 52 bits of entropy taken from the hash
 const FACTOR = BigInt(Math.round(100 * (1 - HOUSE_EDGE))); // 97 (in "cents")
-const MAX_CENTS = 100_000_000n; // cap at 1,000,000.00x
+const MAX_CENTS = 100_000_000n; // multiplier hard cap = 1,000,000.00x (engine/demo ceiling).
+// NB (audit L4): the real-money "10,000x" figure is a per-BET MONEY cap (max win, e.g. €10k),
+// NOT a multiplier cap — the crash multiplier itself is always capped HERE at 1,000,000x.
 
 /** Map a hex HMAC/hash to a crash multiplier (2 decimals). */
 export function crashFromHmacHex(hex: string): number {

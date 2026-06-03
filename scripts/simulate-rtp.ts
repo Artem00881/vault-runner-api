@@ -81,7 +81,10 @@ console.log(`rounds:            ${ROUNDS.toLocaleString()}`);
 console.log(`elapsed:           ${secs.toFixed(1)}s (${Math.round(ROUNDS / secs).toLocaleString()}/s)`);
 console.log(`house edge (cfg):  ${(HOUSE_EDGE * 100).toFixed(2)}%`);
 console.log(`theoretical RTP:   ${((1 - HOUSE_EDGE) * 100).toFixed(2)}%`);
-console.log(`instant-bust 1.00x:${" "}${pct(instantBust)}  (theory ≈ ${(HOUSE_EDGE * 100).toFixed(2)}%)`);
+console.log(
+  `instant-bust 1.00x:${" "}${pct(instantBust)}  ` +
+    `(theory ≈ 3.96% = 1 − 0.97/1.01, the P(crash<1.01x) clamp mass — NOT the ${(HOUSE_EDGE * 100).toFixed(0)}% house edge; audit L3)`,
+);
 console.log(`max crash seen:    ${maxSeen.toFixed(2)}x`);
 
 console.log("\n--- Uncapped RTP via auto-cashout targets  RTP(t) = t·P(crash≥t) ---");
