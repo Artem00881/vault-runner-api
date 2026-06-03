@@ -32,6 +32,8 @@ export class MetricsService {
   // it. We never abandon it, so a stuck one must be loud + alertable.
   readonly pendingPayouts: Gauge;
   readonly pendingPayoutOldestSeconds: Gauge;
+  readonly reservingSlots: Gauge;
+  readonly reservingOldestSeconds: Gauge;
 
   readonly settlementLatency: Histogram;
 
@@ -56,6 +58,8 @@ export class MetricsService {
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
     this.pendingPayouts = new Gauge({ name: "vaultrun_pending_payouts", help: "Bets in status payout_pending (operator-mode owed payouts not yet confirmed)", registers: reg });
     this.pendingPayoutOldestSeconds = new Gauge({ name: "vaultrun_pending_payout_oldest_seconds", help: "Age (seconds) of the oldest pending payout by settledAt; 0 if none", registers: reg });
+    this.reservingSlots = new Gauge({ name: "vaultrun_reserving_slots", help: "Bets in a transient reservation state (reserving|cancelling); a stuck age = an owed refund the sweep hasn't cleared", registers: reg });
+    this.reservingOldestSeconds = new Gauge({ name: "vaultrun_reserving_oldest_seconds", help: "Age (seconds) of the oldest reserving|cancelling slot by createdAt; 0 if none", registers: reg });
 
     this.settlementLatency = new Histogram({
       name: "vaultrun_settlement_latency_ms",
@@ -95,6 +99,16 @@ export class MetricsService {
   setPendingPayouts(count: number, oldestAgeSeconds: number) {
     this.pendingPayouts.set(count);
     this.pendingPayoutOldestSeconds.set(oldestAgeSeconds);
+  }
+
+  /**
+   * Reflect the live transient-reservation backlog (reserving|cancelling) — audit
+   * Low-4. Called each sweep cycle so the gauges drop to 0 when nothing is stranded.
+   * `oldestAgeSeconds` is the age of the oldest such slot by createdAt (0 when none).
+   */
+  setReservingBacklog(count: number, oldestAgeSeconds: number) {
+    this.reservingSlots.set(count);
+    this.reservingOldestSeconds.set(oldestAgeSeconds);
   }
 
   private updateRtp() {

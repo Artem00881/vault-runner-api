@@ -64,6 +64,17 @@ groups:
           summary: "Operator payout stuck > 1h"
           description: "Oldest pending operator payout has been unconfirmed for {{ $value }}s (> 3600s). Still retrying — check the operator wallet."
 
+      # Age-only (count>0 is normal — in-flight reservations clear in seconds; the
+      # periodic sweep recovers stranded ones at RESERVING_STALE_SEC). A slot still
+      # stranded long after that is a stuck owed refund (audit Low-4).
+      - alert: ReservingStuck
+        expr: vaultrun_reserving_oldest_seconds > 600
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Reservation slot stuck > 10m"
+          description: "Oldest reserving/cancelling bet slot has been stranded for {{ $value }}s (> 600s) — an owed refund the periodic sweep has not cleared (e.g. a 'cancelling' slot whose reversal keeps failing). The sweep keeps retrying; check the wallet/DB."
+
       - alert: ErrorSpike
         expr: sum(rate(vaultrun_errors_total[5m])) > 1
         for: 5m

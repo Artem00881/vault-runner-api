@@ -141,6 +141,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     this.sweeping = true;
     try {
       await this.engine.recoverReservingBets(olderThanMs);
+      await this.bets.reportReservingBacklog(); // refresh the backlog gauges + alert on stuck (Low-4)
     } catch (e: any) {
       // Per-bet failures are already logged inside recoverReservingBets; this catches a
       // top-level failure (e.g. the findMany itself on a DB blip) so it isn't silent.

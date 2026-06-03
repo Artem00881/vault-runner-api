@@ -37,6 +37,10 @@ export interface CashoutResult {
 // it's visible/alertable. We NEVER abandon a won payout; this only escalates
 // noise, the reconciler keeps retrying forever. Env-tunable (H2 operability).
 const PAYOUT_PENDING_ALERT_SEC = Number(process.env.PAYOUT_PENDING_ALERT_SEC ?? 3600);
+// A reserving|cancelling slot older than this (seconds) is "stuck" — an owed refund the
+// sweep hasn't cleared (e.g. a cancelling slot whose reversal keeps failing). Log it
+// loudly; the sweep keeps retrying forever. Env-tunable (audit Low-4).
+const RESERVING_ALERT_SEC = Number(process.env.RESERVING_ALERT_SEC ?? 600);
 
 @Injectable()
 export class BetsService {
@@ -396,6 +400,38 @@ export class BetsService {
         `STUCK operator payout: bet ${oldest?.id} owed ${oldest?.payout} pending ${oldestAgeSeconds}s ` +
           `(> ${PAYOUT_PENDING_ALERT_SEC}s); ${count} payout(s) pending total. ` +
           `Still retrying — a won payout is never abandoned. Check the operator wallet.`,
+      );
+    }
+  }
+
+  /**
+   * Refresh the transient-reservation gauges (reserving|cancelling) from the live
+   * table and loudly log any slot stuck past RESERVING_ALERT_SEC — an owed refund the
+   * sweep hasn't cleared (e.g. a cancelling slot whose reversal keeps failing). The
+   * sweep keeps retrying forever; this only escalates visibility (status untouched).
+   * Cheap: one count + one findFirst(orderBy createdAt asc). Called at the end of each
+   * sweep cycle (audit Low-4).
+   */
+  async reportReservingBacklog(): Promise<void> {
+    const count = await this.prisma.bet.count({ where: { status: { in: ["reserving", "cancelling"] } } });
+    if (count === 0) {
+      this.metrics.setReservingBacklog(0, 0);
+      return;
+    }
+    const oldest = await this.prisma.bet.findFirst({
+      where: { status: { in: ["reserving", "cancelling"] } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, status: true, createdAt: true },
+    });
+    const oldestMs = oldest?.createdAt ? Date.now() - oldest.createdAt.getTime() : 0;
+    const oldestAgeSeconds = Math.max(0, Math.floor(oldestMs / 1000));
+    this.metrics.setReservingBacklog(count, oldestAgeSeconds);
+
+    if (oldestAgeSeconds > RESERVING_ALERT_SEC) {
+      this.log.error(
+        `STUCK reservation: bet ${oldest?.id} (${oldest?.status}) stranded ${oldestAgeSeconds}s ` +
+          `(> ${RESERVING_ALERT_SEC}s); ${count} reserving/cancelling slot(s) total. ` +
+          `The sweep keeps retrying — an owed refund is never abandoned. Check the wallet/DB.`,
       );
     }
   }
