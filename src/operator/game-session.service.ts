@@ -66,6 +66,7 @@ export class GameSessionService {
     // and in operator mode money routes to the operator via resolver() below.
     const playToken = await this.jwt.signAsync({
       sub: wallet.userId,
+      walletId: wallet.id, // the session's bound wallet — placeBet resolves THIS one (audit M-C2.1)
       currency: v.currency,
       operatorId: v.operatorId,
       playerId: v.playerId,

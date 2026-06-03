@@ -162,6 +162,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         const payload = await this.jwt.verifyAsync(token);
         const userId = payload.sub as string;
         client.data.userId = userId;
+        // An operator session token binds a specific journal wallet — placeBet resolves
+        // THIS wallet (audit M-C2.1). Guests carry no walletId → resolve by userId.
+        if (payload.walletId) client.data.walletId = payload.walletId as string;
         client.join(userRoom(userId));
         // one active game socket per user — drop any previous one (multi-tab abuse)
         const prev = this.userSockets.get(userId);
@@ -234,7 +237,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const parsed = placeSchema.safeParse(body);
     if (!parsed.success) return { ok: false, reason: "invalid_payload" };
     const { panel, amount, autoCashout } = parsed.data;
-    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout);
+    const walletId = client.data.walletId as string | undefined;
+    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId);
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {

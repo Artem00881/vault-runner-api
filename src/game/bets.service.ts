@@ -52,19 +52,24 @@ export class BetsService {
     @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
-  // A user has exactly one wallet — by construction (guests: one DEMO wallet;
-  // operator players are keyed per op:{operatorId}:{playerId}:{currency}, so each
-  // is a distinct user with one wallet). Resolve by userId — NOT a hardcoded
-  // currency — so operator-mode (non-DEMO) players resolve their own wallet
-  // instead of throwing (audit C2). NB: if multi-currency-PER-USER is ever added
-  // (Phase 3), switch to session-walletId resolution — findFirst would otherwise
-  // pick an arbitrary wallet (audit M-C2.1).
-  private async wallet(userId: string) {
+  // Resolve the wallet for a NEW bet. Prefer the EXACT walletId the session bound at
+  // launch (audit M-C2.1) so this is robust even if a user ever holds more than one
+  // wallet (multi-currency): findFirst would otherwise pick an arbitrary one. The
+  // session walletId comes from OUR signed token, but `sub` (the userId) stays the
+  // money trust anchor — verify the wallet belongs to this user so a stale/mismatched
+  // claim can never place a bet on another user's wallet. Without a session walletId
+  // (a guest), fall back to the user's single wallet (one-per-user by construction).
+  private async wallet(userId: string, walletId?: string) {
+    if (walletId) {
+      const w = await this.prisma.wallet.findUniqueOrThrow({ where: { id: walletId } });
+      if (w.userId !== userId) throw new Error(`wallet ${walletId} does not belong to user ${userId}`);
+      return w;
+    }
     return this.prisma.wallet.findFirstOrThrow({ where: { userId } });
   }
 
   /** Place a bet on the CURRENT round during the betting window. */
-  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number): Promise<BetResult> {
+  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string): Promise<BetResult> {
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
@@ -82,7 +87,14 @@ export class BetsService {
     // is the authoritative dedup (audit H1 review).
     if (existing && existing.status !== "reserving") return { ok: false, reason: "already_bet", panel };
 
-    const wallet = await this.wallet(userId);
+    const wallet = await this.wallet(userId, walletId).catch((e: any) => {
+      this.log.warn(`placeBet wallet resolution failed for user ${userId}: ${e?.message}`);
+      return null;
+    });
+    if (!wallet) {
+      this.metrics.recordRejected("bet_failed");
+      return { ok: false, reason: "bet_failed", panel };
+    }
     const betId = randomUUID();
 
     // PHASE 1 — RESERVE (audit H1). Serialize all placeBet for THIS round on a
