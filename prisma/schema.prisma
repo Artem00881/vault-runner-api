@@ -45,8 +45,9 @@ model GameSession {
   locale      String   @default("en")
   walletId    String   @map("wallet_id") @db.Uuid // local journal wallet
   launchJti   String   @unique @map("launch_jti") // token id → one-time use
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt  DateTime @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
 
   operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
 

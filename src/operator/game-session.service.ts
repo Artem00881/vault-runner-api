@@ -116,7 +116,22 @@ export class GameSessionService {
    * even though the (short-lived) JWT itself may not yet have expired (audit L-C2.2).
    */
   async isLive(sessionId: string): Promise<boolean> {
-    return (await this.prisma.gameSession.count({ where: { id: sessionId } })) > 0;
+    return (await this.prisma.gameSession.count({ where: { id: sessionId, revokedAt: null } })) > 0;
+  }
+
+  /**
+   * Soft-revoke every live session bound to this wallet — the L-C2.2 revocation TRIGGER
+   * (e.g. a player logout). Sets `revokedAt` so `isLive()` rejects the session at WS
+   * connect; the rows are KEPT so the operator-wallet resolver still serves any in-flight
+   * settlement for that wallet. Idempotent (already-revoked rows are skipped via the
+   * `revokedAt: null` filter). Returns how many sessions were revoked.
+   */
+  async revokeForWallet(walletId: string): Promise<number> {
+    const r = await this.prisma.gameSession.updateMany({
+      where: { walletId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    return r.count;
   }
 
   /**
