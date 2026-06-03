@@ -247,6 +247,70 @@ export class FairnessService {
   }
 
   /**
+   * Public commitment list for ALL epochs (incl. exhausted) — lets a third party see
+   * every epoch's published commit + salt source/target for the full chain-of-custody,
+   * not just the active one (audit M4). The RAW salt is included only once it has served
+   * rounds (active/exhausted); a future epoch (pending/armed) shows only the committed
+   * saltHash, so no unrevealed seed could be pre-computed from it.
+   */
+  async listEpochs() {
+    const chains = await this.prisma.fairnessChain.findMany({ orderBy: { epoch: "asc" } });
+    return Promise.all(
+      chains.map(async (c) => {
+        const revealed = await this.prisma.fairnessSeed.count({
+          where: { chainId: c.id, NOT: { revealedAt: null } },
+        });
+        const saltPublic = c.status === "active" || c.status === "exhausted";
+        return {
+          epoch: c.epoch,
+          commitHash: c.commitHash,
+          saltSource: c.saltSource,
+          salt: saltPublic ? c.salt : null,
+          saltHash: c.salt ? sha256OfUtf8(c.salt) : null,
+          targetChain: c.targetChain,
+          targetBlock: c.targetBlock !== null ? Number(c.targetBlock) : null,
+          length: c.length,
+          status: c.status,
+          roundsRevealed: Math.max(0, revealed - 1),
+          createdAt: c.createdAt,
+          armedAt: c.armedAt,
+        };
+      }),
+    );
+  }
+
+  /**
+   * Per-epoch REVEALED seed dump for chain-of-custody reconstruction (audit M4).
+   * SECURITY: returns ONLY seeds whose round has been revealed (revealedAt set). An
+   * UNrevealed seed would let anyone pre-compute a future round's crash, so it is NEVER
+   * exposed — SHA256 is one-way, so the revealed prefix discloses nothing about the next
+   * (still-secret) seed. seed[0] (the public commit) is revealed by construction. Returns
+   * null if the epoch doesn't exist.
+   */
+  async epochSeeds(epoch: number) {
+    const chain = await this.prisma.fairnessChain.findUnique({ where: { epoch } });
+    if (!chain) return null;
+    const seeds = await this.prisma.fairnessSeed.findMany({
+      where: { chainId: chain.id, NOT: { revealedAt: null } }, // revealed ONLY — never leak a future seed
+      orderBy: { chainIndex: "asc" },
+      select: { chainIndex: true, seed: true, seedHash: true, revealedAt: true },
+    });
+    const saltPublic = chain.status === "active" || chain.status === "exhausted";
+    return {
+      epoch: chain.epoch,
+      commitHash: chain.commitHash,
+      saltSource: chain.saltSource,
+      salt: saltPublic ? chain.salt : null,
+      targetChain: chain.targetChain,
+      targetBlock: chain.targetBlock !== null ? Number(chain.targetBlock) : null,
+      status: chain.status,
+      length: chain.length,
+      revealedCount: seeds.length,
+      seeds,
+    };
+  }
+
+  /**
    * Recompute a crash from a revealed seed + salt (offline-verifiable too).
    * Optionally checks the chain link to the previous revealed seed.
    */
