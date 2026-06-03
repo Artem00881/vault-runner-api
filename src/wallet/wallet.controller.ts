@@ -1,6 +1,6 @@
-import { Controller, Get, UseGuards, Inject } from "@nestjs/common";
+import { Controller, Get, UseGuards, Inject, ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { CurrentUserId, JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { CurrentUserId, CurrentWalletId, JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { WALLET_PROVIDER, type WalletProvider } from "./wallet-provider";
 
 @Controller("api/wallet")
@@ -11,11 +11,22 @@ export class WalletController {
     @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
   ) {}
 
-  // A user has exactly one wallet (guests: DEMO; operator players: the launch
-  // currency). Resolve by userId, not a hardcoded currency (audit C2).
+  // Resolve the wallet for display. Prefer the EXACT walletId the operator session
+  // bound (audit M-C2.1 / L-1) — robust if a user ever holds more than one wallet
+  // (multi-currency); verify it belongs to the authenticated user (sub stays the
+  // trust anchor). Guests carry no walletId → their single wallet by userId.
+  private async resolveWallet(userId: string, walletId?: string) {
+    if (walletId) {
+      const w = await this.prisma.wallet.findUniqueOrThrow({ where: { id: walletId } });
+      if (w.userId !== userId) throw new ForbiddenException("wallet_mismatch");
+      return w;
+    }
+    return this.prisma.wallet.findFirstOrThrow({ where: { userId } });
+  }
+
   @Get("balance")
-  async balance(@CurrentUserId() userId: string) {
-    const w = await this.prisma.wallet.findFirstOrThrow({ where: { userId } });
+  async balance(@CurrentUserId() userId: string, @CurrentWalletId() walletId?: string) {
+    const w = await this.resolveWallet(userId, walletId);
     // Operator-aware: in operator mode this returns the OPERATOR's real balance
     // (the local journal wallet is not authoritative); internal mode = local.
     const balance = await this.wallet$.getBalance(w.id);
@@ -26,8 +37,8 @@ export class WalletController {
   // source of truth, so this is our reconciliation journal — not the player's
   // authoritative statement (which lives at the operator). Local by design.
   @Get("transactions")
-  async transactions(@CurrentUserId() userId: string) {
-    const w = await this.prisma.wallet.findFirstOrThrow({ where: { userId } });
+  async transactions(@CurrentUserId() userId: string, @CurrentWalletId() walletId?: string) {
+    const w = await this.resolveWallet(userId, walletId);
     const rows = await this.prisma.ledgerTransaction.findMany({
       where: { walletId: w.id },
       orderBy: { createdAt: "desc" },

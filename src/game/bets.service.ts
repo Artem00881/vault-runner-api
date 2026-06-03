@@ -42,6 +42,15 @@ const PAYOUT_PENDING_ALERT_SEC = Number(process.env.PAYOUT_PENDING_ALERT_SEC ?? 
 // loudly; the sweep keeps retrying forever. Env-tunable (audit Low-4).
 const RESERVING_ALERT_SEC = Number(process.env.RESERVING_ALERT_SEC ?? 600);
 
+/** A session token's walletId that doesn't belong to its authenticated user (sub).
+ *  Should never happen (we mint them coherently) — surfaced as a DISTINCT rejected
+ *  metric so a cross-user probe pattern is alertable, not buried in bet_failed (L-2). */
+class WalletOwnershipError extends Error {
+  constructor(walletId: string, userId: string) {
+    super(`wallet ${walletId} does not belong to user ${userId}`);
+  }
+}
+
 @Injectable()
 export class BetsService {
   private readonly log = new Logger(BetsService.name);
@@ -66,7 +75,7 @@ export class BetsService {
   private async wallet(userId: string, walletId?: string) {
     if (walletId) {
       const w = await this.prisma.wallet.findUniqueOrThrow({ where: { id: walletId } });
-      if (w.userId !== userId) throw new Error(`wallet ${walletId} does not belong to user ${userId}`);
+      if (w.userId !== userId) throw new WalletOwnershipError(walletId, userId);
       return w;
     }
     return this.prisma.wallet.findFirstOrThrow({ where: { userId } });
@@ -93,12 +102,12 @@ export class BetsService {
 
     const wallet = await this.wallet(userId, walletId).catch((e: any) => {
       this.log.warn(`placeBet wallet resolution failed for user ${userId}: ${e?.message}`);
+      // Distinct label for a cross-user/mismatched walletId so it's alertable (L-2);
+      // the client still sees a generic bet_failed (no info leak).
+      this.metrics.recordRejected(e instanceof WalletOwnershipError ? "wallet_owner_mismatch" : "bet_failed");
       return null;
     });
-    if (!wallet) {
-      this.metrics.recordRejected("bet_failed");
-      return { ok: false, reason: "bet_failed", panel };
-    }
+    if (!wallet) return { ok: false, reason: "bet_failed", panel };
     const betId = randomUUID();
 
     // PHASE 1 — RESERVE (audit H1). Serialize all placeBet for THIS round on a

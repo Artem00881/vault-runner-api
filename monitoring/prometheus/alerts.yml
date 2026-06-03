@@ -75,6 +75,17 @@ groups:
           summary: "Reservation slot stuck > 10m"
           description: "Oldest reserving/cancelling bet slot has been stranded for {{ $value }}s (> 600s) — an owed refund the periodic sweep has not cleared (e.g. a 'cancelling' slot whose reversal keeps failing). The sweep keeps retrying; check the wallet/DB."
 
+      # Should be FLAT at 0 — tokens are minted with sub+walletId coherent. Any firing
+      # = a session walletId not owned by its user reached placeBet (token-minting bug or
+      # a forgery/probe attempt). Anomaly alert (audit L-2).
+      - alert: WalletOwnerMismatch
+        expr: increase(vaultrun_bets_rejected_total{reason="wallet_owner_mismatch"}[15m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Bet rejected — wallet not owned by the token's user"
+          description: "{{ $value }} bet(s) in 15m were rejected because the session walletId did not belong to its authenticated user (sub). This should never happen with coherently-minted tokens — investigate a token-minting bug or a probe/forgery attempt."
+
       - alert: ErrorSpike
         expr: sum(rate(vaultrun_errors_total[5m])) > 1
         for: 5m

@@ -18,6 +18,7 @@ export class JwtAuthGuard implements CanActivate {
     try {
       const payload = await this.jwt.verifyAsync(auth.slice(7));
       req.userId = payload.sub;
+      req.walletId = payload.walletId; // operator session binds a specific wallet (M-C2.1); undefined for guests
       return true;
     } catch {
       throw new UnauthorizedException("invalid_token");
@@ -28,4 +29,9 @@ export class JwtAuthGuard implements CanActivate {
 /** Inject the authenticated user id resolved by JwtAuthGuard. */
 export const CurrentUserId = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): string => ctx.switchToHttp().getRequest().userId,
+);
+
+/** Inject the session-bound walletId from the token (operator sessions), or undefined (guests). */
+export const CurrentWalletId = createParamDecorator(
+  (_data: unknown, ctx: ExecutionContext): string | undefined => ctx.switchToHttp().getRequest().walletId,
 );
