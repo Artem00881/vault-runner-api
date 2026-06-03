@@ -67,6 +67,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Block the merge on a HIGH/critical dependency advisory (audit H4). The one
+      # remaining moderate (@nestjs/core, no 10.x fix, unreachable in our code) is
+      # intentionally below the gate so it can't red-wall every build; new highs do.
+      - name: Dependency audit (fail on high+)
+        run: bun audit --audit-level=high
+
       - name: Generate Prisma client
         run: bunx prisma generate
 

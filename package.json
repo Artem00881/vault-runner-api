@@ -38,5 +38,12 @@
     "prisma": "^5.20.0",
     "socket.io-client": "^4.8.0",
     "typescript": "^5.6.0"
+  },
+  "//overrides": "audit H4: pin patched versions of unreachable transitive deps (no file uploads / no lodash code / no qs.stringify in our code). @nestjs/core moderate has no 10.x fix and is accepted with rationale (CI gate fails on high+ only).",
+  "overrides": {
+    "multer": "2.1.1",
+    "lodash": "^4.17.23",
+    "qs": "^6.15.2",
+    "file-type": "^21.3.1"
   }
 }
