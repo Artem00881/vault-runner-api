@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wallet/wallet-provider";
@@ -33,8 +33,15 @@ export interface CashoutResult {
  * All money-moving bet operations, validated against the authoritative engine
  * (server clock decides phase) and applied through the idempotent ledger.
  */
+// A payout_pending bet older than this (seconds) is "stuck" — log it loudly so
+// it's visible/alertable. We NEVER abandon a won payout; this only escalates
+// noise, the reconciler keeps retrying forever. Env-tunable (H2 operability).
+const PAYOUT_PENDING_ALERT_SEC = Number(process.env.PAYOUT_PENDING_ALERT_SEC ?? 3600);
+
 @Injectable()
 export class BetsService {
+  private readonly log = new Logger(BetsService.name);
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     // talks to the active WalletProvider (internal ledger today; operator wallet
@@ -281,6 +288,46 @@ export class BetsService {
         this.metrics.recordError("payout_reconcile");
       }
     }
+    // Reflect the live backlog AFTER the retry loop (cleared payouts drop out,
+    // so the gauge falls to 0 when nothing is owed) and escalate stuck ones.
+    await this.reportPendingBacklog();
     return recovered;
+  }
+
+  /** Count bets stuck in payout_pending (operator-mode owed payouts). Cheap. */
+  async countPendingPayouts(): Promise<number> {
+    return this.prisma.bet.count({ where: { status: "payout_pending" } });
+  }
+
+  /**
+   * Refresh the pending-payout gauges from the live table and loudly log any
+   * payout that has been stuck past PAYOUT_PENDING_ALERT_SEC — WITHOUT ever
+   * abandoning it (status is untouched; the reconciler keeps retrying forever).
+   * Cheap: one count + one findFirst(orderBy settledAt asc). "Pending since" is
+   * settledAt (set when cashOut claimed the bet).
+   */
+  private async reportPendingBacklog(): Promise<void> {
+    const count = await this.countPendingPayouts();
+    if (count === 0) {
+      this.metrics.setPendingPayouts(0, 0);
+      return;
+    }
+    const oldest = await this.prisma.bet.findFirst({
+      where: { status: "payout_pending" },
+      orderBy: { settledAt: "asc" },
+      select: { id: true, settledAt: true, payout: true },
+    });
+    const oldestMs = oldest?.settledAt ? Date.now() - oldest.settledAt.getTime() : 0;
+    const oldestAgeSeconds = Math.max(0, Math.floor(oldestMs / 1000));
+    this.metrics.setPendingPayouts(count, oldestAgeSeconds);
+
+    if (oldestAgeSeconds > PAYOUT_PENDING_ALERT_SEC) {
+      // Loud + actionable: which bet, how old, how many behind it. Never given up on.
+      this.log.error(
+        `STUCK operator payout: bet ${oldest?.id} owed ${oldest?.payout} pending ${oldestAgeSeconds}s ` +
+          `(> ${PAYOUT_PENDING_ALERT_SEC}s); ${count} payout(s) pending total. ` +
+          `Still retrying — a won payout is never abandoned. Check the operator wallet.`,
+      );
+    }
   }
 }

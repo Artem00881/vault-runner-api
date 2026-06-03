@@ -27,6 +27,11 @@ export class MetricsService {
 
   readonly wsConnections: Gauge;
   readonly realizedRtp: Gauge;
+  // Operator-mode payout backlog (H2): a won cash-out whose operator credit we
+  // couldn't confirm sits in status payout_pending until the reconciler clears
+  // it. We never abandon it, so a stuck one must be loud + alertable.
+  readonly pendingPayouts: Gauge;
+  readonly pendingPayoutOldestSeconds: Gauge;
 
   readonly settlementLatency: Histogram;
 
@@ -49,6 +54,8 @@ export class MetricsService {
 
     this.wsConnections = new Gauge({ name: "vaultrun_ws_connections", help: "Active WS connections", registers: reg });
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
+    this.pendingPayouts = new Gauge({ name: "vaultrun_pending_payouts", help: "Bets in status payout_pending (operator-mode owed payouts not yet confirmed)", registers: reg });
+    this.pendingPayoutOldestSeconds = new Gauge({ name: "vaultrun_pending_payout_oldest_seconds", help: "Age (seconds) of the oldest pending payout by settledAt; 0 if none", registers: reg });
 
     this.settlementLatency = new Histogram({
       name: "vaultrun_settlement_latency_ms",
@@ -79,6 +86,16 @@ export class MetricsService {
   recordError(where: string) { this.errorsTotal.inc({ where }); }
   setWsConnections(n: number) { this.wsConnections.set(n); }
   observeSettlementLatency(ms: number) { this.settlementLatency.observe(ms); }
+
+  /**
+   * Reflect the live operator-mode payout backlog (H2). Called each reconcile
+   * cycle so the gauges drop to 0 when the backlog clears. `oldestAgeSeconds` is
+   * the age of the oldest payout_pending bet by settledAt (0 when count === 0).
+   */
+  setPendingPayouts(count: number, oldestAgeSeconds: number) {
+    this.pendingPayouts.set(count);
+    this.pendingPayoutOldestSeconds.set(oldestAgeSeconds);
+  }
 
   private updateRtp() {
     if (this.stakeSum > 0) this.realizedRtp.set(this.payoutSum / this.stakeSum);

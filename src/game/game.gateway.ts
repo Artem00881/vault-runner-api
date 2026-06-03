@@ -1,4 +1,4 @@
-import { Inject, OnModuleDestroy } from "@nestjs/common";
+import { Inject, Logger, OnModuleDestroy } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import {
   ConnectedSocket,
@@ -34,6 +34,7 @@ const WS_CORS_ORIGIN: boolean | string[] =
 @WebSocketGateway({ cors: { origin: WS_CORS_ORIGIN, credentials: true } })
 export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server!: Server;
+  private readonly log = new Logger(GameGateway.name);
   private interval: ReturnType<typeof setInterval> | null = null;
   private reconcileInterval: ReturnType<typeof setInterval> | null = null;
   private reconciling = false; // guards against overlapping reconcile cycles (H2)
@@ -72,6 +73,24 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     if (process.env.WALLET_PROVIDER_TYPE === "operator") {
       void this.runReconcile();
       this.reconcileInterval = setInterval(() => void this.runReconcile(), 30_000);
+    } else {
+      // Off operator mode the reconciler doesn't run — but payout_pending rows can
+      // exist (left by a prior operator-mode run, or operator mode toggled off
+      // with a backlog). They're owed wins that WON'T be reconciled until operator
+      // mode is back on, so make that loud at boot. (No retry here — wrong wallet.)
+      void this.bets
+        .countPendingPayouts()
+        .then((n) => {
+          if (n > 0) {
+            this.log.error(
+              `${n} payout_pending bet(s) exist but WALLET_PROVIDER_TYPE is not "operator" — ` +
+                `these owed payouts will NOT be reconciled until operator mode is enabled.`,
+            );
+          }
+        })
+        .catch(() => {
+          /* boot-time DB hiccup — don't crash the gateway over a diagnostic count */
+        });
     }
   }
 

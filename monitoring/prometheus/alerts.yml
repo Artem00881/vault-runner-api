@@ -39,6 +39,31 @@ groups:
           summary: "Game engine not producing rounds"
           description: "No rounds completed in 15 minutes — engine may be stuck (e.g. fairness chain exhausted)."
 
+      # Operator-mode owed payouts (H2): a won cash-out whose operator credit we
+      # couldn't confirm sits in payout_pending until the reconciler clears it.
+      # We NEVER abandon it (it keeps retrying) — but a backlog that lingers, or a
+      # payout stuck for over an hour, means the operator wallet needs a human.
+      # Two clauses keep their own "for": a non-empty backlog must persist 15m to
+      # fire (rides out a brief operator blip the reconciler clears), but a single
+      # payout already pending > 1h alerts promptly. Either routes to Telegram.
+      # (The 1h here is independent of the app's PAYOUT_PENDING_ALERT_SEC loud-log
+      # threshold — keep them in sync if you tune one.)
+      - alert: PayoutsPending
+        expr: vaultrun_pending_payouts > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Operator payouts pending (backlog not clearing)"
+          description: "{{ $value }} operator payout(s) stuck in payout_pending for over 15 minutes — the reconciler keeps retrying but the operator wallet may be down. Won payouts are never abandoned."
+
+      - alert: PayoutStuck
+        expr: vaultrun_pending_payout_oldest_seconds > 3600
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Operator payout stuck > 1h"
+          description: "Oldest pending operator payout has been unconfirmed for {{ $value }}s (> 3600s). Still retrying — check the operator wallet."
+
       - alert: ErrorSpike
         expr: sum(rate(vaultrun_errors_total[5m])) > 1
         for: 5m
