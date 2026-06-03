@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { EventEmitter } from "node:events";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { RedisService } from "../redis/redis.service";
 import { FairnessService } from "../fairness/fairness.service";
@@ -115,18 +116,29 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * H1 recovery: 'reserving' bets are stale on boot (no placeBet is in flight
-   * before the engine starts). A reserving row whose debit actually applied
-   * (money moved but the flip to active never completed) is REFUNDED; one with no
-   * ledger debit moved no money — just drop it. The LEDGER (deterministic debit
-   * key) is the source of truth, so this is robust even if debitTxId was never
-   * stamped. Runs regardless of round status (an orphan can sit on a completed
-   * round). Idempotent refund key, so a double boot can't double-refund.
+   * H1 recovery: reverse a stranded 'reserving' slot. One whose debit actually
+   * applied (money moved but the flip to active never completed) is REFUNDED; one
+   * with no ledger debit moved no money — just drop it. The LEDGER (deterministic
+   * debit key) is the source of truth, so this is robust even if debitTxId was
+   * never stamped. Operator charges are reversed via the idempotent wallet$.rollback
+   * first (no-op internal). Runs regardless of round status (an orphan can sit on a
+   * completed round). Idempotent refund key, so a double pass can't double-refund.
+   *
+   * @param olderThanMs only recover slots older than this (by createdAt). 0 (the
+   *   default, used at boot) recovers ALL reserving slots — safe there because no
+   *   placeBet is in flight before the engine starts. The periodic gateway sweep
+   *   passes a threshold (RESERVING_STALE_SEC) so a placeBet legitimately mid-flight
+   *   (reserve→debit→activate, a few seconds) is NEVER swept — only genuinely
+   *   stranded slots are. Returns how many were processed.
    */
-  private async recoverReservingBets() {
-    const reserving = await this.prisma.bet.findMany({ where: { status: "reserving" } });
-    if (reserving.length === 0) return;
-    this.log.warn(`recovering ${reserving.length} stale 'reserving' bet(s)`);
+  async recoverReservingBets(olderThanMs = 0): Promise<number> {
+    const where: Prisma.BetWhereInput = { status: "reserving" };
+    if (olderThanMs > 0) where.createdAt = { lt: new Date(Date.now() - olderThanMs) };
+    const reserving = await this.prisma.bet.findMany({ where });
+    if (reserving.length === 0) return 0;
+    this.log.warn(
+      `recovering ${reserving.length} ${olderThanMs > 0 ? `stale (>${Math.round(olderThanMs / 1000)}s) ` : ""}'reserving' bet(s)`,
+    );
     for (const bet of reserving) {
       const debitKey = `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`;
       // Undo any OPERATOR-side charge for this slot first: rollback is idempotent —
@@ -161,6 +173,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
         await this.prisma.bet.delete({ where: { id: bet.id } }).catch(() => {});
       }
     }
+    return reserving.length;
   }
 
   stop() {

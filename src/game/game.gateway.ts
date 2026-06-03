@@ -20,6 +20,18 @@ function userRoom(userId: string) {
 }
 
 /**
+ * Resolve the 'reserving' sweep age threshold (ms) from `RESERVING_STALE_SEC`.
+ * The gate is a money-safety control — a non-numeric, non-positive, or dangerously
+ * low value must NEVER shrink/disable it (that could refund a placeBet still in
+ * flight). Require a finite value floored at 30s (well above the worst-case
+ * reserve→debit→activate window); anything else (unset/invalid/too-low) → 120s.
+ */
+export function resolveReservingStaleMs(raw: string | undefined): number {
+  const sec = Number(raw);
+  return (Number.isFinite(sec) && sec >= 30 ? sec : 120) * 1000;
+}
+
+/**
  * Real-time gateway: streams the authoritative round to clients and accepts
  * money-moving actions (bet / cash-out), all validated server-side.
  */
@@ -38,6 +50,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private interval: ReturnType<typeof setInterval> | null = null;
   private reconcileInterval: ReturnType<typeof setInterval> | null = null;
   private reconciling = false; // guards against overlapping reconcile cycles (H2)
+  private reservingSweepInterval: ReturnType<typeof setInterval> | null = null;
+  private sweeping = false; // guards against overlapping 'reserving' sweeps
   private userSockets = new Map<string, string>(); // userId → socketId (one per user)
   private msgRate = new Map<string, { n: number; t: number }>();
 
@@ -92,6 +106,15 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
           /* boot-time DB hiccup — don't crash the gateway over a diagnostic count */
         });
     }
+
+    // Operator-hardening: a 'reserving' slot can be stranded mid-run (the debit
+    // applied but the flip to active failed and was left recoverable). Boot recovery
+    // heals it, but only on restart — sweep periodically so it self-heals WITHOUT a
+    // reboot, in BOTH wallet modes (internal refunds via the ledger; operator via an
+    // idempotent rollback). Age-gated (RESERVING_STALE_SEC, default 120s) so a placeBet
+    // legitimately in flight is NEVER touched — only genuinely stranded slots.
+    const reservingStaleMs = resolveReservingStaleMs(process.env.RESERVING_STALE_SEC);
+    this.reservingSweepInterval = setInterval(() => void this.runReservingSweep(reservingStaleMs), 60_000);
   }
 
   /** Reconcile pending payouts, guarded against overlapping cycles — a slow cycle
@@ -108,9 +131,27 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
+  /** Periodic, age-gated 'reserving' recovery (BOTH wallet modes) — self-heals a
+   *  mid-run stranded reservation without a reboot. Guarded against overlap so a
+   *  slow pass can't stack. Per-bet errors are logged inside the engine method. */
+  private async runReservingSweep(olderThanMs: number) {
+    if (this.sweeping) return;
+    this.sweeping = true;
+    try {
+      await this.engine.recoverReservingBets(olderThanMs);
+    } catch (e: any) {
+      // Per-bet failures are already logged inside recoverReservingBets; this catches a
+      // top-level failure (e.g. the findMany itself on a DB blip) so it isn't silent.
+      this.log.warn(`reserving sweep failed: ${e?.message}`);
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
   onModuleDestroy() {
     if (this.interval) clearInterval(this.interval);
     if (this.reconcileInterval) clearInterval(this.reconcileInterval);
+    if (this.reservingSweepInterval) clearInterval(this.reservingSweepInterval);
   }
 
   async handleConnection(client: Socket) {
