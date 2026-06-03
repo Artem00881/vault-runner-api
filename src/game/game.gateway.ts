@@ -11,16 +11,9 @@ import {
   WebSocketServer,
 } from "@nestjs/websockets";
 import type { Server, Socket } from "socket.io";
-import { z } from "zod";
 import { GameEngineService } from "./game-engine.service";
 import { BetsService, type Panel } from "./bets.service";
-
-const placeSchema = z.object({
-  panel: z.enum(["A", "B"]),
-  amount: z.number().positive(),
-  autoCashout: z.number().gt(1).optional(),
-});
-const panelSchema = z.object({ panel: z.enum(["A", "B"]) });
+import { placeSchema, panelSchema } from "./ws-schemas";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -32,7 +25,13 @@ function userRoom(userId: string) {
  */
 const WS_MSG_LIMIT = 15; // messages per second per socket
 
-@WebSocketGateway({ cors: { origin: "*" } })
+// Mirror the HTTP CORS policy (main.ts): "*"/empty → reflect any origin, else a
+// comma-separated allowlist. Don't hardcode "*" (audit M2).
+const rawWsCors = process.env.CORS_ORIGIN?.trim();
+const WS_CORS_ORIGIN: boolean | string[] =
+  !rawWsCors || rawWsCors === "*" ? true : rawWsCors.split(",").map((s) => s.trim());
+
+@WebSocketGateway({ cors: { origin: WS_CORS_ORIGIN, credentials: true } })
 export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server!: Server;
   private interval: ReturnType<typeof setInterval> | null = null;

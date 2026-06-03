@@ -73,8 +73,12 @@ export class BetsService {
 
     const wallet = await this.wallet(userId);
     const betId = randomUUID();
+    // Idempotency key is bound to the LOGICAL bet (round+user+panel), not the
+    // per-attempt id, so a concurrent/retried duplicate dedups in the ledger
+    // instead of charging twice for one bet (audit C1).
+    const debitKey = `bet:${roundId}:${userId}:${panel}:debit`;
     try {
-      const tx = await this.wallet$.debit(wallet.id, amt, "bet_debit", `bet:${betId}:debit`, {
+      const tx = await this.wallet$.debit(wallet.id, amt, "bet_debit", debitKey, {
         refType: "bet",
         refId: betId,
       });
@@ -94,6 +98,9 @@ export class BetsService {
       this.metrics.recordBet(Number(amt)); // stake → realized-RTP denominator
       return { ok: true, panel, balance: Number(tx.balanceAfter), betId };
     } catch (e: any) {
+      // Lost a concurrent race for the same (round,user,panel): the bet row
+      // already exists (P2002) and the debit above was deduped — no double charge.
+      if (e?.code === "P2002") return { ok: false, reason: "already_bet", panel };
       const reason = e?.message === "insufficient_balance" ? "insufficient_balance" : "bet_failed";
       this.metrics.recordRejected(reason);
       return { ok: false, reason, panel };
@@ -134,14 +141,27 @@ export class BetsService {
     // payout = stake × multiplier, clamped to the per-bet max-win cap (house safeguard)
     const rawPayout = BigInt(Math.floor(Number(bet.amount) * mult));
     const payout = this.risk.capPayout(rawPayout);
+
+    // Atomically CLAIM the bet (active → cashed_out). A manual+auto race (or two
+    // sockets) can both read status:"active", but only the update that flips it
+    // wins; the loser stops here, so the credit (idempotent anyway) and the
+    // leaderboard increment can never be double-counted (audit M1).
+    const claim = await this.prisma.bet.updateMany({
+      where: { id: bet.id, status: "active" },
+      data: { status: "cashed_out", cashoutMult: mult, payout, settledAt: new Date() },
+    });
+    if (claim.count === 0) return { ok: false, reason: "no_active_bet", userId, panel };
+
+    // NOTE (audit H2, operator track): in operator mode `credit` can throw on an
+    // ambiguous timeout, leaving the bet claimed-but-unpaid. A compensation/retry
+    // path must be designed (with the money-path-auditor) before enabling
+    // WALLET_PROVIDER_TYPE=operator. The internal ledger credit does not throw.
     const credit = await this.wallet$.credit(bet.walletId, payout, "payout_credit", `bet:${bet.id}:payout`, {
       refType: "bet",
       refId: bet.id,
     });
-    await this.prisma.bet.update({
-      where: { id: bet.id },
-      data: { status: "cashed_out", cashoutMult: mult, payout, settledAt: new Date() },
-    });
+    // link the cashed-out bet to its payout tx for reconciliation (was unset).
+    await this.prisma.bet.update({ where: { id: bet.id }, data: { payoutTxId: credit.id } });
 
     // update leaderboard stats (loot += payout, biggest = max)
     await this.prisma.$executeRawUnsafe(
@@ -172,8 +192,14 @@ export class BetsService {
     });
     const results: CashoutResult[] = [];
     for (const bet of due) {
-      const r = await this.cashOut(bet.userId, bet.panel as Panel, Number(bet.autoCashout));
-      if (r.ok) results.push(r);
+      try {
+        const r = await this.cashOut(bet.userId, bet.panel as Panel, Number(bet.autoCashout));
+        if (r.ok) results.push(r);
+      } catch {
+        // One bet's payout failure (e.g. an operator wallet error) must not abort
+        // auto-cashout for the other due bets this tick (audit H2 hardening).
+        this.metrics.recordError("auto_cashout");
+      }
     }
     return results;
   }
