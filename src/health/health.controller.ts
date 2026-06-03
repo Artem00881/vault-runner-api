@@ -1,7 +1,8 @@
-import { Controller, Get, Inject, HttpException, HttpStatus } from "@nestjs/common";
+import { Controller, Get, Inject, HttpException, HttpStatus, Req } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { RedisService } from "../redis/redis.service";
 import { GameEngineService } from "../game/game-engine.service";
+import { bearerToken, safeTokenEqual } from "../common/timing-safe";
 
 /**
  * Deep liveness check (Phase 1.2). Pings each critical dependency so a load
@@ -33,7 +34,7 @@ export class HealthController {
   }
 
   @Get()
-  async health() {
+  async health(@Req() req?: any) {
     const [db, redis] = await Promise.all([
       this.ping(() => this.prisma.$queryRaw`SELECT 1`),
       this.ping(() => this.redis.client.ping()),
@@ -47,17 +48,25 @@ export class HealthController {
       }
     })();
     const engine = { running: !!state, phase: state?.phase ?? null };
+    const healthy = db.up && redis.up; // engine is informational only
 
-    const body = {
-      service: "vault-runner-api",
-      uptimeMs: Date.now() - this.startedAt,
-      ts: new Date().toISOString(),
-      deps: { db, redis, engine },
-    };
+    // The detailed body (deps + their error strings/hostnames, uptime) is an
+    // info-disclosure surface (audit H5). Expose it only to a caller bearing the
+    // METRICS_TOKEN; the public body is just {status}. When the token is unset
+    // (local/CI) keep full detail so dev/debugging + existing tests are unaffected.
+    // The 200/503 decision is unchanged, so any healthcheck on the status code works.
+    const token = process.env.METRICS_TOKEN;
+    const showDetail = !token || safeTokenEqual(bearerToken(req?.headers?.authorization), token);
+    const detail = showDetail
+      ? {
+          service: "vault-runner-api",
+          uptimeMs: Date.now() - this.startedAt,
+          ts: new Date().toISOString(),
+          deps: { db, redis, engine },
+        }
+      : {};
 
-    // Health = all CRITICAL deps up. Engine is informational only.
-    if (db.up && redis.up) return { status: "ok", ...body };
-    // 503 with the per-dependency detail in the body, so monitors see WHAT broke.
-    throw new HttpException({ status: "degraded", ...body }, HttpStatus.SERVICE_UNAVAILABLE);
+    if (healthy) return { status: "ok", ...detail };
+    throw new HttpException({ status: "degraded", ...detail }, HttpStatus.SERVICE_UNAVAILABLE);
   }
 }

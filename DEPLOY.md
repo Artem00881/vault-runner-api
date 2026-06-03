@@ -318,6 +318,41 @@ update `networks.app.name` in `monitoring/docker-compose.yml`.
   disabled. Use the `restart prometheus` command above instead (do NOT rely on
   `/-/reload`). The metrics those rules read ship with the normal backend deploy.
 
+**`/metrics` + `/health` auth (audit H5) — ACTIVATION (coordinated deploy).**
+The app code ships with a guard that is **OPEN when `METRICS_TOKEN` is unset** (no
+behaviour change until activated). To actually LOCK `/metrics` (bearer-only) and
+slim the public `/health` to `{status}` only, do this **in order** — getting the
+order wrong breaks either the whole API stack or monitoring:
+1. **Create the secret FIRST.** In 1Password vault `VaultRun-Prod` create a
+   `METRICS_TOKEN` item (password field), value with NO trailing newline:
+   `openssl rand -hex 32`. (Same in `VaultRun-Staging` before locking staging.)
+   The `op://` ref (step 3) makes `op run` resolve it on EVERY deploy — if the item
+   is missing, `./op-compose.sh up` fails the **entire** stack (fail-closed). So the
+   item must exist before the ref is committed/deployed.
+2. **Write the host token file** (same value, no newline — Prometheus reads it):
+   `op read 'op://VaultRun-Prod/METRICS_TOKEN/password' | tr -d '\n' > /etc/vaultrun/metrics-token && chmod 600 /etc/vaultrun/metrics-token`.
+   This file MUST exist before Prometheus is (re)created — a missing
+   `credentials_file` makes Prometheus fail to start (and a missing host path makes
+   Docker create an empty directory at the mount). It persists across reboots.
+3. **Commit + pull the 3 activation configs** (deferred from the H5 code commit so
+   routine deploys/reboots stay safe until the secret+file exist): add
+   `METRICS_TOKEN=op://VaultRun-Prod/METRICS_TOKEN/password` to `op.prod.env`; add an
+   `authorization: { type: Bearer, credentials_file: /etc/prometheus/metrics-token }`
+   block to the `vaultrun-api` job in `monitoring/prometheus/prometheus.yml`; add the
+   `- /etc/vaultrun/metrics-token:/etc/prometheus/metrics-token:ro` volume to the
+   `prometheus` service in `monitoring/docker-compose.yml`. Then `git pull` on the VPS.
+4. **Deploy the API** (injects the token → `/metrics` locked, `/health` slimmed):
+   `./op-compose.sh up -d --build`.
+5. **Recreate Prometheus** (a new volume needs recreate, not just restart):
+   `docker compose -f monitoring/docker-compose.yml up -d prometheus`.
+6. **Verify:** `curl -si localhost:3001/metrics | head -1` → 401;
+   `curl -si -H "Authorization: Bearer $(cat /etc/vaultrun/metrics-token)" localhost:3001/metrics | head -1` → 200;
+   `curl -s localhost:3001/health` → `{"status":"ok"}` only (no deps);
+   `curl -s 'http://127.0.0.1:9090/api/v1/targets' | grep -o '"health":"[a-z]*"' | sort | uniq -c` → `vaultrun-api` up.
+   If `vaultrun-api` is DOWN (401) after this, the app token and the host file
+   disagree — almost always a trailing newline; rewrite with `tr -d '\n'`.
+   UNDO: remove the `op.prod.env` ref + redeploy (token unset → open again).
+
 **Create the Telegram bot (one-time):**
 1. In Telegram, message **@BotFather** → `/newbot` → follow prompts → copy the
    **bot token**.

@@ -60,6 +60,10 @@ services:
       SALT_PROVIDER_TYPE: "${SALT_PROVIDER_TYPE:-random}"
       ETH_RPC_URLS: "${ETH_RPC_URLS:-}"
       ETH_SALT_LEAD_BLOCKS: "${ETH_SALT_LEAD_BLOCKS:-10}"
+      # Bearer token protecting /metrics (audit H5). Unset = open (origin is
+      # Cloudflare/loopback-only); set via 1Password (op.prod.env) to lock it.
+      # Prometheus sends the matching bearer (monitoring/prometheus/prometheus.yml).
+      METRICS_TOKEN: "${METRICS_TOKEN:-}"
     # Bind to loopback only — the app is NOT exposed to the public internet.
     # A host-level Caddy reverse proxy (TLS + Cloudflare Authenticated Origin
     # Pulls) terminates :443 and forwards to 127.0.0.1:3001. See DEPLOY.md
