@@ -449,6 +449,39 @@ users as one bucket.
 
 ---
 
+## 14. Fairness — epochs & block-hash salt — built 2026-06-02 (Phase 2)
+
+The crash is provably fair (seed chain + salt → HMAC → crash; see
+`docs/provably-fair-guide.md`). Two operational facts:
+
+**Epochs + auto-rollover.** The seed chain is split into epochs (`fairness_chains`
+table). When an epoch runs out the engine **automatically rolls over** to a fresh
+epoch — the old ~2-day "chain exhausted" stall is gone; **no manual reset needed.**
+`FAIRNESS_CHAIN_LENGTH` (default 10000) sets seeds per epoch.
+
+**Salt source — `SALT_PROVIDER_TYPE`:**
+- `random` (default; staging) — operator-published random salt.
+- `eth-block` (**prod**, persisted in `op.prod.env`) — **grind-proof**: each epoch's
+  salt is the hash of a *future finalized Ethereum block*, committed before the block
+  exists. The engine pre-commits + arms the next epoch in the background
+  (`maintain()` each round); the public commitment (target block) is visible at
+  `GET /api/fairness/current` → `nextEpoch`. If the oracle is unavailable it falls
+  back to a random salt so the game never stalls.
+  - Oracle: `src/fairness/eth-block.ts`, reads the **finalized** chain (reorg-safe),
+    cross-checks across several public RPCs (`ETH_RPC_URLS`, default
+    publicnode/drpc/blastapi/nodies; `ETH_SALT_LEAD_BLOCKS` default 10).
+
+**Flip prod random ↔ eth-block:** edit the `SALT_PROVIDER_TYPE` line in `op.prod.env`
+→ commit → `./op-compose.sh up -d --force-recreate`. (`op run` passes plain
+`KEY=value` lines from `op.prod.env` through, so the value persists across deploys.)
+
+**Reset fairness (rarely needed now):** `docker stop vaultrun-api` FIRST (else the
+running engine re-creates a chain mid-reset), then `DELETE FROM game_rounds; DELETE
+FROM fairness_seeds; DELETE FROM fairness_chains;` (FK order), then `./op-compose.sh
+up -d`.
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the
