@@ -27,6 +27,7 @@ model Operator {
   callbackUrl  String?  @map("callback_url") // return-to-lobby URL
   ipWhitelist  String[] @default([]) @map("ip_whitelist")
   betLimits    Json?    @map("bet_limits") // per-currency bet-level tables
+  rgConfig     Json?    @map("rg_config") // responsible-gambling config (reality checks + session limits)
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -184,6 +185,7 @@ model Bet {
 
   @@unique([roundId, userId, panel])
   @@index([userId, createdAt(sort: Desc)])
+  @@index([walletId, createdAt]) // per-session RG accounting: sum a wallet's bets since session start (Phase 3)
   @@map("game_bets")
 }
 

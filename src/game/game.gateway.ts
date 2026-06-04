@@ -15,11 +15,62 @@ import { GameEngineService } from "./game-engine.service";
 import { BetsService, type Panel } from "./bets.service";
 import { GameSessionService } from "../operator/game-session.service";
 import { deserializeBetLimits } from "../operator/bet-limits";
+import { deserializeRg, type EffectiveRg } from "../operator/rg-config";
 import type { PerBetLimits } from "./risk.service";
 import { placeSchema, panelSchema } from "./ws-schemas";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
+}
+
+/** Per-socket responsible-gambling state the RG sweep reads (Phase 3). */
+export interface RgSocketState {
+  rg: EffectiveRg;
+  sessionStartedAt: number; // epoch ms
+  rgRealityDueAt?: number; // epoch ms of the next reality check (undefined = none configured)
+  rgPending: boolean; // a reality check is awaiting ack (hard-pause mode)
+  rgTimeLimitNotified: boolean; // the session_time_limit event was already emitted (emit once)
+}
+
+/** Pure RG decision for one socket at `now` — what to emit + the next per-socket state.
+ *  Pure (no I/O) so it's unit-testable without constructing the gateway (which the test
+ *  suite never does). The sweep performs the emits/DB read; this only decides timing. */
+export interface RgDecision {
+  emitRealityCheck: boolean;
+  tripTimeLimit: boolean; // session time limit just crossed (emit once)
+  nextDueAt?: number;
+  nextPending: boolean;
+  nextTimeLimitNotified: boolean;
+}
+
+export function rgEvaluate(s: RgSocketState, now: number): RgDecision {
+  const base: RgDecision = {
+    emitRealityCheck: false,
+    tripTimeLimit: false,
+    nextDueAt: s.rgRealityDueAt,
+    nextPending: s.rgPending,
+    nextTimeLimitNotified: s.rgTimeLimitNotified,
+  };
+  // Session time limit takes precedence: once reached the session is over (placeBet
+  // blocks new bets) — emit it ONCE and stop reality-check reminders.
+  if (s.rg.maxSessionSec !== undefined && now >= s.sessionStartedAt + s.rg.maxSessionSec * 1000) {
+    return { ...base, tripTimeLimit: !s.rgTimeLimitNotified, nextTimeLimitNotified: true };
+  }
+  // Reality check due? Advance the timer from NOW (so a missed sweep can't burst-fire),
+  // and set pending in enforce (hard-pause) mode so new bets block until ack.
+  if (
+    s.rg.realityCheckIntervalSec !== undefined &&
+    s.rgRealityDueAt !== undefined &&
+    now >= s.rgRealityDueAt
+  ) {
+    return {
+      ...base,
+      emitRealityCheck: true,
+      nextDueAt: now + s.rg.realityCheckIntervalSec * 1000,
+      nextPending: s.rg.enforceRealityCheck ? true : s.rgPending,
+    };
+  }
+  return base;
 }
 
 /**
@@ -55,6 +106,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private reconciling = false; // guards against overlapping reconcile cycles (H2)
   private reservingSweepInterval: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // guards against overlapping 'reserving' sweeps
+  private rgSweepInterval: ReturnType<typeof setInterval> | null = null;
+  private rgSweeping = false; // guards against overlapping RG sweeps
   private userSockets = new Map<string, string>(); // userId → socketId (one per user)
   private msgRate = new Map<string, { n: number; t: number }>();
 
@@ -119,6 +172,11 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     // legitimately in flight is NEVER touched — only genuinely stranded slots.
     const reservingStaleMs = resolveReservingStaleMs(process.env.RESERVING_STALE_SEC);
     this.reservingSweepInterval = setInterval(() => void this.runReservingSweep(reservingStaleMs), 60_000);
+
+    // Phase 3 RG: a phase-independent ~5s sweep emits reality checks + trips session
+    // time limits per live socket. A no-op for sockets with no `rg` (guests/demo/
+    // non-RG operators), so it's cheap regardless of wallet mode.
+    this.rgSweepInterval = setInterval(() => void this.runRgSweep(), 5_000);
   }
 
   /** Reconcile pending payouts, guarded against overlapping cycles — a slow cycle
@@ -153,10 +211,71 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
+  /** Phase-independent RG sweep (Phase 3): for each live socket carrying an `rg`
+   *  context, emit reality checks on the configured interval and trip the session time
+   *  limit ONCE. Guarded against overlap; a no-op for non-RG sockets (guests/demo).
+   *  The reality-check payload carries the session's wagered/won/net (derived from bets). */
+  private async runRgSweep() {
+    if (this.rgSweeping) return;
+    this.rgSweeping = true;
+    const now = Date.now();
+    try {
+      for (const [userId, socketId] of this.userSockets) {
+        const sock = this.server.sockets.sockets.get(socketId);
+        const rg = sock?.data?.rg as EffectiveRg | undefined;
+        const startedAt = sock?.data?.sessionStartedAt as number | undefined;
+        if (!sock || !rg || startedAt === undefined) continue;
+
+        const decision = rgEvaluate(
+          {
+            rg,
+            sessionStartedAt: startedAt,
+            rgRealityDueAt: sock.data.rgRealityDueAt as number | undefined,
+            rgPending: sock.data.rgPending === true,
+            rgTimeLimitNotified: sock.data.rgTimeLimitNotified === true,
+          },
+          now,
+        );
+        // Commit the next per-socket state.
+        sock.data.rgRealityDueAt = decision.nextDueAt;
+        sock.data.rgPending = decision.nextPending;
+        sock.data.rgTimeLimitNotified = decision.nextTimeLimitNotified;
+
+        if (decision.tripTimeLimit) {
+          this.server.to(userRoom(userId)).emit("session_time_limit", { maxSessionSec: rg.maxSessionSec });
+        }
+        if (decision.emitRealityCheck) {
+          const walletId = sock.data.walletId as string | undefined;
+          let acc = { wagered: 0n, won: 0n, net: 0n };
+          if (walletId) {
+            try {
+              acc = await this.bets.sessionAccounting(walletId, new Date(startedAt));
+            } catch (e: any) {
+              this.log.warn(`RG accounting failed for ${userId}: ${e?.message}`);
+            }
+          }
+          this.server.to(userRoom(userId)).emit("reality_check", {
+            elapsedSec: Math.max(0, Math.floor((now - startedAt) / 1000)),
+            wagered: Number(acc.wagered),
+            won: Number(acc.won),
+            net: Number(acc.net),
+            currency: (sock.data.currency as string) ?? "DEMO",
+            enforce: rg.enforceRealityCheck,
+          });
+        }
+      }
+    } catch (e: any) {
+      this.log.warn(`RG sweep failed: ${e?.message}`);
+    } finally {
+      this.rgSweeping = false;
+    }
+  }
+
   onModuleDestroy() {
     if (this.interval) clearInterval(this.interval);
     if (this.reconcileInterval) clearInterval(this.reconcileInterval);
     if (this.reservingSweepInterval) clearInterval(this.reservingSweepInterval);
+    if (this.rgSweepInterval) clearInterval(this.rgSweepInterval);
   }
 
   async handleConnection(client: Socket) {
@@ -185,6 +304,26 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         // the bet row. The actual money routing is by walletId (WalletRouter), so this
         // flag only labels the bet; it can't move money to the wrong source.
         client.data.demo = (payload as any).demo === true;
+        // Phase 3 RG: in-session responsible-gambling context (real sessions carry an
+        // `rg` claim; demo/guests don't). sessionId/currency were previously dropped.
+        client.data.sessionId = (payload as any).sessionId;
+        client.data.currency = (payload as any).currency;
+        const rgStartedAt = Number((payload as any).sessionStartedAt);
+        const rg = deserializeRg((payload as any).rg);
+        if (rg && Number.isFinite(rgStartedAt)) {
+          client.data.sessionStartedAt = rgStartedAt;
+          client.data.rg = rg;
+          client.data.rgPending = false;
+          client.data.rgTimeLimitNotified = false;
+          client.data.rgRealityDueAt = rg.realityCheckIntervalSec
+            ? rgStartedAt + rg.realityCheckIntervalSec * 1000
+            : undefined;
+        } else if (rg) {
+          // A signed token carried RG but no usable sessionStartedAt — impossible via the
+          // real mint path (both are set together), so log it so a future regression that
+          // would silently drop the RG controls is visible rather than failing open quietly.
+          this.log.warn(`operator session token carried RG but no valid sessionStartedAt — RG NOT applied for user ${userId}`);
+        }
         client.join(userRoom(userId));
         // one active game socket per user — drop any previous one (multi-tab abuse)
         const prev = this.userSockets.get(userId);
@@ -260,7 +399,14 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const walletId = client.data.walletId as string | undefined;
     const limits = client.data.limits as PerBetLimits | undefined;
     const demo = client.data.demo as boolean | undefined;
-    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits, demo);
+    // Phase 3 RG: session-scoped controls (real sessions only; rg is undefined for
+    // demo/guests so placeBet skips RG). The pending flag is set by the reality-check sweep.
+    const rgCtx = {
+      rg: client.data.rg as EffectiveRg | undefined,
+      rgPending: client.data.rgPending === true,
+      sessionStartedAt: client.data.sessionStartedAt as number | undefined,
+    };
+    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits, demo, rgCtx);
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {
@@ -297,5 +443,19 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       client.emit("balance_updated", { currency: r.currency ?? "DEMO", balance: r.balance });
     }
     return r;
+  }
+
+  /** Phase 3 RG: the player acknowledged a reality check → unblock new bets and reset
+   *  the interval from now (the next check fires `interval` seconds after this ack). */
+  @SubscribeMessage("reality_check_ack")
+  onRealityCheckAck(@ConnectedSocket() client: Socket) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
+    const rg = client.data.rg as EffectiveRg | undefined;
+    if (!client.data.userId || !rg) return { ok: false, reason: "not_authenticated" };
+    client.data.rgPending = false;
+    if (rg.realityCheckIntervalSec) {
+      client.data.rgRealityDueAt = Date.now() + rg.realityCheckIntervalSec * 1000;
+    }
+    return { ok: true };
   }
 }

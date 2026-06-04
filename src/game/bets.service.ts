@@ -5,8 +5,18 @@ import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wa
 import { GameEngineService } from "./game-engine.service";
 import { RiskService, type PerBetLimits } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
+import type { EffectiveRg } from "../operator/rg-config";
 
 export type Panel = "A" | "B";
+
+/** Per-session responsible-gambling context for a bet (Phase 3). Real-money sessions
+ *  only — demo/guests carry none. The gateway resolves it from the signed play token
+ *  (`rg` claim + `sessionStartedAt`) + the live per-socket reality-check pending flag. */
+export interface RgContext {
+  rg?: EffectiveRg;
+  rgPending?: boolean; // a reality check is awaiting acknowledgment (blocks NEW bets)
+  sessionStartedAt?: number; // epoch ms (GameSession.createdAt) — accounting window + time limit
+}
 
 export interface BetResult {
   ok: boolean;
@@ -81,8 +91,43 @@ export class BetsService {
     return this.prisma.wallet.findFirstOrThrow({ where: { userId } });
   }
 
+  /**
+   * Per-session money totals for responsible-gambling limits, DERIVED from Bet rows
+   * (no running counters → no double-count hazard, always ledger-consistent). Scoped
+   * to this session: the bound walletId AND createdAt >= the session start (the wallet
+   * is reused across launches, so the time bound is what makes it per-session). Served
+   * by the `[walletId, createdAt]` index.
+   *
+   *  - wagered = Σ stake over bets whose stake was actually DEBITED
+   *              (active | cashed_out | busted | payout_pending);
+   *              EXCLUDES reserving (pre-debit) and cancelling/cancelled (refunded).
+   *  - won     = Σ payout over settled wins (cashed_out | payout_pending — a
+   *              payout_pending is an owed, already-claimed win).
+   *  - net     = wagered − won (positive = the player is down). An UNSETTLED active
+   *              stake counts fully toward wagered with payout 0, i.e. as at-risk loss
+   *              — the protective direction so a loss cap can't be dodged by leaving
+   *              bets open.
+   */
+  async sessionAccounting(walletId: string, since: Date): Promise<{ wagered: bigint; won: bigint; net: bigint }> {
+    const bets = await this.prisma.bet.findMany({
+      where: { walletId, createdAt: { gte: since } },
+      select: { status: true, amount: true, payout: true },
+    });
+    let wagered = 0n;
+    let won = 0n;
+    for (const b of bets) {
+      if (b.status === "active" || b.status === "cashed_out" || b.status === "busted" || b.status === "payout_pending") {
+        wagered += b.amount;
+      }
+      if (b.status === "cashed_out" || b.status === "payout_pending") {
+        won += b.payout;
+      }
+    }
+    return { wagered, won, net: wagered - won };
+  }
+
   /** Place a bet on the CURRENT round during the betting window. */
-  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits, demo?: boolean): Promise<BetResult> {
+  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits, demo?: boolean, rgCtx?: RgContext): Promise<BetResult> {
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
@@ -90,6 +135,25 @@ export class BetsService {
     // Per-currency min/max stake (operator config) or the global defaults (no limits).
     const amtCheck = this.risk.checkBetAmount(amt, limits);
     if (!amtCheck.ok) { this.metrics.recordRejected(amtCheck.reason); return { ok: false, reason: amtCheck.reason, panel }; }
+
+    // Phase 3 — RESPONSIBLE-GAMBLING (real-money sessions only; DEMO & guests skip).
+    // The `demo` re-check here is defense-in-depth: no `rg` claim is ever minted onto a
+    // demo token, but a play-money bet must never be RG-blocked even if one somehow were.
+    // RG only gates NEW bets (placeBet) — cash-out/cancel are NEVER blocked, so an
+    // at-risk player can always get their money out. Cheap (no-DB) checks first.
+    const rg = !demo && rgCtx?.rg && rgCtx.sessionStartedAt ? rgCtx.rg : undefined;
+    if (rg) {
+      // Reality check awaiting acknowledgment (hard-pause mode) → block new bets until ack.
+      if (rg.enforceRealityCheck && rgCtx!.rgPending) {
+        this.metrics.recordRejected("reality_check_pending");
+        return { ok: false, reason: "reality_check_pending", panel };
+      }
+      // Max session duration reached (belt-and-suspenders with the gateway sweep).
+      if (rg.maxSessionSec !== undefined && Date.now() >= rgCtx!.sessionStartedAt! + rg.maxSessionSec * 1000) {
+        this.metrics.recordRejected("session_time_limit");
+        return { ok: false, reason: "session_time_limit", panel };
+      }
+    }
 
     const roundId = state.roundId;
     const existing = await this.prisma.bet.findUnique({
@@ -109,6 +173,24 @@ export class BetsService {
       return null;
     });
     if (!wallet) return { ok: false, reason: "bet_failed", panel };
+
+    // RG loss/wager caps need the session's running totals → resolved the wallet first.
+    // Project THIS bet's stake IN so the cap is a true CEILING (reject the bet that
+    // WOULD breach, not the one after). Inclusive boundary (== cap allowed, > rejected).
+    if (rg && (rg.maxSessionLoss !== undefined || rg.maxSessionWager !== undefined)) {
+      const acc = await this.sessionAccounting(wallet.id, new Date(rgCtx!.sessionStartedAt!));
+      if (rg.maxSessionWager !== undefined && acc.wagered + amt > rg.maxSessionWager) {
+        this.metrics.recordRejected("session_wager_limit");
+        return { ok: false, reason: "session_wager_limit", panel };
+      }
+      // The new stake is at-risk loss (outcome unknown at placement) → add to net,
+      // consistent with sessionAccounting counting unsettled active stakes as at-risk.
+      if (rg.maxSessionLoss !== undefined && acc.net + amt > rg.maxSessionLoss) {
+        this.metrics.recordRejected("session_loss_limit");
+        return { ok: false, reason: "session_loss_limit", panel };
+      }
+    }
+
     const betId = randomUUID();
 
     // PHASE 1 — RESERVE (audit H1). Serialize all placeBet for THIS round on a

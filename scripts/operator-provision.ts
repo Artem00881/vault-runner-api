@@ -17,6 +17,7 @@
 import { PrismaClient } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import { validateBetLimits } from "../src/operator/bet-limits";
+import { validateRgConfig, type RgConfig } from "../src/operator/rg-config";
 
 /** Uppercase every top-level key of a record (currency-code canonicalisation).
  *  Throws on a case-collision (e.g. {"eur","EUR"}) so a malformed config fails loudly
@@ -26,11 +27,18 @@ function upperKeys<T>(obj: Record<string, T>): Record<string, T> {
   for (const [k, v] of Object.entries(obj)) {
     const K = k.toUpperCase();
     if (Object.prototype.hasOwnProperty.call(out, K)) {
-      throw new Error(`betLimits has case-colliding currency keys mapping to "${K}" — use one canonical code`);
+      throw new Error(`config has case-colliding currency keys mapping to "${K}" — use one canonical code`);
     }
     out[K] = v;
   }
   return out;
+}
+
+/** Uppercase the per-currency keys nested under an rgConfig's `limits` map (the
+ *  top-level RG keys — interval/maxSessionSec/enforce — are NOT currencies, so they
+ *  are left untouched). Reuses upperKeys' case-collision guard. */
+function upperKeysRgLimits(cfg: RgConfig): RgConfig {
+  return cfg.limits ? { ...cfg, limits: upperKeys(cfg.limits) } : cfg;
 }
 
 export interface ProvisionInput {
@@ -40,6 +48,7 @@ export interface ProvisionInput {
   walletApiUrl?: string;
   walletApiKey?: string;
   betLimits?: unknown; // validated against BetLimitsSchema before write
+  rgConfig?: unknown; // validated against RgConfigSchema before write (responsible gambling)
   ipWhitelist?: string[];
   callbackUrl?: string;
   enabled?: boolean;
@@ -58,6 +67,8 @@ export async function provisionOperator(
   // uppercased) always match what the operator stored.
   const betLimits =
     input.betLimits !== undefined ? upperKeys(validateBetLimits(input.betLimits)) : undefined;
+  const rgConfig =
+    input.rgConfig !== undefined ? upperKeysRgLimits(validateRgConfig(input.rgConfig)) : undefined;
   const currencies = input.currencies?.map((c) => c.toUpperCase());
 
   const existing = await prisma.operator.findUnique({ where: { code: input.code } });
@@ -73,6 +84,7 @@ export async function provisionOperator(
   if (input.callbackUrl !== undefined) patch.callbackUrl = input.callbackUrl;
   if (input.ipWhitelist !== undefined) patch.ipWhitelist = input.ipWhitelist;
   if (betLimits !== undefined) patch.betLimits = betLimits as object;
+  if (rgConfig !== undefined) patch.rgConfig = rgConfig as object;
   if (input.enabled !== undefined) patch.enabled = input.enabled;
   if (input.demoEnabled !== undefined) patch.demoEnabled = input.demoEnabled;
   if (input.rotateSecret) patch.launchSecret = newSecret;
@@ -91,6 +103,7 @@ export async function provisionOperator(
       callbackUrl: input.callbackUrl ?? null,
       ipWhitelist: input.ipWhitelist ?? [],
       ...(betLimits !== undefined ? { betLimits: betLimits as object } : {}),
+      ...(rgConfig !== undefined ? { rgConfig: rgConfig as object } : {}),
     },
     update: patch,
   });
@@ -129,7 +142,7 @@ async function main() {
   if (!code) {
     console.error(
       "usage: bun scripts/operator-provision.ts --code <code> [--name ..] [--currencies EUR,USDT]\n" +
-        "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json]\n" +
+        "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json] [--rg-config '<json>'|@file.json]\n" +
         "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret]",
     );
     process.exit(1);
@@ -142,6 +155,13 @@ async function main() {
     betLimits = JSON.parse(raw);
   }
 
+  let rgConfig: unknown;
+  const rgc = str(args["rg-config"]);
+  if (rgc) {
+    const raw = rgc.startsWith("@") ? await Bun.file(rgc.slice(1)).text() : rgc;
+    rgConfig = JSON.parse(raw);
+  }
+
   const prisma = new PrismaClient();
   try {
     const { operator, created, launchSecret } = await provisionOperator(prisma, {
@@ -151,6 +171,7 @@ async function main() {
       walletApiUrl: str(args["wallet-url"]),
       walletApiKey: str(args["wallet-key"]),
       betLimits,
+      rgConfig,
       ipWhitelist: list(args["ip-whitelist"]),
       callbackUrl: str(args["callback-url"]),
       enabled: args.disabled ? false : undefined,
@@ -165,6 +186,7 @@ async function main() {
     );
     console.log(`  walletApiUrl: ${operator.walletApiUrl ?? "(none)"}`);
     console.log(`  betLimits: ${operator.betLimits ? JSON.stringify(operator.betLimits) : "(none → global env defaults)"}`);
+    console.log(`  rgConfig: ${operator.rgConfig ? JSON.stringify(operator.rgConfig) : "(none → no in-session RG)"}`);
     console.log(`  enabled: ${operator.enabled}`);
     console.log(`  demoEnabled: ${operator.demoEnabled} (play-money fun mode)`);
     if (launchSecret) {
@@ -181,7 +203,7 @@ if (import.meta.main) {
   main().catch((e: any) => {
     // Clean, operator-facing errors — no raw stack dump for a config typo.
     if (e?.name === "ZodError" && Array.isArray(e.issues)) {
-      console.error("invalid --bet-limits:");
+      console.error("invalid config (--bet-limits / --rg-config):");
       for (const i of e.issues) console.error(`  - ${i.path.join(".") || "(root)"}: ${i.message}`);
     } else {
       console.error("error:", e?.message ?? e);

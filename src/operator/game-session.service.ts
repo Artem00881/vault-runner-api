@@ -7,6 +7,7 @@ import { LaunchTokenService } from "./launch-token.service";
 import { LedgerService } from "../wallet/ledger.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
 import { effectiveLimitsFor, serializeBetLimits } from "./bet-limits";
+import { effectiveRgFor, serializeRg } from "./rg-config";
 
 // Operator session ("play") tokens are SHORT-lived (re-launch to refresh), unlike
 // 30-day guest tokens — this limits how long a leaked session token is usable, and the
@@ -62,9 +63,14 @@ export class GameSessionService {
     // (Phase 3). null → the player plays under the global house defaults.
     const op = await this.prisma.operator.findUnique({
       where: { id: v.operatorId },
-      select: { betLimits: true },
+      select: { betLimits: true, rgConfig: true },
     });
     const limits = effectiveLimitsFor(op?.betLimits, currency);
+    // Responsible-gambling config for this session (Phase 3). DEMO sessions skip RG
+    // entirely (play money can't cause gambling harm) — resolving to null here means
+    // no `rg` claim is ever minted onto a demo token (defense-in-depth layer 1; the
+    // bet path re-checks `demo` as layer 2). null → no in-session RG controls.
+    const rg = demo ? null : effectiveRgFor(op?.rgConfig, currency);
 
     // Find or create the local journal wallet for this operator player+currency.
     // We tag the User.username with operator+player so it's unique & traceable; a
@@ -142,6 +148,10 @@ export class GameSessionService {
         playerId: v.playerId,
         sessionId: session.id,
         kind: "operator",
+        // Session START (epoch ms) — the authoritative immutable GameSession.createdAt.
+        // Lets the gateway compute elapsed time + the RG accounting `createdAt >=` bound
+        // with no DB read. Always present for operator sessions (Phase 3 — RG).
+        sessionStartedAt: session.createdAt.getTime(),
         // Phase 3: the session's resolved per-currency bet limits ride with the play
         // token so the gateway applies them on every bet with no extra lookup.
         // Absent → the bet path falls back to the global house defaults.
@@ -150,6 +160,10 @@ export class GameSessionService {
         // actual money routing is by walletId in the WalletRouter, not this claim —
         // a forged claim can at worst mislabel a bet, never cross play/real money.
         ...(demo ? { demo: true } : {}),
+        // Phase 3 RG: the session's resolved responsible-gambling controls ride the
+        // SIGNED play token (un-forgeable, can't be stripped without breaking the sig).
+        // Absent → no in-session RG (back-compat; demo sessions never carry it).
+        ...(rg ? { rg: serializeRg(rg) } : {}),
       },
       { expiresIn: SESSION_TOKEN_TTL_SEC }, // short-lived session token (audit L-C2.2)
     );
