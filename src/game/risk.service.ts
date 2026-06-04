@@ -37,6 +37,45 @@ function envNum(name: string, def: number): number {
   return v && !isNaN(Number(v)) ? Number(v) : def;
 }
 
+/** The RISK_* ceilings that MUST be explicit in operator/real-money mode. The code
+ *  defaults above are DEMO-grade (generous — the live play-money demo legitimately
+ *  needs e.g. 1,000,000x). RISK_MIN_BET is excluded: a wrong floor can't create money. */
+const REQUIRED_REALMONEY_RISK_KEYS = [
+  "RISK_MAX_WIN_PER_BET",
+  "RISK_MAX_MULTIPLIER",
+  "RISK_MAX_ROUND_EXPOSURE",
+  "RISK_MAX_BET",
+] as const;
+
+/**
+ * Go-live boot guard (operator/real-money mode). When an operator launches a currency
+ * with no per-currency betLimits, the global RISK_* defaults become the real-money
+ * ceiling — and the defaults are demo-grade. So in operator mode we REFUSE TO BOOT
+ * unless these ceilings are EXPLICITLY set (detected by env PRESENCE, not value, so an
+ * operator who deliberately wants the generous value still boots by setting it).
+ * Mirrors the FAIRNESS_REQUIRE_BLOCK_SALT fail-closed boot guard (fairness.module.ts).
+ * Internal mode (the demo) and the test suite (which never sets WALLET_PROVIDER_TYPE)
+ * are NEVER affected. Escape hatch: RISK_ALLOW_DEMO_DEFAULTS=true (non-prod only).
+ */
+export function assertRiskConfigForMode(env: NodeJS.ProcessEnv = process.env): void {
+  const mode = env.WALLET_PROVIDER_TYPE ?? "internal";
+  if (mode === "internal" || env.RISK_ALLOW_DEMO_DEFAULTS === "true") return;
+  // A key counts as missing if unset OR present-but-unparseable (empty / non-numeric /
+  // non-positive): envBig/envNum silently fall back to the DEMO default on such a value,
+  // which would defeat this guard — so reject it (presence-AND-validity, not presence).
+  const missing = REQUIRED_REALMONEY_RISK_KEYS.filter((k) => {
+    const v = env[k];
+    return v === undefined || v.trim() === "" || !(Number(v) > 0);
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `WALLET_PROVIDER_TYPE=${mode} requires explicit real-money risk ceilings — set ` +
+        `${missing.join(", ")} to a positive value (the demo-grade defaults are not ` +
+        `real-money safe), or set RISK_ALLOW_DEMO_DEFAULTS=true to override (non-prod only).`,
+    );
+  }
+}
+
 @Injectable()
 export class RiskService {
   readonly limits: RiskLimits = {

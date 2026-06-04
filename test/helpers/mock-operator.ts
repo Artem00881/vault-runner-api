@@ -130,4 +130,10 @@ export class MockOperator implements OperatorWalletApi {
   balanceOf(playerId: string, currency: string) {
     return this.balances.get(this.key(playerId, currency)) ?? 0;
   }
+
+  /** test helper: set a player+currency starting balance (for suites that share one
+   *  MockOperator across launches and can't seed via the constructor). */
+  seed(playerId: string, currency: string, balance: number) {
+    this.balances.set(this.key(playerId, currency), balance);
+  }
 }

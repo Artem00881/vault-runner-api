@@ -43,6 +43,20 @@ function upperKeysRgLimits(cfg: RgConfig): RgConfig {
   return cfg.limits ? { ...cfg, limits: upperKeys(cfg.limits) } : cfg;
 }
 
+/** Validate an operator callbackUrl (return-to-lobby) is a real http(s) URL, so a
+ *  typo can't silently store a broken link. THROWS on invalid (Phase 3 go-live). */
+function validateCallbackUrl(u: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    throw new Error(`callbackUrl is not a valid URL: ${u}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`callbackUrl must be an http(s) URL: ${u}`);
+  }
+}
+
 export interface ProvisionInput {
   code: string;
   name?: string;
@@ -73,6 +87,7 @@ export async function provisionOperator(
     input.betLimits !== undefined ? upperKeys(validateBetLimits(input.betLimits)) : undefined;
   const rgConfig =
     input.rgConfig !== undefined ? upperKeysRgLimits(validateRgConfig(input.rgConfig)) : undefined;
+  if (typeof input.callbackUrl === "string") validateCallbackUrl(input.callbackUrl);
   const currencies = input.currencies?.map((c) => c.toUpperCase());
 
   // Phase 3.6: flag currencies with no canonical precision entry. Default = warn (a

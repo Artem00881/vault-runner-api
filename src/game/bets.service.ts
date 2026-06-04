@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wallet/wallet-provider";
 import { GameEngineService } from "./game-engine.service";
@@ -115,8 +116,14 @@ export class BetsService {
    *              — the protective direction so a loss cap can't be dodged by leaving
    *              bets open.
    */
-  async sessionAccounting(walletId: string, since: Date): Promise<{ wagered: bigint; won: bigint; net: bigint }> {
-    const bets = await this.prisma.bet.findMany({
+  async sessionAccounting(
+    walletId: string,
+    since: Date,
+    db: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<{ wagered: bigint; won: bigint; net: bigint }> {
+    // `db` defaults to the shared client; the RG HARD cap passes the reserve `tx` so the
+    // read is a consistent snapshot under the per-round lock.
+    const bets = await db.bet.findMany({
       where: { walletId, createdAt: { gte: since } },
       select: { status: true, amount: true, payout: true },
     });
@@ -151,11 +158,13 @@ export class BetsService {
       // Reality check awaiting acknowledgment (hard-pause mode) → block new bets until ack.
       if (rg.enforceRealityCheck && rgCtx!.rgPending) {
         this.metrics.recordRejected("reality_check_pending");
+        this.metrics.recordRgBlock("reality_check_pending");
         return { ok: false, reason: "reality_check_pending", panel };
       }
       // Max session duration reached (belt-and-suspenders with the gateway sweep).
       if (rg.maxSessionSec !== undefined && Date.now() >= rgCtx!.sessionStartedAt! + rg.maxSessionSec * 1000) {
         this.metrics.recordRejected("session_time_limit");
+        this.metrics.recordRgBlock("session_time_limit");
         return { ok: false, reason: "session_time_limit", panel };
       }
     }
@@ -179,22 +188,10 @@ export class BetsService {
     });
     if (!wallet) return { ok: false, reason: "bet_failed", panel };
 
-    // RG loss/wager caps need the session's running totals → resolved the wallet first.
-    // Project THIS bet's stake IN so the cap is a true CEILING (reject the bet that
-    // WOULD breach, not the one after). Inclusive boundary (== cap allowed, > rejected).
-    if (rg && (rg.maxSessionLoss !== undefined || rg.maxSessionWager !== undefined)) {
-      const acc = await this.sessionAccounting(wallet.id, new Date(rgCtx!.sessionStartedAt!));
-      if (rg.maxSessionWager !== undefined && acc.wagered + amt > rg.maxSessionWager) {
-        this.metrics.recordRejected("session_wager_limit");
-        return { ok: false, reason: "session_wager_limit", panel };
-      }
-      // The new stake is at-risk loss (outcome unknown at placement) → add to net,
-      // consistent with sessionAccounting counting unsettled active stakes as at-risk.
-      if (rg.maxSessionLoss !== undefined && acc.net + amt > rg.maxSessionLoss) {
-        this.metrics.recordRejected("session_loss_limit");
-        return { ok: false, reason: "session_loss_limit", panel };
-      }
-    }
+    // NOTE: the RG loss/wager-cap projection moved INSIDE the reserve lock below (a HARD
+    // cap — go-live hardening). All of a session's concurrent bets are on the current
+    // round, so they share the per-round advisory lock → serialized there, closing the
+    // soft-cap TOCTOU. (The cheap reality-check/time-limit checks stay pre-lock above.)
 
     const betId = randomUUID();
 
@@ -210,11 +207,41 @@ export class BetsService {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${roundId}))`;
         const roundBets = await tx.bet.findMany({
           where: { roundId, status: { in: ["active", "reserving"] } },
-          select: { amount: true },
+          select: { amount: true, walletId: true, status: true },
         });
         const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
         const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
         if (!expCheck.ok) { rejectReason = expCheck.reason; throw new Error("reserve_rejected"); }
+
+        // RG loss/wager HARD cap (real-money sessions only; demo/guests have no `rg`).
+        // Evaluated INSIDE the lock so concurrent same-session bets serialize here. SAFETY
+        // DEPENDS on the per-round advisory lock above (not snapshot isolation, which is
+        // READ COMMITTED) — do not remove it or the TOCTOU returns.
+        // sessionAccounting gives the committed (active/settled) session total; the
+        // in-flight `reserving` part is derived from the SAME roundBets read above —
+        // NOT a separate walletId query, which under Bun/Prisma can intermittently miss
+        // a just-committed concurrent reserving row that the roundId read reliably sees.
+        // All of a session's concurrent bets are on THIS round (one betting window), so
+        // the current-round reserving rows are the complete in-flight set (and stale
+        // prior-round reserving dust is correctly NOT counted). THIS bet's own row isn't
+        // inserted yet → `amt` added explicitly (no double count). Inclusive boundary.
+        if (rg && (rg.maxSessionLoss !== undefined || rg.maxSessionWager !== undefined)) {
+          const acc = await this.sessionAccounting(wallet.id, new Date(rgCtx!.sessionStartedAt!), tx);
+          const reserved = roundBets
+            .filter((b) => b.walletId === wallet.id && b.status === "reserving")
+            .reduce((sum, b) => sum + b.amount, 0n);
+          if (rg.maxSessionWager !== undefined && acc.wagered + reserved + amt > rg.maxSessionWager) {
+            this.metrics.recordRgBlock("session_wager_limit");
+            rejectReason = "session_wager_limit"; throw new Error("reserve_rejected");
+          }
+          // A reserving stake is at-risk loss in waiting (same protective direction as an
+          // unsettled active stake) → add to net.
+          if (rg.maxSessionLoss !== undefined && acc.net + reserved + amt > rg.maxSessionLoss) {
+            this.metrics.recordRgBlock("session_loss_limit");
+            rejectReason = "session_loss_limit"; throw new Error("reserve_rejected");
+          }
+        }
+
         await tx.bet.create({
           data: {
             id: betId,

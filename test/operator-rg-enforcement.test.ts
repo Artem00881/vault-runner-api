@@ -269,6 +269,182 @@ describe("RG.2 placeBet enforcement", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RG.2b — the GO-LIVE HARDENING: the RG loss/wager cap is now a HARD cap evaluated
+// INSIDE the reserve lock (all of a session's bets are on the current round, so they
+// share the per-round advisory lock → serialized). This closes the soft-cap TOCTOU:
+// two concurrent same-session bets can no longer both read a stale pre-debit snapshot
+// and collectively blow past the cap. The in-lock total ALSO counts in-flight
+// `reserving` stakes (which sessionAccounting excludes), so a concurrent reservation
+// can't slip a bet past the cap either.
+describe("RG.2b TOCTOU hard-cap closure (concurrent same-session)", () => {
+  async function bettingRound() {
+    phase = "betting";
+    activeRoundId = await makeRound("betting");
+  }
+
+  test("WAGER cap: two concurrent bets that JOINTLY breach → exactly one accepted, one rejected", async () => {
+    // cap 5000; already wagered 3000 → headroom 2000. Two concurrent 1500 stakes each
+    // pass in isolation (3000+1500=4500 <= 5000) but jointly breach (3000+1500+1500=6000).
+    const s = await openSession({ rgConfig: { limits: { EUR: { maxSessionWager: 5000 } } } });
+    expect(s.rg?.maxSessionWager).toBe(5000n);
+    await seedBet(s.walletId, s.userId, { amount: 3000n, status: "active" }); // prior wagered 3000
+    const ctx = { rg: s.rg!, sessionStartedAt: s.sessionStartedAt };
+
+    await bettingRound();
+    // DIFFERENT panels (A + B) so the [round,user,panel] unique can't reject one as
+    // `already_bet` — any rejection here must be the RG hard cap, not a panel clash.
+    const [a, b] = await Promise.all([
+      bets.placeBet(s.userId, "A", 1500, undefined, s.walletId, undefined, false, ctx),
+      bets.placeBet(s.userId, "B", 1500, undefined, s.walletId, undefined, false, ctx),
+    ]);
+
+    const oks = [a, b].filter((r) => r.ok);
+    const rejected = [a, b].filter((r) => !r.ok);
+    // THE MONEY INVARIANT: the cap must hold — wagered NEVER exceeds maxSessionWager.
+    // (Under the OLD pre-lock soft check both bets read wagered=3000 and BOTH passed →
+    // wagered=6000. Fail-first verified: reverting to the soft check fails this.)
+    // NOTE (intermittent): a real, low-probability TOCTOU survives in the in-lock hard
+    // cap under Bun+Prisma — the 2nd tx's `reserving` read can miss the 1st tx's
+    // just-committed row (its exposure read, same tx, DOES see it), letting BOTH pass.
+    // When that fires this assertion FAILS — that is a REAL bug being caught, NOT test
+    // flake; see the agent report. Do NOT relax this to make it pass.
+    const acc = await bets.sessionAccounting(s.walletId, new Date(s.sessionStartedAt));
+    if (acc.wagered > 5000n || oks.length !== 1) {
+      console.error(
+        `[RG TOCTOU BUG] wager cap BREACHED: oks=${oks.length} wagered=${acc.wagered} (cap 5000). ` +
+          `This is a REAL concurrency bug (in-lock RG read missed a concurrent reserving row), NOT test flake. Do NOT relax this test.`,
+      );
+    }
+    expect(acc.wagered).toBeLessThanOrEqual(5000n); // cap held — no money created
+    expect(oks.length).toBe(1); // EXACTLY one wins the lock-serialized cap
+    expect(rejected.length).toBe(1);
+    expect(rejected[0].reason).toBe("session_wager_limit");
+    expect(acc.wagered).toBe(4500n); // 3000 prior + 1500 accepted (the loser never debited)
+  });
+
+  test("LOSS cap: two concurrent bets that JOINTLY breach → exactly one accepted, one rejected", async () => {
+    // cap 5000; prior net loss 3000 → headroom 2000. Two concurrent 1500 at-risk stakes
+    // each pass alone (3000+1500=4500) but jointly breach (3000+1500+1500=6000).
+    const s = await openSession({ rgConfig: { limits: { EUR: { maxSessionLoss: 5000 } } } });
+    expect(s.rg?.maxSessionLoss).toBe(5000n);
+    await seedBet(s.walletId, s.userId, { amount: 3000n, status: "busted" }); // prior net loss 3000
+    const ctx = { rg: s.rg!, sessionStartedAt: s.sessionStartedAt };
+
+    await bettingRound();
+    const [a, b] = await Promise.all([
+      bets.placeBet(s.userId, "A", 1500, undefined, s.walletId, undefined, false, ctx),
+      bets.placeBet(s.userId, "B", 1500, undefined, s.walletId, undefined, false, ctx),
+    ]);
+
+    const oks = [a, b].filter((r) => r.ok);
+    const rejected = [a, b].filter((r) => !r.ok);
+    // Same MONEY INVARIANT + same intermittent-TOCTOU caveat as the WAGER test above —
+    // an assertion failure here is the real bug surfacing, not flake. Do NOT relax it.
+    const acc = await bets.sessionAccounting(s.walletId, new Date(s.sessionStartedAt));
+    if (acc.net > 5000n || oks.length !== 1) {
+      console.error(
+        `[RG TOCTOU BUG] loss cap BREACHED: oks=${oks.length} net=${acc.net} (cap 5000). ` +
+          `This is a REAL concurrency bug, NOT test flake. Do NOT relax this test.`,
+      );
+    }
+    expect(acc.net).toBeLessThanOrEqual(5000n); // cap held — at-risk loss never exceeds cap
+    expect(oks.length).toBe(1);
+    expect(rejected.length).toBe(1);
+    expect(rejected[0].reason).toBe("session_loss_limit");
+    expect(acc.net).toBe(4500n); // 3000 prior + 1500 accepted active stake
+  });
+
+  test("CURRENT-round in-flight reserving is COUNTED toward the cap (blocks the next bet)", async () => {
+    // cap 5000; committed wagered 3000 + a CONCURRENT in-flight `reserving` 1500 on the
+    // CURRENT round = 4500 effective. A 600 bet (5100 > 5000) must be rejected — the RG
+    // hard cap derives current-round reserving from the round-exposure read (which reliably
+    // sees a concurrent committed reserving row), closing the soft-cap leak.
+    const s = await openSession({ rgConfig: { limits: { EUR: { maxSessionWager: 5000 } } } });
+    await seedBet(s.walletId, s.userId, { amount: 3000n, status: "active" }); // committed wagered 3000
+
+    const ctx = { rg: s.rg!, sessionStartedAt: s.sessionStartedAt };
+    await bettingRound();
+    // A concurrent in-flight reservation on the CURRENT round (different panel, same wallet).
+    await prisma.bet.create({
+      data: { id: randomUUID(), roundId: activeRoundId, userId: s.userId, walletId: s.walletId, panel: "B", amount: 1500n, status: "reserving" },
+    });
+
+    // sessionAccounting alone EXCLUDES reserving (sees only 3000) → would wrongly allow 600.
+    const accNoReserving = await bets.sessionAccounting(s.walletId, new Date(s.sessionStartedAt));
+    expect(accNoReserving.wagered).toBe(3000n);
+
+    const r = await bets.placeBet(s.userId, "A", 600, undefined, s.walletId, undefined, false, ctx);
+    expect(r).toMatchObject({ ok: false, reason: "session_wager_limit" }); // current-round reserving counted in
+  });
+
+  test("STALE prior-round reserving dust is NOT counted (money never debited → not wagered)", async () => {
+    // cap 5000; committed wagered 3000 + a large STALE `reserving` 9000 on a PRIOR round
+    // (a stranded pre-debit slot awaiting the sweep). It must NOT count — money was never
+    // debited, and only the current betting window holds genuine concurrent reservations.
+    // So a 600 bet (3000 + 0 + 600 = 3600 ≤ 5000) is ALLOWED. If dust were counted it would
+    // wrongly block. (Closes the money-path-auditor L1 over-count.)
+    const s = await openSession({ rgConfig: { limits: { EUR: { maxSessionWager: 5000 } } } });
+    await seedBet(s.walletId, s.userId, { amount: 3000n, status: "active" }); // committed 3000
+    await seedBet(s.walletId, s.userId, { amount: 9000n, status: "reserving" }); // prior-round dust → ignored
+
+    const ctx = { rg: s.rg!, sessionStartedAt: s.sessionStartedAt };
+    await bettingRound();
+    const r = await bets.placeBet(s.userId, "A", 600, undefined, s.walletId, undefined, false, ctx);
+    expect(r).toMatchObject({ ok: true }); // dust ignored → within cap
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RG.2c — observability: an RG-blocked bet bumps BOTH the generic rejected counter
+// AND the dedicated RG-only counter (Phase 3 go-live). Reads the live prom-client
+// counters directly (one shared MetricsService instance across the suite).
+describe("RG.2c metric — rg_blocks_total alongside bets_rejected_total", () => {
+  async function bettingRound() {
+    phase = "betting";
+    activeRoundId = await makeRound("betting");
+  }
+  // Read a single labelled counter value out of the prom-client registry text.
+  async function counter(metric: string, reason: string): Promise<number> {
+    const text = await metrics.render();
+    const re = new RegExp(`^${metric}\\{[^}]*reason="${reason}"[^}]*\\}\\s+(\\d+)`, "m");
+    const m = text.match(re);
+    return m ? Number(m[1]) : 0;
+  }
+
+  test("a wager-limit reject increments rg_blocks_total AND bets_rejected_total for the reason", async () => {
+    const s = await openSession({ rgConfig: { limits: { EUR: { maxSessionWager: 1000 } } } });
+    await seedBet(s.walletId, s.userId, { amount: 1000n, status: "active" }); // already at cap
+    const ctx = { rg: s.rg!, sessionStartedAt: s.sessionStartedAt };
+
+    const rejBefore = await counter("vaultrun_bets_rejected_total", "session_wager_limit");
+    const rgBefore = await counter("vaultrun_rg_blocks_total", "session_wager_limit");
+
+    await bettingRound();
+    const r = await bets.placeBet(s.userId, "A", 1, undefined, s.walletId, undefined, false, ctx);
+    expect(r).toMatchObject({ ok: false, reason: "session_wager_limit" });
+
+    const rejAfter = await counter("vaultrun_bets_rejected_total", "session_wager_limit");
+    const rgAfter = await counter("vaultrun_rg_blocks_total", "session_wager_limit");
+    expect(rejAfter).toBe(rejBefore + 1);
+    expect(rgAfter).toBe(rgBefore + 1);
+  });
+
+  test("a reality-check-pending reject also increments both counters for its reason", async () => {
+    const s = await openSession({ rgConfig: { realityCheckIntervalSec: 3600 } });
+    const enforce: EffectiveRg = { enforceRealityCheck: true, realityCheckIntervalSec: 3600 };
+    const rejBefore = await counter("vaultrun_bets_rejected_total", "reality_check_pending");
+    const rgBefore = await counter("vaultrun_rg_blocks_total", "reality_check_pending");
+
+    await bettingRound();
+    const r = await bets.placeBet(s.userId, "A", 100, undefined, s.walletId, undefined, false, { rg: enforce, rgPending: true, sessionStartedAt: s.sessionStartedAt });
+    expect(r).toMatchObject({ ok: false, reason: "reality_check_pending" });
+
+    expect(await counter("vaultrun_bets_rejected_total", "reality_check_pending")).toBe(rejBefore + 1);
+    expect(await counter("vaultrun_rg_blocks_total", "reality_check_pending")).toBe(rgBefore + 1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe("RG.3 token claims + un-forgeability", () => {
   test("a real RG session embeds `rg` + `sessionStartedAt` on the signed play token", async () => {
     const s = await openSession({ rgConfig: { realityCheckIntervalSec: 3600, limits: { EUR: { maxSessionLoss: 50000 } } } });

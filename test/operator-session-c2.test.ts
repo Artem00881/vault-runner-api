@@ -37,7 +37,7 @@ const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(p
 // Track everything we create for FK-safe teardown.
 const createdOperatorIds: string[] = [];
 
-async function freshOperator(currency = "EUR") {
+async function freshOperator(currency = "EUR", callbackUrl?: string | null) {
   const op = await prisma.operator.create({
     data: {
       code: "op-c2-" + randomUUID().slice(0, 8),
@@ -45,6 +45,7 @@ async function freshOperator(currency = "EUR") {
       enabled: true,
       launchSecret: "secret-" + randomUUID(),
       currencies: [currency],
+      ...(callbackUrl !== undefined ? { callbackUrl } : {}),
     },
   });
   createdOperatorIds.push(op.id);
@@ -213,4 +214,21 @@ test("3b. tenant isolation — a second operator's player is resolved & charged 
 
   sbA.stop();
   sbB.stop();
+});
+
+test("4. launch surfaces the operator's callbackUrl when set (Phase 3 go-live)", async () => {
+  // An operator WITH a return-to-lobby URL → openFromToken includes it so the embedding
+  // client knows where to send the player on exit.
+  const op = await freshOperator("EUR", "https://op.example/lobby");
+  const token = await launch.issue({ operatorId: op.id, playerId: "p-" + randomUUID().slice(0, 8), currency: "EUR" });
+  const session = await sessions.openFromToken(token);
+  expect(session.callbackUrl).toBe("https://op.example/lobby");
+});
+
+test("4b. launch returns callbackUrl:null when the operator has none", async () => {
+  // No callbackUrl on the operator → openFromToken returns null (not undefined/throwing).
+  const op = await freshOperator("EUR"); // callbackUrl unset (DB default null)
+  const token = await launch.issue({ operatorId: op.id, playerId: "p-" + randomUUID().slice(0, 8), currency: "EUR" });
+  const session = await sessions.openFromToken(token);
+  expect(session.callbackUrl).toBeNull();
 });

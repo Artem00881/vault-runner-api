@@ -53,6 +53,16 @@ services:
       CORS_ORIGIN: "${CORS_ORIGIN:-https://vaultrun.app}"
       GAME_CURRENCY: "${GAME_CURRENCY:-DEMO}"
       WALLET_PROVIDER_TYPE: "${WALLET_PROVIDER_TYPE:-internal}"
+      # Operator/real-money mode FAILS CLOSED at boot unless these RISK_* ceilings are
+      # EXPLICITLY set — the code defaults are demo-grade (e.g. 1,000,000x) and become
+      # the real-money backstop for any currency without per-currency betLimits. See
+      # DEPLOY.md §8. UNCOMMENT + set conservative values at operator go-live (the values
+      # below are EUR-reference EXAMPLES per game-math-spec §12 — review per launch):
+      # RISK_MAX_BET: "10000"                 # max stake, minor units (€100 @ 2dp)
+      # RISK_MAX_WIN_PER_BET: "1000000"       # max single-bet payout (€10,000)
+      # RISK_MAX_MULTIPLIER: "10000"          # real-money multiplier cap (demo = 1,000,000)
+      # RISK_MAX_ROUND_EXPOSURE: "10000000"   # max total potential payout per round (€100,000)
+      # RISK_ALLOW_DEMO_DEFAULTS: "true"      # NON-PROD escape hatch to skip the boot guard
       OPERATOR_WALLET_TIMEOUT_MS: "${OPERATOR_WALLET_TIMEOUT_MS:-3000}"
       RESERVING_STALE_SEC: "${RESERVING_STALE_SEC:-120}"
       RESERVING_ALERT_SEC: "${RESERVING_ALERT_SEC:-600}"

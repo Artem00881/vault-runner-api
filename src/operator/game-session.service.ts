@@ -64,7 +64,7 @@ export class GameSessionService {
     // (Phase 3). null → the player plays under the global house defaults.
     const op = await this.prisma.operator.findUnique({
       where: { id: v.operatorId },
-      select: { betLimits: true, rgConfig: true },
+      select: { betLimits: true, rgConfig: true, callbackUrl: true },
     });
     const limits = effectiveLimitsFor(op?.betLimits, currency);
     // Responsible-gambling config for this session (Phase 3). DEMO sessions skip RG
@@ -178,6 +178,9 @@ export class GameSessionService {
       // wallet (minor units) correctly from first paint, without a /api/currencies call.
       decimals: currencyMeta(currency).decimals,
       locale: v.locale,
+      // Phase 3 go-live: the operator's return-to-lobby URL (null if unset) so the client
+      // knows where to send the player on exit.
+      callbackUrl: op?.callbackUrl ?? null,
     };
   }
 

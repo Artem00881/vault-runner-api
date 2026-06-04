@@ -19,6 +19,7 @@ export class MetricsService {
 
   readonly betsTotal: Counter;
   readonly betsRejected: Counter;
+  readonly rgBlocks: Counter; // responsible-gambling blocks by reason (Phase 3 go-live observability)
   readonly stakeTotal: Counter; // Σ stakes (minor units) — RTP denominator
   readonly payoutTotal: Counter; // Σ payouts (minor units) — RTP numerator
   readonly cashoutsTotal: Counter;
@@ -48,6 +49,7 @@ export class MetricsService {
     const reg = [this.registry];
     this.betsTotal = new Counter({ name: "vaultrun_bets_total", help: "Bets placed", registers: reg });
     this.betsRejected = new Counter({ name: "vaultrun_bets_rejected_total", help: "Bets rejected", labelNames: ["reason"], registers: reg });
+    this.rgBlocks = new Counter({ name: "vaultrun_rg_blocks_total", help: "Responsible-gambling blocks by reason (subset of bets_rejected; real-money sessions only)", labelNames: ["reason"], registers: reg });
     this.stakeTotal = new Counter({ name: "vaultrun_stake_minor_total", help: "Total staked (minor units)", registers: reg });
     this.payoutTotal = new Counter({ name: "vaultrun_payout_minor_total", help: "Total paid out (minor units)", registers: reg });
     this.cashoutsTotal = new Counter({ name: "vaultrun_cashouts_total", help: "Successful cash-outs", registers: reg });
@@ -86,6 +88,9 @@ export class MetricsService {
   }
 
   recordRejected(reason: string) { this.betsRejected.inc({ reason }); }
+  /** A responsible-gambling block (reality-check pending / time / loss / wager). Fired
+   *  ALONGSIDE recordRejected (kept for back-compat) to give a clean RG-only signal. */
+  recordRgBlock(reason: string) { this.rgBlocks.inc({ reason }); }
   recordRound() { this.roundsTotal.inc(); }
   recordError(where: string) { this.errorsTotal.inc({ where }); }
   setWsConnections(n: number) { this.wsConnections.set(n); }

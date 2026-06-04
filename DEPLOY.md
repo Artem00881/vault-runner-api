@@ -568,6 +568,38 @@ up -d`.
 
 ---
 
+## 15. Operator go-live — real-money risk ceilings — built 2026-06-04 (Phase 3)
+
+**Fail-closed RISK guard (the operator analog of §14's `FAIRNESS_REQUIRE_BLOCK_SALT`).**
+The global `RISK_*` defaults in code are **demo-grade generous** (max win/bet 100,000,000,
+max multiplier 1,000,000x, round exposure 10,000,000,000) — correct for the play-money
+demo, but they become the **real-money ceiling** for any currency an operator launches
+without per-currency `betLimits`. So when `WALLET_PROVIDER_TYPE != internal`, the app
+**refuses to boot** unless these are EXPLICITLY set (detected by env PRESENCE, not value,
+so deliberately keeping a generous value still boots):
+
+- `RISK_MAX_BET` — max stake (minor units)
+- `RISK_MAX_WIN_PER_BET` — max single-bet payout (minor units)
+- `RISK_MAX_MULTIPLIER` — real-money multiplier cap (demo uses 1,000,000)
+- `RISK_MAX_ROUND_EXPOSURE` — max total potential payout per round (minor units)
+
+If any is unset in operator mode, boot throws naming the missing keys. Escape hatch
+(**non-prod only**): `RISK_ALLOW_DEMO_DEFAULTS=true`. The check is `assertRiskConfigForMode()`
+wired into the `RiskService` provider factory in `game.module.ts`. **Internal mode (the live
+demo) is never affected.** Suggested EUR-reference starting values (game-math-spec §12) are
+COMMENTED in `docker-compose.prod.yml` + `.env.production.example` — review per launch
+(per-currency `betLimits` on the operator row are the real control; these are the backstop).
+Set them as plain non-secret lines (like `SALT_PROVIDER_TYPE`) when flipping to operator mode.
+
+**RG observability:** responsible-gambling blocks now also increment a dedicated
+`vaultrun_rg_blocks_total{reason}` counter (reasons `reality_check_pending` /
+`session_time_limit` / `session_wager_limit` / `session_loss_limit`), in addition to the
+existing `vaultrun_bets_rejected_total{reason}`. A Prometheus alert rule for an RG-block
+spike is an optional follow-up under `monitoring/` (separate deploy; loading new rules =
+restart the Prometheus container, see §10).
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the

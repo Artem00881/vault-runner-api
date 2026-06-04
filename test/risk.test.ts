@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
-import { RiskService } from "../src/game/risk.service";
+import { test, expect, describe } from "bun:test";
+import { RiskService, assertRiskConfigForMode } from "../src/game/risk.service";
 
 // Build a RiskService with explicit limits via env (constructed fresh per test).
 function makeRisk(env: Record<string, string>): RiskService {
@@ -84,4 +84,129 @@ test("exposure accumulates across multiple bets up to the cap", () => {
   }
   expect(exp).toBe(300n);
   expect(r.checkRoundExposure(exp, 10n).ok).toBe(false); // 4th would exceed
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// assertRiskConfigForMode — the go-live boot guard (operator/real-money mode REFUSES
+// to boot on the demo-grade RISK_* defaults unless each ceiling is EXPLICITLY set,
+// detected by env PRESENCE not value). Driven via the explicit `env` argument so each
+// case is isolated with no process.env mutation; one case below also proves the
+// default-arg (process.env) path with full save/restore.
+describe("assertRiskConfigForMode (go-live boot guard)", () => {
+  const ALL: Record<string, string> = {
+    RISK_MAX_WIN_PER_BET: "1000000",
+    RISK_MAX_MULTIPLIER: "1000",
+    RISK_MAX_ROUND_EXPOSURE: "100000000",
+    RISK_MAX_BET: "50000",
+  };
+
+  test("internal mode (explicit) + no RISK_* → no throw", () => {
+    expect(() => assertRiskConfigForMode({ WALLET_PROVIDER_TYPE: "internal" } as NodeJS.ProcessEnv)).not.toThrow();
+  });
+
+  test("mode unset (defaults to internal) + no RISK_* → no throw (the test suite + demo)", () => {
+    expect(() => assertRiskConfigForMode({} as NodeJS.ProcessEnv)).not.toThrow();
+  });
+
+  test("operator mode + all 4 ceilings UNSET → throws naming every missing key", () => {
+    let err: Error | undefined;
+    try {
+      assertRiskConfigForMode({ WALLET_PROVIDER_TYPE: "operator" } as NodeJS.ProcessEnv);
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    // The message must name EACH missing ceiling (so the operator knows what to set).
+    for (const k of ["RISK_MAX_WIN_PER_BET", "RISK_MAX_MULTIPLIER", "RISK_MAX_ROUND_EXPOSURE", "RISK_MAX_BET"]) {
+      expect(err!.message).toContain(k);
+    }
+    expect(err!.message).toContain("operator"); // echoes the active mode
+  });
+
+  test("operator mode + all 4 ceilings SET (any values) → no throw", () => {
+    expect(() =>
+      assertRiskConfigForMode({ WALLET_PROVIDER_TYPE: "operator", ...ALL } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
+  // Table-driven: drop EXACTLY ONE ceiling at a time → throws naming only that one,
+  // and NOT the three that are present.
+  for (const missing of Object.keys(ALL)) {
+    test(`operator mode + 3 of 4 set (missing ${missing}) → throws naming only ${missing}`, () => {
+      const env: Record<string, string> = { WALLET_PROVIDER_TYPE: "operator", ...ALL };
+      delete env[missing];
+      let err: Error | undefined;
+      try {
+        assertRiskConfigForMode(env as NodeJS.ProcessEnv);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeDefined();
+      expect(err!.message).toContain(missing);
+      for (const present of Object.keys(ALL).filter((k) => k !== missing)) {
+        expect(err!.message).not.toContain(present);
+      }
+    });
+  }
+
+  test("operator mode + RISK_ALLOW_DEMO_DEFAULTS=true + all UNSET → no throw (the non-prod escape hatch)", () => {
+    expect(() =>
+      assertRiskConfigForMode({ WALLET_PROVIDER_TYPE: "operator", RISK_ALLOW_DEMO_DEFAULTS: "true" } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
+  test("presence-not-value: explicitly setting the demo value (100000000) in operator mode → no throw", () => {
+    // The guard fires on env PRESENCE, not value — an operator who deliberately wants the
+    // generous demo-grade ceiling still boots by setting it explicitly.
+    expect(() =>
+      assertRiskConfigForMode({
+        WALLET_PROVIDER_TYPE: "operator",
+        RISK_MAX_WIN_PER_BET: "100000000", // the demo default, set on purpose
+        RISK_MAX_MULTIPLIER: "1000000",
+        RISK_MAX_ROUND_EXPOSURE: "10000000000",
+        RISK_MAX_BET: "1000000",
+      } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
+  // Present-but-unparseable values (empty / non-numeric / non-positive) must be treated
+  // as MISSING — otherwise envBig/envNum silently fall back to the DEMO default and the
+  // guard is defeated. The guard checks presence AND validity (Number(v) > 0).
+  test.each([
+    ["empty string", ""],
+    ["non-numeric", "abc"],
+    ["negative", "-5"],
+    ["zero", "0"],
+  ])("invalid RISK_MAX_BET=%s in operator mode → THROWS (presence+validity)", (_label, bad) => {
+    expect(() =>
+      assertRiskConfigForMode({
+        WALLET_PROVIDER_TYPE: "operator",
+        RISK_MAX_WIN_PER_BET: "1000000",
+        RISK_MAX_MULTIPLIER: "1000",
+        RISK_MAX_ROUND_EXPOSURE: "100000000",
+        RISK_MAX_BET: bad,
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/RISK_MAX_BET/);
+  });
+
+  test("default-arg path reads process.env (operator + all set → no throw); env saved/restored", () => {
+    const touched = ["WALLET_PROVIDER_TYPE", "RISK_ALLOW_DEMO_DEFAULTS", ...Object.keys(ALL)];
+    const saved: Record<string, string | undefined> = {};
+    for (const k of touched) saved[k] = process.env[k];
+    try {
+      delete process.env.RISK_ALLOW_DEMO_DEFAULTS;
+      process.env.WALLET_PROVIDER_TYPE = "operator";
+      // Missing ceilings → throws via the process.env default arg.
+      for (const k of Object.keys(ALL)) delete process.env[k];
+      expect(() => assertRiskConfigForMode()).toThrow();
+      // Now set them all → passes via the same default arg.
+      for (const k of Object.keys(ALL)) process.env[k] = ALL[k];
+      expect(() => assertRiskConfigForMode()).not.toThrow();
+    } finally {
+      for (const k of touched) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k]!;
+      }
+    }
+  });
 });

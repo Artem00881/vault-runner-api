@@ -229,6 +229,67 @@ describe("provisionOperator: invalid betLimits is rejected before any write", ()
   });
 });
 
+describe("provisionOperator: callbackUrl validation (Phase 3 go-live)", () => {
+  test("a valid https callbackUrl persists", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, {
+      code,
+      currencies: ["EUR"],
+      callbackUrl: "https://op.example/lobby",
+    });
+    expect(res.created).toBe(true);
+    expect(res.operator.callbackUrl).toBe("https://op.example/lobby");
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.callbackUrl).toBe("https://op.example/lobby");
+  });
+
+  test("a valid http callbackUrl persists too", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["EUR"], callbackUrl: "http://op.example/back" });
+    expect(res.operator.callbackUrl).toBe("http://op.example/back");
+  });
+
+  // Table-driven: every malformed/dangerous URL must THROW before any write (mirrors the
+  // invalid-betLimits "DB unchanged" invariant — bad config never lands).
+  const BAD = [
+    ["ftp scheme", "ftp://x"],
+    ["javascript: scheme (XSS)", "javascript:alert(1)"],
+    ["not a url", "not-a-url"],
+  ] as const;
+  for (const [label, url] of BAD) {
+    test(`invalid callbackUrl (${label}) THROWS on create and writes NO row`, async () => {
+      const code = freshCode();
+      await expect(
+        provisionOperator(prisma, { code, currencies: ["EUR"], callbackUrl: url }),
+      ).rejects.toThrow(/callbackUrl/i);
+      // The validate gate runs BEFORE the upsert → no operator row was created.
+      const rows = await prisma.operator.findMany({ where: { code } });
+      expect(rows.length).toBe(0);
+    });
+  }
+
+  test("invalid callbackUrl THROWS on UPDATE and leaves the existing row UNCHANGED", async () => {
+    const code = freshCode();
+    const good = await provisionOperator(prisma, {
+      code,
+      name: "Good State",
+      currencies: ["EUR"],
+      callbackUrl: "https://good.example/lobby",
+    });
+    const goodSecret = good.launchSecret!;
+
+    await expect(
+      provisionOperator(prisma, { code, name: "Should Not Apply", callbackUrl: "javascript:alert(1)" }),
+    ).rejects.toThrow(/callbackUrl/i);
+
+    // Byte-for-byte unchanged: name, callbackUrl and secret all preserved (no partial write).
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.name).toBe("Good State");
+    expect(row.callbackUrl).toBe("https://good.example/lobby");
+    expect(row.launchSecret).toBe(goodSecret);
+  });
+});
+
 describe("provisionOperator: rotateReportingKey (Phase 3.5)", () => {
   test("returns a plaintext reporting token ONCE and persists only its hash", async () => {
     const code = freshCode();
