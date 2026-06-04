@@ -1,0 +1,18 @@
+# gitleaks configuration — extend the default ruleset and allowlist TEST FIXTURES.
+#
+# Our unit tests hardcode deterministic, NON-secret fixture strings to sign/verify
+# JWTs and HMACs (e.g. `JWT_SECRET = "h1-op-reserving-secret"`, per-operator
+# `launchSecret: "secret-" + randomUUID()`). gitleaks' generic-api-key heuristic
+# flags these as false positives. Real secrets live in env / 1Password and never in
+# tests, so excluding the test/ tree keeps the secret-scan gate GREEN and meaningful
+# for src/, scripts/, and config — where an actual leak would matter.
+title = "vault-runner-api"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures — deterministic non-secret strings used only to sign/verify in unit tests"
+paths = [
+  '''(^|/)test/''',
+]
