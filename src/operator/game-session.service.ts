@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LaunchTokenService } from "./launch-token.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
+import { effectiveLimitsFor, serializeBetLimits } from "./bet-limits";
 
 // Operator session ("play") tokens are SHORT-lived (re-launch to refresh), unlike
 // 30-day guest tokens — this limits how long a leaked session token is usable, and the
@@ -37,11 +38,24 @@ export class GameSessionService {
   async openFromToken(token: string) {
     const v = await this.launch.verify(token); // signature + expiry + jti unused
 
+    // Canonical currency (ISO-4217 uppercase) so the journal wallet key, session,
+    // and per-currency bet-limit lookup are all consistent regardless of the casing
+    // the operator sent (verify()'s allow-list check is likewise case-insensitive).
+    const currency = (v.currency ?? "").toUpperCase();
+
+    // The operator's per-currency PER-BET limits for this session's currency
+    // (Phase 3). null → the player plays under the global house defaults.
+    const op = await this.prisma.operator.findUnique({
+      where: { id: v.operatorId },
+      select: { betLimits: true },
+    });
+    const limits = effectiveLimitsFor(op?.betLimits, currency);
+
     // Find or create the local journal wallet for this operator player+currency.
     // We tag the User.username with operator+player so it's unique & traceable.
-    const tag = `op:${v.operatorId}:${v.playerId}:${v.currency}`;
+    const tag = `op:${v.operatorId}:${v.playerId}:${currency}`;
     let wallet = await this.prisma.wallet.findFirst({
-      where: { currency: v.currency, user: { username: tag } },
+      where: { currency, user: { username: tag } },
     });
     if (!wallet) {
       try {
@@ -50,7 +64,7 @@ export class GameSessionService {
             id: randomUUID(),
             username: tag,
             isGuest: false,
-            wallets: { create: { currency: v.currency, balance: 0n } }, // journal anchor
+            wallets: { create: { currency, balance: 0n } }, // journal anchor
             profile: { create: { displayName: `Player ${v.playerId.slice(0, 6)}` } },
           },
           include: { wallets: true },
@@ -62,7 +76,7 @@ export class GameSessionService {
         // second launch (audit L-C2.1: concurrent first-launch is idempotent).
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
           wallet = await this.prisma.wallet.findFirstOrThrow({
-            where: { currency: v.currency, user: { username: tag } },
+            where: { currency, user: { username: tag } },
           });
         } else {
           throw e;
@@ -76,7 +90,7 @@ export class GameSessionService {
       data: {
         operatorId: v.operatorId,
         playerId: v.playerId,
-        currency: v.currency,
+        currency,
         locale: v.locale,
         walletId: wallet.id,
         launchJti: v.jti,
@@ -92,11 +106,15 @@ export class GameSessionService {
       {
         sub: wallet.userId,
         walletId: wallet.id, // the session's bound wallet — placeBet resolves THIS one (audit M-C2.1)
-        currency: v.currency,
+        currency,
         operatorId: v.operatorId,
         playerId: v.playerId,
         sessionId: session.id,
         kind: "operator",
+        // Phase 3: the session's resolved per-currency bet limits ride with the play
+        // token so the gateway applies them on every bet with no extra lookup.
+        // Absent → the bet path falls back to the global house defaults.
+        ...(limits ? { limits: serializeBetLimits(limits) } : {}),
       },
       { expiresIn: SESSION_TOKEN_TTL_SEC }, // short-lived session token (audit L-C2.2)
     );
@@ -105,7 +123,7 @@ export class GameSessionService {
       token: playToken,
       sessionId: session.id,
       walletId: wallet.id,
-      currency: v.currency,
+      currency,
       locale: v.locale,
     };
   }

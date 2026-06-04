@@ -168,6 +168,7 @@ model Bet {
   status      String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending
   cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
   payout      BigInt    @default(0)
+  maxWinPerBet BigInt?  @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
   debitTxId   String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
   payoutTxId  String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)

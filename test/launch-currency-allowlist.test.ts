@@ -93,10 +93,14 @@ describe("currency allowlist: verify() accepts allowed, rejects disallowed", () 
     await expect(launch.verify(bad)).rejects.toThrow("currency_not_allowed");
   });
 
-  test("the allowlist is case-sensitive (eur != EUR)", async () => {
+  test("the allowlist is case-INSENSITIVE (eur matches EUR); the session currency is canonical UPPERCASE", async () => {
+    // Phase 3: currency is normalised to ISO-4217 uppercase. A lowercase "eur" is
+    // ACCEPTED for an operator that allows "EUR" (no silent casing 401), and the
+    // resulting session/wallet currency is canonical "EUR" (no casing fragmentation).
     const op = await freshOperator({ currencies: ["EUR"] });
     const tok = await launch.issue({ operatorId: op.id, playerId: "p-lc", currency: "eur" });
-    await expect(launch.verify(tok)).rejects.toThrow("currency_not_allowed");
+    const session = await sessions.openFromToken(tok);
+    expect(session.currency).toBe("EUR");
   });
 
   test("currencies:[] is FAIL-CLOSED — every currency is rejected", async () => {

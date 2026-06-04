@@ -82,8 +82,10 @@ export class LaunchTokenService {
     // currency isn't configured for this operator is rejected; an empty list is
     // fail-closed (provision the operator WITH its currencies). The jti is NOT yet
     // consumed here (no GameSession is written), so the operator can re-issue a
-    // corrected token.
-    if (!op.currencies.includes(payload.currency)) {
+    // corrected token. Case-INSENSITIVE (ISO-4217 canonical uppercase) so a casing
+    // mismatch doesn't silently 401 — openFromToken stores the uppercased currency.
+    const ccy = (payload.currency ?? "").toUpperCase();
+    if (!op.currencies.some((c) => c.toUpperCase() === ccy)) {
       throw new UnauthorizedException("currency_not_allowed");
     }
 

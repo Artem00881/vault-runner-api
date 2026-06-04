@@ -18,6 +18,21 @@ import { PrismaClient } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import { validateBetLimits } from "../src/operator/bet-limits";
 
+/** Uppercase every top-level key of a record (currency-code canonicalisation).
+ *  Throws on a case-collision (e.g. {"eur","EUR"}) so a malformed config fails loudly
+ *  at write time rather than silently dropping a limit table (last-wins). */
+function upperKeys<T>(obj: Record<string, T>): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const K = k.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(out, K)) {
+      throw new Error(`betLimits has case-colliding currency keys mapping to "${K}" — use one canonical code`);
+    }
+    out[K] = v;
+  }
+  return out;
+}
+
 export interface ProvisionInput {
   code: string;
   name?: string;
@@ -37,7 +52,12 @@ export async function provisionOperator(
   prisma: Pick<PrismaClient, "operator">,
   input: ProvisionInput,
 ): Promise<{ operator: any; created: boolean; launchSecret?: string }> {
-  const betLimits = input.betLimits !== undefined ? validateBetLimits(input.betLimits) : undefined;
+  // Canonicalise currency codes to UPPERCASE (ISO-4217) on write so the launch-time
+  // allow-list check and the per-currency limit lookup (both case-insensitive /
+  // uppercased) always match what the operator stored.
+  const betLimits =
+    input.betLimits !== undefined ? upperKeys(validateBetLimits(input.betLimits)) : undefined;
+  const currencies = input.currencies?.map((c) => c.toUpperCase());
 
   const existing = await prisma.operator.findUnique({ where: { code: input.code } });
   const created = !existing;
@@ -46,7 +66,7 @@ export async function provisionOperator(
   // Fields to set on UPDATE — only the ones explicitly provided (others untouched).
   const patch: Record<string, unknown> = {};
   if (input.name !== undefined) patch.name = input.name;
-  if (input.currencies !== undefined) patch.currencies = input.currencies;
+  if (currencies !== undefined) patch.currencies = currencies;
   if (input.walletApiUrl !== undefined) patch.walletApiUrl = input.walletApiUrl;
   if (input.walletApiKey !== undefined) patch.walletApiKey = input.walletApiKey;
   if (input.callbackUrl !== undefined) patch.callbackUrl = input.callbackUrl;
@@ -62,7 +82,7 @@ export async function provisionOperator(
       name: input.name ?? input.code,
       launchSecret: newSecret,
       enabled: input.enabled ?? true,
-      currencies: input.currencies ?? [],
+      currencies: currencies ?? [],
       walletApiUrl: input.walletApiUrl ?? null,
       walletApiKey: input.walletApiKey ?? null,
       callbackUrl: input.callbackUrl ?? null,

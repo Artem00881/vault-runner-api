@@ -14,6 +14,8 @@ import type { Server, Socket } from "socket.io";
 import { GameEngineService } from "./game-engine.service";
 import { BetsService, type Panel } from "./bets.service";
 import { GameSessionService } from "../operator/game-session.service";
+import { deserializeBetLimits } from "../operator/bet-limits";
+import type { PerBetLimits } from "./risk.service";
 import { placeSchema, panelSchema } from "./ws-schemas";
 
 function userRoom(userId: string) {
@@ -175,6 +177,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         // An operator session token binds a specific journal wallet — placeBet resolves
         // THIS wallet (audit M-C2.1). Guests carry no walletId → resolve by userId.
         if (payload.walletId) client.data.walletId = payload.walletId as string;
+        // Phase 3: the operator play token may carry the session's per-currency bet
+        // limits; deserialize once (null/absent → global house defaults) and apply per bet.
+        const lim = deserializeBetLimits((payload as any).limits);
+        if (lim) client.data.limits = lim;
         client.join(userRoom(userId));
         // one active game socket per user — drop any previous one (multi-tab abuse)
         const prev = this.userSockets.get(userId);
@@ -248,7 +254,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     if (!parsed.success) return { ok: false, reason: "invalid_payload" };
     const { panel, amount, autoCashout } = parsed.data;
     const walletId = client.data.walletId as string | undefined;
-    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId);
+    const limits = client.data.limits as PerBetLimits | undefined;
+    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits);
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {

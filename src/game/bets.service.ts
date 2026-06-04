@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wallet/wallet-provider";
 import { GameEngineService } from "./game-engine.service";
-import { RiskService } from "./risk.service";
+import { RiskService, type PerBetLimits } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
 
 export type Panel = "A" | "B";
@@ -82,12 +82,13 @@ export class BetsService {
   }
 
   /** Place a bet on the CURRENT round during the betting window. */
-  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string): Promise<BetResult> {
+  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits): Promise<BetResult> {
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
     const amt = BigInt(Math.floor(amount));
-    const amtCheck = this.risk.checkBetAmount(amt);
+    // Per-currency min/max stake (operator config) or the global defaults (no limits).
+    const amtCheck = this.risk.checkBetAmount(amt, limits);
     if (!amtCheck.ok) { this.metrics.recordRejected(amtCheck.reason); return { ok: false, reason: amtCheck.reason, panel }; }
 
     const roundId = state.roundId;
@@ -137,6 +138,9 @@ export class BetsService {
             amount: amt,
             autoCashout: autoCashout ?? null,
             status: "reserving",
+            // Stamp THIS bet's per-currency win cap so cash-out (incl. server-driven
+            // auto-cashout, which has no socket) caps to the same value (Phase 3).
+            maxWinPerBet: limits?.maxWinPerBet ?? null,
           },
         });
       });
@@ -239,9 +243,12 @@ export class BetsService {
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", userId, panel };
 
-    // payout = stake × multiplier, clamped to the per-bet max-win cap (house safeguard)
+    // payout = stake × multiplier, clamped to THIS bet's max-win cap: the operator
+    // per-currency cap stamped at placeBet (Phase 3), or the global house cap when
+    // null. Reading it off the bet keeps the cash-out cap identical to the bet's,
+    // and covers server-driven auto-cashout (which has no socket to carry limits).
     const rawPayout = BigInt(Math.floor(Number(bet.amount) * mult));
-    const payout = this.risk.capPayout(rawPayout);
+    const payout = this.risk.capPayout(rawPayout, bet.maxWinPerBet ?? undefined);
 
     // Atomically CLAIM the bet (active → cashed_out). A manual+auto race (or two
     // sockets) can both read status:"active", but only the update that flips it

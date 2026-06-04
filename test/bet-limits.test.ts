@@ -84,8 +84,13 @@ describe("bet-limits: effectiveLimitsFor → BigInt", () => {
     }
   });
 
-  test("is case-sensitive on the currency key (no implicit normalisation)", () => {
-    expect(effectiveLimitsFor(GOOD, "eur")).toBeNull();
+  test("is case-INSENSITIVE on the currency key (legacy/lowercase keys still resolve)", () => {
+    // Phase 3.2: a lowercase query OR a lowercase config key must still resolve —
+    // otherwise an operator's per-currency limit silently fails open to the global cap.
+    expect(effectiveLimitsFor(GOOD, "eur")).not.toBeNull();
+    expect(effectiveLimitsFor(GOOD, "eur")!.maxBet).toBe(10000n);
+    // lowercase CONFIG key resolves for an uppercase query too.
+    expect(effectiveLimitsFor({ eur: { minBet: 1, maxBet: 9, maxWinPerBet: 9 } }, "EUR")!.maxBet).toBe(9n);
   });
 
   test("returns null when the whole config is null/garbage (falls back to defaults)", () => {

@@ -55,15 +55,57 @@ export function parseBetLimits(json: unknown): BetLimitsConfig | null {
  */
 export function effectiveLimitsFor(json: unknown, currency: string): EffectiveBetLimits | null {
   const cfg = parseBetLimits(json);
-  // OWN-key lookup only: a currency like "toString"/"constructor"/"__proto__" must
-  // resolve to null (→ global defaults), NEVER an inherited Object.prototype member
-  // (which would then throw in BigInt()). `currency` is operator-controlled (the
-  // launch-token claim), so this guard is load-bearing once wired into the bet path.
-  const l = cfg && Object.prototype.hasOwnProperty.call(cfg, currency) ? cfg[currency] : undefined;
-  if (!l) return null;
+  if (!cfg) return null;
+  const want = (currency ?? "").toUpperCase();
+  // Case-INSENSITIVE own-key match. Config keys are canonically uppercase, but a
+  // legacy / hand-edited lowercase key MUST still resolve — otherwise the operator's
+  // per-currency limit silently fails OPEN to the looser global cap (money-path +
+  // security audit). Object.keys() is own-enumerable only, so a currency like
+  // "toString"/"__proto__" can never hit an inherited Object.prototype member (which
+  // would then throw in BigInt()).
+  for (const k of Object.keys(cfg)) {
+    if (k.toUpperCase() === want) {
+      const l = cfg[k];
+      return {
+        minBet: BigInt(l.minBet),
+        maxBet: BigInt(l.maxBet),
+        maxWinPerBet: BigInt(l.maxWinPerBet),
+      };
+    }
+  }
+  return null;
+}
+
+/** JSON/JWT-safe form of EffectiveBetLimits — BigInt minor units as decimal strings
+ *  (JSON/JWT can't carry BigInt). Used to put the session's resolved limits on the
+ *  play token + (the maxWinPerBet) on the bet row. */
+export interface SerializedBetLimits {
+  minBet: string;
+  maxBet: string;
+  maxWinPerBet: string;
+}
+
+export function serializeBetLimits(l: EffectiveBetLimits): SerializedBetLimits {
   return {
-    minBet: BigInt(l.minBet),
-    maxBet: BigInt(l.maxBet),
-    maxWinPerBet: BigInt(l.maxWinPerBet),
+    minBet: l.minBet.toString(),
+    maxBet: l.maxBet.toString(),
+    maxWinPerBet: l.maxWinPerBet.toString(),
   };
+}
+
+/** Parse the serialized form (a JWT claim / stored JSON) back to BigInt. Defensive:
+ *  null on anything malformed or that fails the limit invariants, so a tampered or
+ *  garbage claim falls back to the global defaults instead of mis-limiting a bet. */
+export function deserializeBetLimits(json: unknown): EffectiveBetLimits | null {
+  if (json == null || typeof json !== "object") return null;
+  const o = json as Record<string, unknown>;
+  try {
+    const minBet = BigInt(o.minBet as string | number);
+    const maxBet = BigInt(o.maxBet as string | number);
+    const maxWinPerBet = BigInt(o.maxWinPerBet as string | number);
+    if (minBet < 0n || maxBet < minBet || maxWinPerBet < maxBet) return null;
+    return { minBet, maxBet, maxWinPerBet };
+  } catch {
+    return null;
+  }
 }

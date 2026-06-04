@@ -32,6 +32,27 @@ test("capPayout clamps an actual payout to the per-bet win cap", () => {
   expect(r.capPayout(50_000n)).toBe(10_000n); // over cap, clamped
 });
 
+test("capPayout per-currency override applies a tighter cap but NEVER exceeds the global", () => {
+  const r = makeRisk({ RISK_MAX_WIN_PER_BET: "10000" });
+  // a per-currency cap BELOW the global applies as-is
+  expect(r.capPayout(8_000n, 5_000n)).toBe(5_000n);
+  expect(r.capPayout(3_000n, 5_000n)).toBe(3_000n);
+  // a per-currency cap ABOVE the global is CLAMPED to the global (money-path audit
+  // HIGH: the round-exposure breaker reserves against the GLOBAL cap, so a higher
+  // per-currency cap would under-reserve the bankroll).
+  expect(r.capPayout(50_000n, 1_000_000n)).toBe(10_000n);
+});
+
+test("checkBetAmount per-currency override applies the operator min/max; no override → global", () => {
+  const r = makeRisk({ RISK_MIN_BET: "1", RISK_MAX_BET: "1000000" });
+  const lim = { minBet: 100n, maxBet: 5000n };
+  expect(r.checkBetAmount(50n, lim).ok).toBe(false); // below operator min (above global min)
+  expect(r.checkBetAmount(100n, lim).ok).toBe(true); // at operator min
+  expect(r.checkBetAmount(5000n, lim).ok).toBe(true); // at operator max
+  expect(r.checkBetAmount(5001n, lim).ok).toBe(false); // above operator max (below global max)
+  expect(r.checkBetAmount(50n).ok).toBe(true); // no override → global [1, 1000000]
+});
+
 test("round exposure cap rejects a bet that would exceed the bankroll", () => {
   // maxMultiplier 100x, per-bet win cap huge, round exposure cap 1000.
   const r = makeRisk({
