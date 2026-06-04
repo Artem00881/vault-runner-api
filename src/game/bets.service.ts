@@ -6,8 +6,15 @@ import { GameEngineService } from "./game-engine.service";
 import { RiskService, type PerBetLimits } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
 import type { EffectiveRg } from "../operator/rg-config";
+import { isWageredStatus, isWonStatus } from "../common/bet-status";
 
 export type Panel = "A" | "B";
+
+/** Per-bet operator context (Phase 3.5). Denormalised onto the Bet row for per-operator
+ *  reporting. Sourced from the verified play token (operatorId); guests carry none. */
+export interface BetOperatorContext {
+  operatorId?: string;
+}
 
 /** Per-session responsible-gambling context for a bet (Phase 3). Real-money sessions
  *  only — demo/guests carry none. The gateway resolves it from the signed play token
@@ -116,18 +123,16 @@ export class BetsService {
     let wagered = 0n;
     let won = 0n;
     for (const b of bets) {
-      if (b.status === "active" || b.status === "cashed_out" || b.status === "busted" || b.status === "payout_pending") {
-        wagered += b.amount;
-      }
-      if (b.status === "cashed_out" || b.status === "payout_pending") {
-        won += b.payout;
-      }
+      // Shared status sets (common/bet-status) so RG accounting and operator reporting
+      // use one money definition and can never drift.
+      if (isWageredStatus(b.status)) wagered += b.amount;
+      if (isWonStatus(b.status)) won += b.payout;
     }
     return { wagered, won, net: wagered - won };
   }
 
   /** Place a bet on the CURRENT round during the betting window. */
-  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits, demo?: boolean, rgCtx?: RgContext): Promise<BetResult> {
+  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits, demo?: boolean, rgCtx?: RgContext, betCtx?: BetOperatorContext): Promise<BetResult> {
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
@@ -223,6 +228,11 @@ export class BetsService {
             // Descriptive audit stamp: was this a play-money (fun-mode) bet? The money
             // ROUTING is by walletId in the WalletRouter, not this flag (Phase 3).
             demo: demo ?? false,
+            // Denormalise the operator + currency for per-operator REPORTING (Phase 3.5).
+            // operatorId comes from the verified play token (null for guests/internal play
+            // → excluded from operator reports). currency is the wallet's canonical code.
+            operatorId: betCtx?.operatorId ?? null,
+            currency: wallet.currency.toUpperCase(),
             // Stamp THIS bet's per-currency win cap so cash-out (incl. server-driven
             // auto-cashout, which has no socket) caps to the same value (Phase 3).
             maxWinPerBet: limits?.maxWinPerBet ?? null,

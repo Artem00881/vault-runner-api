@@ -308,6 +308,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         // `rg` claim; demo/guests don't). sessionId/currency were previously dropped.
         client.data.sessionId = (payload as any).sessionId;
         client.data.currency = (payload as any).currency;
+        // Phase 3.5: operatorId from the verified play token → denormalised onto each
+        // bet for per-operator reporting (guests carry none → stays undefined).
+        client.data.operatorId = (payload as any).operatorId;
         const rgStartedAt = Number((payload as any).sessionStartedAt);
         const rg = deserializeRg((payload as any).rg);
         if (rg && Number.isFinite(rgStartedAt)) {
@@ -406,7 +409,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       rgPending: client.data.rgPending === true,
       sessionStartedAt: client.data.sessionStartedAt as number | undefined,
     };
-    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits, demo, rgCtx);
+    // Phase 3.5: stamp the operator on the bet row (reporting). Guests → undefined.
+    const betCtx = { operatorId: client.data.operatorId as string | undefined };
+    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits, demo, rgCtx, betCtx);
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {

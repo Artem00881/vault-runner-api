@@ -6,6 +6,9 @@ import { LedgerModule } from "../wallet/ledger.module";
 import { LaunchTokenService } from "./launch-token.service";
 import { GameSessionService } from "./game-session.service";
 import { OperatorController } from "./operator.controller";
+import { ReportingController } from "./reporting.controller";
+import { ReportingService } from "./reporting.service";
+import { OperatorAuthGuard } from "./operator-auth.guard";
 
 /**
  * Operator (B2B multi-tenant) surface: launch-token verification and game
@@ -20,8 +23,10 @@ import { OperatorController } from "./operator.controller";
     JwtModule.registerAsync({ inject: [ConfigService], useFactory: buildJwtOptions }),
     LedgerModule, // GameSessionService seeds/resets demo (fun-mode) play-money wallets
   ],
-  controllers: [OperatorController],
-  providers: [LaunchTokenService, GameSessionService],
+  controllers: [OperatorController, ReportingController],
+  // ReportingService + OperatorAuthGuard need only PrismaService (global). The guard
+  // is registered so @UseGuards(OperatorAuthGuard) resolves it with its dependency.
+  providers: [LaunchTokenService, GameSessionService, ReportingService, OperatorAuthGuard],
   exports: [LaunchTokenService, GameSessionService],
 })
 export class OperatorModule {}

@@ -28,6 +28,7 @@ model Operator {
   ipWhitelist  String[] @default([]) @map("ip_whitelist")
   betLimits    Json?    @map("bet_limits") // per-currency bet-level tables
   rgConfig     Json?    @map("rg_config") // responsible-gambling config (reality checks + session limits)
+  reportingApiKeyHash String? @map("reporting_api_key_hash") // HASHED inbound API key for the operator REPORTING surface (Phase 3.5); null = no reporting access. Only ever VERIFIED, never used to sign — so it is hashed at rest (unlike launchSecret/walletApiKey).
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -173,6 +174,8 @@ model Bet {
   cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
   payout      BigInt    @default(0)
   demo        Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)
+  operatorId  String?   @map("operator_id") @db.Uuid // denormalised from the session for per-operator REPORTING (Phase 3.5); null = internal/guest play (excluded from operator reports). Stamped from the verified play token; never client-supplied.
+  currency    String?   // denormalised journal currency (canonical UPPERCASE) for per-currency reporting (Phase 3.5)
   maxWinPerBet BigInt?  @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
   debitTxId   String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
   payoutTxId  String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)
@@ -186,6 +189,7 @@ model Bet {
   @@unique([roundId, userId, panel])
   @@index([userId, createdAt(sort: Desc)])
   @@index([walletId, createdAt]) // per-session RG accounting: sum a wallet's bets since session start (Phase 3)
+  @@index([operatorId, currency, createdAt]) // per-operator reporting: scope by operator + currency over a date range (Phase 3.5)
   @@map("game_bets")
 }
 

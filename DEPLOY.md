@@ -446,6 +446,25 @@ docker restart vaultrun-api        # plain restart needs no op (uses stored conf
 `./op-compose.sh up -d --force-recreate`. To rotate the **DB** password you must also
 `ALTER USER` on Postgres (its password only re-inits on an empty data dir).
 
+**Operator reporting key + optional `REPORTING_KEY_PEPPER` (Phase 3.5).** Operators
+authenticate to `/api/operator/reports/*` with a per-operator key
+(`Authorization: Bearer vrk_<operatorId>.<secret>`). Only the **hash** is stored
+(`Operator.reportingApiKeyHash`); the plaintext is shown **once** by the provisioning
+CLI (`bun scripts/operator-provision.ts --code <op> --rotate-reporting-key`) — store
+it in 1Password and share it with the operator.
+- **`REPORTING_KEY_PEPPER` is OPTIONAL.** Unset → keys are hashed `sha256:<secret>`
+  (safe: the secret is 256-bit CSPRNG, not a password). Set → `hmac-sha256:<…>`, which
+  adds defense against a DB-only leak. To enable: create `REPORTING_KEY_PEPPER` in
+  `VaultRun-Prod` (Password), add `REPORTING_KEY_PEPPER=op://VaultRun-Prod/REPORTING_KEY_PEPPER/password`
+  to `op.prod.env`, and **mint keys with the same pepper** (run the provisioning CLI
+  via `op run` so it sees the same value the app does).
+- **The stored hash is self-describing** (`sha256:`/`hmac-sha256:` prefix), so a
+  `sha256` key keeps verifying even if a pepper is later added — only **peppered** keys
+  need the pepper present. If a peppered key's pepper goes missing the app logs a
+  distinct `reporting key is peppered but REPORTING_KEY_PEPPER is unset` warning (not a
+  silent 401). Rotating/removing the pepper invalidates existing **peppered** keys →
+  re-issue them. The provisioning CLI prints which hash mode it used.
+
 **First-time setup** (already done for prod, 2026-06-02):
 1. Create the vault `VaultRun-Prod` + the three *Password* items.
 2. Create a 1Password **service account** (a Teams/Business feature) with read

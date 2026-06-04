@@ -18,6 +18,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import { validateBetLimits } from "../src/operator/bet-limits";
 import { validateRgConfig, type RgConfig } from "../src/operator/rg-config";
+import { generateReportingKey } from "../src/operator/reporting-key";
 
 /** Uppercase every top-level key of a record (currency-code canonicalisation).
  *  Throws on a case-collision (e.g. {"eur","EUR"}) so a malformed config fails loudly
@@ -54,6 +55,7 @@ export interface ProvisionInput {
   enabled?: boolean;
   demoEnabled?: boolean; // may this operator launch play-money "fun mode"? (off by default)
   rotateSecret?: boolean;
+  rotateReportingKey?: boolean; // mint/rotate the inbound REPORTING api key (Phase 3.5)
 }
 
 /** Create or update an operator (upsert by code). Returns the row, whether it was
@@ -61,7 +63,7 @@ export interface ProvisionInput {
 export async function provisionOperator(
   prisma: Pick<PrismaClient, "operator">,
   input: ProvisionInput,
-): Promise<{ operator: any; created: boolean; launchSecret?: string }> {
+): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string }> {
   // Canonicalise currency codes to UPPERCASE (ISO-4217) on write so the launch-time
   // allow-list check and the per-currency limit lookup (both case-insensitive /
   // uppercased) always match what the operator stored.
@@ -108,10 +110,21 @@ export async function provisionOperator(
     update: patch,
   });
 
+  // Optional: mint/rotate the inbound REPORTING api key. The token embeds the operator
+  // id (known only after the upsert), so we store its hash in a follow-up update and
+  // return the plaintext token ONCE. Rotating invalidates any prior reporting key.
+  let reportingApiKey: string | undefined;
+  if (input.rotateReportingKey) {
+    const { token, hash } = generateReportingKey(operator.id);
+    await prisma.operator.update({ where: { id: operator.id }, data: { reportingApiKeyHash: hash } });
+    reportingApiKey = token;
+  }
+
   return {
     operator,
     created,
     launchSecret: created || input.rotateSecret ? operator.launchSecret : undefined,
+    reportingApiKey,
   };
 }
 
@@ -143,7 +156,7 @@ async function main() {
     console.error(
       "usage: bun scripts/operator-provision.ts --code <code> [--name ..] [--currencies EUR,USDT]\n" +
         "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json] [--rg-config '<json>'|@file.json]\n" +
-        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret]",
+        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret] [--rotate-reporting-key]",
     );
     process.exit(1);
   }
@@ -164,7 +177,7 @@ async function main() {
 
   const prisma = new PrismaClient();
   try {
-    const { operator, created, launchSecret } = await provisionOperator(prisma, {
+    const { operator, created, launchSecret, reportingApiKey } = await provisionOperator(prisma, {
       code,
       name: str(args.name),
       currencies: list(args.currencies),
@@ -178,6 +191,7 @@ async function main() {
       demoEnabled:
         args["demo-enabled"] === true ? true : args["demo-disabled"] === true ? false : undefined,
       rotateSecret: args["rotate-secret"] === true,
+      rotateReportingKey: args["rotate-reporting-key"] === true,
     });
 
     console.log(`${created ? "CREATED" : "UPDATED"} operator ${operator.code} (id ${operator.id})`);
@@ -193,6 +207,15 @@ async function main() {
       console.log(`\n  launchSecret (${created ? "new" : "ROTATED — outstanding launch tokens are now invalid"}):`);
       console.log(`    ${launchSecret}`);
       console.log(`  ^ store securely (1Password) + share with the operator; it signs their launch tokens. Shown once.`);
+    }
+    if (reportingApiKey) {
+      const mode = process.env.REPORTING_KEY_PEPPER ? "HMAC-SHA256 (peppered)" : "SHA-256 (no pepper)";
+      console.log(`\n  reporting API key (ROTATED — any prior reporting key is now invalid):`);
+      console.log(`    ${reportingApiKey}`);
+      console.log(`  ^ the operator sends this as 'Authorization: Bearer <key>' to /api/operator/reports/*. Shown once;`);
+      console.log(`    store in 1Password + share with the operator.`);
+      console.log(`    hash mode: ${mode}. If peppered, the APP must run with the SAME REPORTING_KEY_PEPPER`);
+      console.log(`    or the stored hash won't verify (DEPLOY.md §12).`);
     }
   } finally {
     await prisma.$disconnect();

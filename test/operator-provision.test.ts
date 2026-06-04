@@ -1,7 +1,12 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { provisionOperator } from "../scripts/operator-provision";
+import {
+  parseReportingToken,
+  verifyReportingSecret,
+  REPORTING_TOKEN_PREFIX,
+} from "../src/operator/reporting-key";
 
 /**
  * Phase 3, piece 1 — provisionOperator (DB upsert by `code`).
@@ -29,8 +34,17 @@ function freshCode() {
   return code;
 }
 
+// generateReportingKey (called by provisionOperator on --rotate-reporting-key) reads
+// REPORTING_KEY_PEPPER at hash time; the bun process is shared, so run with no pepper
+// and restore whatever was there after each test (env hygiene).
+const SAVED_PEPPER = process.env.REPORTING_KEY_PEPPER;
 beforeAll(async () => {
+  delete process.env.REPORTING_KEY_PEPPER;
   await prisma.$connect();
+});
+afterEach(() => {
+  if (SAVED_PEPPER === undefined) delete process.env.REPORTING_KEY_PEPPER;
+  else process.env.REPORTING_KEY_PEPPER = SAVED_PEPPER;
 });
 
 afterAll(async () => {
@@ -212,5 +226,58 @@ describe("provisionOperator: invalid betLimits is rejected before any write", ()
     expect(row.name).toBe("Good State");
     expect(row.betLimits).toEqual(goodLimits as object);
     expect(row.launchSecret).toBe(goodSecret);
+  });
+});
+
+describe("provisionOperator: rotateReportingKey (Phase 3.5)", () => {
+  test("returns a plaintext reporting token ONCE and persists only its hash", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, {
+      code,
+      currencies: ["EUR"],
+      rotateReportingKey: true,
+    });
+    expect(res.reportingApiKey).toBeTruthy();
+    // The token embeds this operator's id and the vrk_ prefix.
+    expect(res.reportingApiKey!.startsWith(`${REPORTING_TOKEN_PREFIX}${res.operator.id}.`)).toBe(true);
+
+    // The DB stores a HASH, never the plaintext token/secret.
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.reportingApiKeyHash).toBeTruthy();
+    expect(row.reportingApiKeyHash).not.toBe(res.reportingApiKey);
+    const secret = parseReportingToken(res.reportingApiKey)!.secret;
+    expect(row.reportingApiKeyHash).not.toContain(secret);
+
+    // The returned token verifies against the stored hash.
+    expect(verifyReportingSecret(secret, row.reportingApiKeyHash)).toBe(true);
+  });
+
+  test("NOT rotating leaves reportingApiKeyHash null + returns no token", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["EUR"] }); // no rotateReportingKey
+    expect(res.reportingApiKey).toBeUndefined();
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.reportingApiKeyHash).toBeNull();
+  });
+
+  test("re-rotation invalidates the prior key (old secret no longer verifies, new does)", async () => {
+    const code = freshCode();
+    const first = await provisionOperator(prisma, { code, currencies: ["EUR"], rotateReportingKey: true });
+    const firstSecret = parseReportingToken(first.reportingApiKey!)!.secret;
+    const afterFirst = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(verifyReportingSecret(firstSecret, afterFirst.reportingApiKeyHash)).toBe(true);
+
+    // Rotate again (preserves the launchSecret — this is a reporting-key-only rotation).
+    const second = await provisionOperator(prisma, { code, rotateReportingKey: true });
+    const secondSecret = parseReportingToken(second.reportingApiKey!)!.secret;
+    expect(second.reportingApiKey).not.toBe(first.reportingApiKey);
+
+    const afterSecond = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    // The stored hash changed; the OLD secret no longer verifies, the NEW one does.
+    expect(afterSecond.reportingApiKeyHash).not.toBe(afterFirst.reportingApiKeyHash);
+    expect(verifyReportingSecret(firstSecret, afterSecond.reportingApiKeyHash)).toBe(false);
+    expect(verifyReportingSecret(secondSecret, afterSecond.reportingApiKeyHash)).toBe(true);
+    // launchSecret is untouched by a reporting-key rotation.
+    expect(afterSecond.launchSecret).toBe(afterFirst.launchSecret);
   });
 });
