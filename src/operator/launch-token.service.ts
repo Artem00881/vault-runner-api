@@ -78,6 +78,15 @@ export class LaunchTokenService {
       throw new UnauthorizedException("invalid_launch_token");
     }
 
+    // Phase 3: enforce the operator's allowed-currency list. A launch token whose
+    // currency isn't configured for this operator is rejected; an empty list is
+    // fail-closed (provision the operator WITH its currencies). The jti is NOT yet
+    // consumed here (no GameSession is written), so the operator can re-issue a
+    // corrected token.
+    if (!op.currencies.includes(payload.currency)) {
+      throw new UnauthorizedException("currency_not_allowed");
+    }
+
     const jti = payload.jti as string | undefined;
     if (!jti) throw new UnauthorizedException("invalid_launch_token");
 
