@@ -17,6 +17,12 @@ scrape_configs:
   # so it's never scraped over the public internet.
   - job_name: vaultrun-api
     metrics_path: /metrics
+    # H5: /metrics is bearer-locked (MetricsAuthGuard). The token is mounted
+    # read-only from the host file /etc/vaultrun/metrics-token (see
+    # monitoring/docker-compose.yml) — same value as the app's METRICS_TOKEN.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics-token
     static_configs:
       - targets: ["vaultrun-api:3001"]
 

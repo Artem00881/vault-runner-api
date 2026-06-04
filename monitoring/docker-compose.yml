@@ -24,6 +24,8 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # H5: bearer token to scrape the now-locked /metrics (host file, no newline).
+      - /etc/vaultrun/metrics-token:/etc/prometheus/metrics-token:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090" # localhost only — SSH tunnel, never public
