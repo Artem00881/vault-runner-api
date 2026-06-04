@@ -2,6 +2,7 @@ import { Injectable, Inject, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
+import { normalizeLocale } from "../common/locale";
 
 /**
  * Signed launch-token ("ticket") protocol for opening the game from an operator
@@ -51,7 +52,7 @@ export class LaunchTokenService {
         operatorId: claims.operatorId,
         playerId: claims.playerId,
         currency: claims.currency,
-        locale: claims.locale ?? "en",
+        locale: normalizeLocale(claims.locale),
         demo: claims.demo ?? false,
         ctx: claims.ctx ?? {},
       },
@@ -115,7 +116,7 @@ export class LaunchTokenService {
       operatorId,
       playerId: payload.playerId,
       currency: payload.currency,
-      locale: payload.locale ?? "en",
+      locale: normalizeLocale(payload.locale),
       demo,
       ctx: payload.ctx ?? {},
       jti,

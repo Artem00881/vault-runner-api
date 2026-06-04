@@ -8,6 +8,7 @@ import { LedgerService } from "../wallet/ledger.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
 import { effectiveLimitsFor, serializeBetLimits } from "./bet-limits";
 import { effectiveRgFor, serializeRg } from "./rg-config";
+import { currencyMeta } from "../common/currency";
 
 // Operator session ("play") tokens are SHORT-lived (re-launch to refresh), unlike
 // 30-day guest tokens — this limits how long a leaked session token is usable, and the
@@ -173,6 +174,9 @@ export class GameSessionService {
       sessionId: session.id,
       walletId: wallet.id,
       currency,
+      // Phase 3.6: the currency's decimal precision so the embedding client renders the
+      // wallet (minor units) correctly from first paint, without a /api/currencies call.
+      decimals: currencyMeta(currency).decimals,
       locale: v.locale,
     };
   }

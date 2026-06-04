@@ -511,3 +511,80 @@ describe("R.9 bets ledger — pagination, playerId resolution, cursor scope", ()
     ).rejects.toThrow(BadRequestException);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("R.10 per-currency decimals on report rows (Phase 3.6)", () => {
+  test("each CurrencyStat carries decimals matching its currency (EUR=2 AND a non-2)", async () => {
+    const op = await freshOperator(["EUR", "USDT", "BTC"]);
+    const eur = await makePlayer(op.id, "dec-eur", "EUR");
+    const usdt = await makePlayer(op.id, "dec-usdt", "USDT");
+    const btc = await makePlayer(op.id, "dec-btc", "BTC");
+    await seedBet(eur.walletId, eur.userId, { operatorId: op.id, amount: 1000n, status: "busted", currency: "EUR" });
+    await seedBet(usdt.walletId, usdt.userId, { operatorId: op.id, amount: 2000n, status: "busted", currency: "USDT" });
+    await seedBet(btc.walletId, btc.userId, { operatorId: op.id, amount: 3000n, status: "busted", currency: "BTC" });
+
+    const res = await reporting.summary(op.id, Q());
+    const byCcy = new Map(res.currencies.map((c) => [c.currency, c]));
+    // The non-2 canaries prove decimals is the REAL per-currency precision, not a constant.
+    expect(byCcy.get("EUR")!.decimals).toBe(2);
+    expect(byCcy.get("USDT")!.decimals).toBe(6);
+    expect(byCcy.get("BTC")!.decimals).toBe(8);
+    // Every row has an integer decimals.
+    for (const c of res.currencies) expect(Number.isInteger(c.decimals)).toBe(true);
+  });
+
+  test("daily buckets also carry per-currency decimals", async () => {
+    const op = await freshOperator(["JPY"]);
+    const p = await makePlayer(op.id, "dec-jpy", "JPY");
+    await seedBet(p.walletId, p.userId, { operatorId: op.id, amount: 500n, status: "busted", currency: "JPY", createdAt: new Date("2026-06-07T10:00:00Z") });
+    const res = await reporting.daily(op.id, parseDailyQuery({ from: "2026-06-07", to: "2026-06-07" }));
+    expect(res.days.length).toBe(1);
+    expect(res.days[0].currency).toBe("JPY");
+    expect(res.days[0].decimals).toBe(0); // JPY canary: real 0-dp
+  });
+
+  test("each BetRow carries decimals for its currency", async () => {
+    const op = await freshOperator(["EUR", "USDT"]);
+    const eur = await makePlayer(op.id, "row-eur", "EUR");
+    const usdt = await makePlayer(op.id, "row-usdt", "USDT");
+    const eurBetId = await seedBet(eur.walletId, eur.userId, { operatorId: op.id, amount: 100n, status: "busted", currency: "EUR" });
+    const usdtBetId = await seedBet(usdt.walletId, usdt.userId, { operatorId: op.id, amount: 200n, status: "busted", currency: "USDT" });
+
+    const res = await reporting.bets(op.id, parseBetsQuery({ from: FROM.toISOString(), to: TO.toISOString() }));
+    const eurRow = res.bets.find((b) => b.id === eurBetId)!;
+    const usdtRow = res.bets.find((b) => b.id === usdtBetId)!;
+    expect(eurRow.currency).toBe("EUR");
+    expect(eurRow.decimals).toBe(2);
+    expect(usdtRow.currency).toBe("USDT");
+    expect(usdtRow.decimals).toBe(6); // non-2 canary on a bet row
+  });
+
+  test("a bet with a NULL currency → decimals falls back to 2 (never throws)", async () => {
+    // Bet.currency is nullable in the schema; a legacy/internal row with no stamped
+    // currency must still produce a row with the 2-dp fallback, not a 500.
+    const op = await freshOperator(["EUR"]);
+    const p = await makePlayer(op.id, "row-nullccy", "EUR");
+    const roundId = await makeRound();
+    const betId = randomUUID();
+    await prisma.bet.create({
+      data: {
+        id: betId,
+        roundId,
+        userId: p.userId,
+        walletId: p.walletId,
+        panel: "A",
+        amount: 100n,
+        status: "busted",
+        payout: 0n,
+        demo: false,
+        operatorId: op.id,
+        currency: null, // explicitly unstamped
+        settledAt: new Date(),
+      },
+    });
+    const res = await reporting.bets(op.id, parseBetsQuery({ from: FROM.toISOString(), to: TO.toISOString() }));
+    const row = res.bets.find((b) => b.id === betId)!;
+    expect(row.currency).toBeNull();
+    expect(row.decimals).toBe(2); // fallback for a null/unknown currency
+  });
+});

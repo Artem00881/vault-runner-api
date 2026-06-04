@@ -19,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { validateBetLimits } from "../src/operator/bet-limits";
 import { validateRgConfig, type RgConfig } from "../src/operator/rg-config";
 import { generateReportingKey } from "../src/operator/reporting-key";
+import { isKnownCurrency } from "../src/common/currency";
 
 /** Uppercase every top-level key of a record (currency-code canonicalisation).
  *  Throws on a case-collision (e.g. {"eur","EUR"}) so a malformed config fails loudly
@@ -56,6 +57,7 @@ export interface ProvisionInput {
   demoEnabled?: boolean; // may this operator launch play-money "fun mode"? (off by default)
   rotateSecret?: boolean;
   rotateReportingKey?: boolean; // mint/rotate the inbound REPORTING api key (Phase 3.5)
+  strictCurrencies?: boolean; // Phase 3.6: throw (not warn) if a currency isn't in the canonical table
 }
 
 /** Create or update an operator (upsert by code). Returns the row, whether it was
@@ -63,7 +65,7 @@ export interface ProvisionInput {
 export async function provisionOperator(
   prisma: Pick<PrismaClient, "operator">,
   input: ProvisionInput,
-): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string }> {
+): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string; unknownCurrencies: string[] }> {
   // Canonicalise currency codes to UPPERCASE (ISO-4217) on write so the launch-time
   // allow-list check and the per-currency limit lookup (both case-insensitive /
   // uppercased) always match what the operator stored.
@@ -72,6 +74,16 @@ export async function provisionOperator(
   const rgConfig =
     input.rgConfig !== undefined ? upperKeysRgLimits(validateRgConfig(input.rgConfig)) : undefined;
   const currencies = input.currencies?.map((c) => c.toUpperCase());
+
+  // Phase 3.6: flag currencies with no canonical precision entry. Default = warn (a
+  // genuinely-new token can be onboarded before it's seeded; currencyMeta falls back to
+  // 2 dp). --strict-currencies turns it into a hard error (checked BEFORE any write).
+  const unknownCurrencies = (currencies ?? []).filter((c) => !isKnownCurrency(c));
+  if (input.strictCurrencies && unknownCurrencies.length > 0) {
+    throw new Error(
+      `unknown currency code(s) not in the canonical table (src/common/currency.ts): ${unknownCurrencies.join(", ")}`,
+    );
+  }
 
   const existing = await prisma.operator.findUnique({ where: { code: input.code } });
   const created = !existing;
@@ -125,6 +137,7 @@ export async function provisionOperator(
     created,
     launchSecret: created || input.rotateSecret ? operator.launchSecret : undefined,
     reportingApiKey,
+    unknownCurrencies,
   };
 }
 
@@ -156,7 +169,7 @@ async function main() {
     console.error(
       "usage: bun scripts/operator-provision.ts --code <code> [--name ..] [--currencies EUR,USDT]\n" +
         "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json] [--rg-config '<json>'|@file.json]\n" +
-        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret] [--rotate-reporting-key]",
+        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret] [--rotate-reporting-key] [--strict-currencies]",
     );
     process.exit(1);
   }
@@ -177,7 +190,7 @@ async function main() {
 
   const prisma = new PrismaClient();
   try {
-    const { operator, created, launchSecret, reportingApiKey } = await provisionOperator(prisma, {
+    const { operator, created, launchSecret, reportingApiKey, unknownCurrencies } = await provisionOperator(prisma, {
       code,
       name: str(args.name),
       currencies: list(args.currencies),
@@ -192,6 +205,7 @@ async function main() {
         args["demo-enabled"] === true ? true : args["demo-disabled"] === true ? false : undefined,
       rotateSecret: args["rotate-secret"] === true,
       rotateReportingKey: args["rotate-reporting-key"] === true,
+      strictCurrencies: args["strict-currencies"] === true,
     });
 
     console.log(`${created ? "CREATED" : "UPDATED"} operator ${operator.code} (id ${operator.id})`);
@@ -203,6 +217,12 @@ async function main() {
     console.log(`  rgConfig: ${operator.rgConfig ? JSON.stringify(operator.rgConfig) : "(none → no in-session RG)"}`);
     console.log(`  enabled: ${operator.enabled}`);
     console.log(`  demoEnabled: ${operator.demoEnabled} (play-money fun mode)`);
+    if (unknownCurrencies.length > 0) {
+      console.warn(
+        `  ⚠ currencies with NO canonical precision entry (client will assume 2 dp): ${unknownCurrencies.join(", ")}\n` +
+          `    add them to src/common/currency.ts, or pass --strict-currencies to reject.`,
+      );
+    }
     if (launchSecret) {
       console.log(`\n  launchSecret (${created ? "new" : "ROTATED — outstanding launch tokens are now invalid"}):`);
       console.log(`    ${launchSecret}`);

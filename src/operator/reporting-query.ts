@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { UUID_RE } from "../common/uuid";
+import { CURRENCY_CODE_RE } from "../common/currency";
 
 /**
  * Parsing + validation for the operator reporting query params (Phase 3.5).
@@ -25,7 +26,6 @@ export interface BetsQuery extends ReportQuery {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 export const MAX_DAILY_RANGE_DAYS = 366;
-const CURRENCY_RE = /^[A-Z0-9]{1,16}$/;
 
 const asString = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
@@ -46,7 +46,7 @@ function parseCurrency(raw: unknown): string | undefined {
   const s = asString(raw);
   if (s === undefined) return undefined;
   const c = s.trim().toUpperCase();
-  if (!CURRENCY_RE.test(c)) throw new BadRequestException("invalid currency");
+  if (!CURRENCY_CODE_RE.test(c)) throw new BadRequestException("invalid currency");
   return c;
 }
 

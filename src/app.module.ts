@@ -13,6 +13,7 @@ import { LeaderboardModule } from "./leaderboard/leaderboard.module";
 import { OperatorModule } from "./operator/operator.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { HealthController } from "./health/health.controller";
+import { CurrencyController } from "./common/currency.controller";
 
 @Module({
   imports: [
@@ -34,7 +35,7 @@ import { HealthController } from "./health/health.controller";
     OperatorModule,
     MetricsModule,
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, CurrencyController],
   providers: [{ provide: APP_GUARD, useClass: IpThrottlerGuard }],
 })
 export class AppModule {}

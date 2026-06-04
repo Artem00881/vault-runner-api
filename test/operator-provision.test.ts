@@ -281,3 +281,72 @@ describe("provisionOperator: rotateReportingKey (Phase 3.5)", () => {
     expect(afterSecond.launchSecret).toBe(afterFirst.launchSecret);
   });
 });
+
+describe("provisionOperator: unknown-currency reporting + strict mode (Phase 3.6)", () => {
+  test("a fully-known currency set → unknownCurrencies:[]", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["EUR", "USDT", "BTC"] });
+    expect(res.created).toBe(true);
+    expect(res.unknownCurrencies).toEqual([]);
+    // Codes are canonicalised UPPERCASE on write.
+    expect(res.operator.currencies).toEqual(["EUR", "USDT", "BTC"]);
+  });
+
+  test("a known currency in mixed case is still recognised (no false unknown)", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["eur", "uSdT"] });
+    expect(res.unknownCurrencies).toEqual([]); // case-insensitive known-check
+    expect(res.operator.currencies).toEqual(["EUR", "USDT"]);
+  });
+
+  test("an unknown currency (default = warn) → succeeds + reports it in unknownCurrencies (UPPERCASE)", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["EUR", "xyz"] });
+    expect(res.created).toBe(true); // default mode does NOT throw
+    expect(res.unknownCurrencies).toEqual(["XYZ"]); // canonicalised, only the unseeded one
+    // The operator row is written with the unknown currency allow-listed.
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.currencies).toEqual(["EUR", "XYZ"]);
+  });
+
+  test("strictCurrencies:true + an unknown currency THROWS and writes NO row (fail-first invariant)", async () => {
+    const code = freshCode();
+    await expect(
+      provisionOperator(prisma, { code, currencies: ["EUR", "XYZ"], strictCurrencies: true }),
+    ).rejects.toThrow(/unknown currency/i);
+
+    // The strict check runs BEFORE the upsert → no operator row was created.
+    const rows = await prisma.operator.findMany({ where: { code } });
+    expect(rows.length).toBe(0);
+  });
+
+  test("strictCurrencies:true + an unknown currency on UPDATE throws and leaves the row UNCHANGED", async () => {
+    const code = freshCode();
+    // Seed a good row first.
+    const good = await provisionOperator(prisma, { code, name: "Good State", currencies: ["EUR"] });
+    const goodSecret = good.launchSecret!;
+
+    await expect(
+      provisionOperator(prisma, { code, name: "Should Not Apply", currencies: ["EUR", "NOPE"], strictCurrencies: true }),
+    ).rejects.toThrow(/unknown currency/i);
+
+    // Byte-for-byte unchanged: name, currencies and secret all preserved (no partial write).
+    const row = await prisma.operator.findUniqueOrThrow({ where: { code } });
+    expect(row.name).toBe("Good State");
+    expect(row.currencies).toEqual(["EUR"]);
+    expect(row.launchSecret).toBe(goodSecret);
+  });
+
+  test("strictCurrencies:true with an all-known set does NOT throw", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code, currencies: ["EUR", "JPY"], strictCurrencies: true });
+    expect(res.created).toBe(true);
+    expect(res.unknownCurrencies).toEqual([]);
+  });
+
+  test("no currencies provided → unknownCurrencies:[] (nothing to check)", async () => {
+    const code = freshCode();
+    const res = await provisionOperator(prisma, { code });
+    expect(res.unknownCurrencies).toEqual([]);
+  });
+});
