@@ -82,7 +82,7 @@ export class BetsService {
   }
 
   /** Place a bet on the CURRENT round during the betting window. */
-  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits): Promise<BetResult> {
+  async placeBet(userId: string, panel: Panel, amount: number, autoCashout?: number, walletId?: string, limits?: PerBetLimits, demo?: boolean): Promise<BetResult> {
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "betting") return { ok: false, reason: "betting_closed", panel };
 
@@ -138,6 +138,9 @@ export class BetsService {
             amount: amt,
             autoCashout: autoCashout ?? null,
             status: "reserving",
+            // Descriptive audit stamp: was this a play-money (fun-mode) bet? The money
+            // ROUTING is by walletId in the WalletRouter, not this flag (Phase 3).
+            demo: demo ?? false,
             // Stamp THIS bet's per-currency win cap so cash-out (incl. server-driven
             // auto-cashout, which has no socket) caps to the same value (Phase 3).
             maxWinPerBet: limits?.maxWinPerBet ?? null,

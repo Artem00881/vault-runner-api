@@ -19,6 +19,7 @@ model Operator {
   code         String   @unique // short slug, e.g. "demo-operator"
   name         String
   enabled      Boolean  @default(true)
+  demoEnabled  Boolean  @default(false) @map("demo_enabled") // may this operator launch play-money "fun mode"? compliance-conservative: off until explicitly provisioned
   launchSecret String   @map("launch_secret") // per-operator HMAC secret for launch tokens
   currencies   String[] @default([]) // ISO/crypto codes this operator offers
   walletApiUrl String?  @map("wallet_api_url") // operator seamless-wallet endpoint
@@ -44,6 +45,7 @@ model GameSession {
   currency    String
   locale      String   @default("en")
   walletId    String   @map("wallet_id") @db.Uuid // local journal wallet
+  demo        Boolean  @default(false) // play-money "fun mode" session: money routes to the internal ledger, NEVER the operator wallet (Phase 3)
   launchJti   String   @unique @map("launch_jti") // token id → one-time use
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   lastSeenAt  DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
@@ -52,6 +54,7 @@ model GameSession {
   operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
 
   @@index([operatorId, playerId])
+  @@index([walletId]) // walletId → session lookup (resolver() + isDemoWallet(), money-path hot)
   @@map("game_sessions")
 }
 
@@ -168,6 +171,7 @@ model Bet {
   status      String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending
   cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
   payout      BigInt    @default(0)
+  demo        Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)
   maxWinPerBet BigInt?  @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
   debitTxId   String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
   payoutTxId  String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)

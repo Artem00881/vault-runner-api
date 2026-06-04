@@ -68,7 +68,7 @@ const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
 const SESSION_SECRET = "mc21-session-secret";
 const jwt = new JwtService({ secret: SESSION_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt);
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
 
 // Track synthetic rows for FK-safe cleanup (bets → rounds → seeds → chains;
 // users cascade wallets/ledger/profile; operators cascade their sessions).

@@ -3,9 +3,11 @@ import { AuthModule } from "../auth/auth.module";
 import { OperatorModule } from "../operator/operator.module";
 import { GameSessionService } from "../operator/game-session.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { LedgerModule } from "./ledger.module";
 import { LedgerService } from "./ledger.service";
 import { WalletController } from "./wallet.controller";
 import { WALLET_PROVIDER } from "./wallet-provider";
+import { WalletRouter } from "./wallet-router";
 import { SeamlessOperatorWallet } from "./seamless-operator-wallet";
 import {
   HttpOperatorWalletApi,
@@ -27,10 +29,9 @@ import {
  * Controlled by env `WALLET_PROVIDER_TYPE` (default "internal").
  */
 @Module({
-  imports: [AuthModule, OperatorModule],
+  imports: [AuthModule, OperatorModule, LedgerModule],
   controllers: [WalletController],
   providers: [
-    LedgerService,
     {
       provide: WALLET_PROVIDER,
       inject: [LedgerService, GameSessionService, PrismaService],
@@ -48,12 +49,17 @@ import {
             return { walletApiUrl: op.walletApiUrl ?? "", walletApiKey: op.walletApiKey ?? null };
           });
           const client = new HttpOperatorWalletApi(resolveEndpoint);
-          return new SeamlessOperatorWallet(client, sessions.resolver());
+          const operatorWallet = new SeamlessOperatorWallet(client, sessions.resolver());
+          // Route per wallet: a DEMO ("fun mode") session plays with play money on the
+          // internal ledger and NEVER hits the operator wallet; real sessions go to the
+          // operator. The router keys purely on walletId (demo wallets are distinct
+          // journals) and fails SAFE to the ledger — see WalletRouter (Phase 3).
+          return new WalletRouter(ledger, operatorWallet, (walletId) => sessions.isDemoWallet(walletId));
         }
         throw new Error(`unknown WALLET_PROVIDER_TYPE: ${type}`);
       },
     },
   ],
-  exports: [LedgerService, WALLET_PROVIDER],
+  exports: [LedgerModule, WALLET_PROVIDER],
 })
 export class WalletModule {}

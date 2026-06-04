@@ -58,7 +58,7 @@ const metrics = new MetricsService();
 const JWT_SECRET = "p3-betlimits-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt);
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
 
 // Fake engine: a single mutable knob flips the phase so the SAME instance can drive
 // placeBet ("betting") and cashOut / evaluateAutoCashouts ("running"). BetsService

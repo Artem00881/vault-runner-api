@@ -36,13 +36,14 @@ async function main() {
   const code = str(args.code);
   if (!code) {
     console.error(
-      "usage: bun scripts/operator-launch-token.ts --code <operatorCode> --player <id> --currency <CCY> [--locale en]",
+      "usage: bun scripts/operator-launch-token.ts --code <operatorCode> --player <id> --currency <CCY> [--locale en] [--demo]",
     );
     process.exit(1);
   }
   const playerId = str(args.player) ?? "dev-player-1";
   const currency = str(args.currency) ?? "DEMO";
   const locale = str(args.locale) ?? "en";
+  const demo = args.demo === true; // play-money "fun mode" launch
 
   const prisma = new PrismaClient();
   try {
@@ -52,13 +53,19 @@ async function main() {
       process.exit(1);
     }
     const svc = new LaunchTokenService(new JwtService({}) as any, prisma as any);
-    const token = await svc.issue({ operatorId: op.id, playerId, currency, locale });
+    const token = await svc.issue({ operatorId: op.id, playerId, currency, locale, demo });
     const base = process.env.WEB_BASE_URL ?? "https://vaultrun.app";
     console.log("LAUNCH_TOKEN=" + token);
     console.log("URL=" + base + "/?launch_token=" + token);
     if (!op.currencies.includes(currency)) {
       console.error(
         `\n⚠ currency "${currency}" is NOT in operator.currencies [${op.currencies.join(", ") || "none"}] — this launch will be rejected (currency_not_allowed).`,
+      );
+    }
+    if (demo && !op.demoEnabled) {
+      console.error(
+        `\n⚠ --demo requested but operator "${code}" has demoEnabled=false — this launch will be rejected (demo_not_allowed).\n` +
+          `  enable with: bun scripts/operator-provision.ts --code ${code} --demo-enabled`,
       );
     }
   } finally {

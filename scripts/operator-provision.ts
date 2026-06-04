@@ -43,6 +43,7 @@ export interface ProvisionInput {
   ipWhitelist?: string[];
   callbackUrl?: string;
   enabled?: boolean;
+  demoEnabled?: boolean; // may this operator launch play-money "fun mode"? (off by default)
   rotateSecret?: boolean;
 }
 
@@ -73,6 +74,7 @@ export async function provisionOperator(
   if (input.ipWhitelist !== undefined) patch.ipWhitelist = input.ipWhitelist;
   if (betLimits !== undefined) patch.betLimits = betLimits as object;
   if (input.enabled !== undefined) patch.enabled = input.enabled;
+  if (input.demoEnabled !== undefined) patch.demoEnabled = input.demoEnabled;
   if (input.rotateSecret) patch.launchSecret = newSecret;
 
   const operator = await prisma.operator.upsert({
@@ -82,6 +84,7 @@ export async function provisionOperator(
       name: input.name ?? input.code,
       launchSecret: newSecret,
       enabled: input.enabled ?? true,
+      demoEnabled: input.demoEnabled ?? false,
       currencies: currencies ?? [],
       walletApiUrl: input.walletApiUrl ?? null,
       walletApiKey: input.walletApiKey ?? null,
@@ -127,7 +130,7 @@ async function main() {
     console.error(
       "usage: bun scripts/operator-provision.ts --code <code> [--name ..] [--currencies EUR,USDT]\n" +
         "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json]\n" +
-        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--rotate-secret]",
+        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret]",
     );
     process.exit(1);
   }
@@ -151,6 +154,8 @@ async function main() {
       ipWhitelist: list(args["ip-whitelist"]),
       callbackUrl: str(args["callback-url"]),
       enabled: args.disabled ? false : undefined,
+      demoEnabled:
+        args["demo-enabled"] === true ? true : args["demo-disabled"] === true ? false : undefined,
       rotateSecret: args["rotate-secret"] === true,
     });
 
@@ -161,6 +166,7 @@ async function main() {
     console.log(`  walletApiUrl: ${operator.walletApiUrl ?? "(none)"}`);
     console.log(`  betLimits: ${operator.betLimits ? JSON.stringify(operator.betLimits) : "(none → global env defaults)"}`);
     console.log(`  enabled: ${operator.enabled}`);
+    console.log(`  demoEnabled: ${operator.demoEnabled} (play-money fun mode)`);
     if (launchSecret) {
       console.log(`\n  launchSecret (${created ? "new" : "ROTATED — outstanding launch tokens are now invalid"}):`);
       console.log(`    ${launchSecret}`);

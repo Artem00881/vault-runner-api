@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LaunchTokenService } from "./launch-token.service";
+import { LedgerService } from "../wallet/ledger.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
 import { effectiveLimitsFor, serializeBetLimits } from "./bet-limits";
 
@@ -15,6 +16,14 @@ import { effectiveLimitsFor, serializeBetLimits } from "./bet-limits";
 const SESSION_TOKEN_TTL_SEC = (() => {
   const n = Number(process.env.SESSION_TOKEN_TTL_SEC);
   return Number.isFinite(n) && n >= 60 && n <= 86400 ? n : 14400;
+})();
+
+// Play-money bankroll seeded onto a demo ("fun mode") wallet on EACH launch
+// (reset-to-full). Integer MINOR units; env-tunable, clamped to >= 0 — a negative
+// or non-numeric value falls back to 10000 (e.g. 100.00 in a 2-dp currency).
+const DEMO_STARTING_BALANCE = (() => {
+  const n = Number(process.env.DEMO_STARTING_BALANCE);
+  return Number.isInteger(n) && n >= 0 ? BigInt(n) : 10000n;
 })();
 
 /**
@@ -32,6 +41,7 @@ export class GameSessionService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(LaunchTokenService) private readonly launch: LaunchTokenService,
     @Inject(JwtService) private readonly jwt: JwtService,
+    @Inject(LedgerService) private readonly ledger: LedgerService,
   ) {}
 
   /** Open the game from an operator launch token → create (consume) a session. */
@@ -42,6 +52,11 @@ export class GameSessionService {
     // and per-currency bet-limit lookup are all consistent regardless of the casing
     // the operator sent (verify()'s allow-list check is likewise case-insensitive).
     const currency = (v.currency ?? "").toUpperCase();
+    // A demo ("fun mode") launch plays with play money: the launch token carries an
+    // operator-signed `demo` flag, its wallet is a SEPARATE journal the router always
+    // settles on the internal ledger (never the operator), and it's funded to a fixed
+    // play-money bankroll on each launch (Phase 3).
+    const demo = v.demo === true;
 
     // The operator's per-currency PER-BET limits for this session's currency
     // (Phase 3). null → the player plays under the global house defaults.
@@ -52,8 +67,11 @@ export class GameSessionService {
     const limits = effectiveLimitsFor(op?.betLimits, currency);
 
     // Find or create the local journal wallet for this operator player+currency.
-    // We tag the User.username with operator+player so it's unique & traceable.
-    const tag = `op:${v.operatorId}:${v.playerId}:${currency}`;
+    // We tag the User.username with operator+player so it's unique & traceable; a
+    // demo session gets its OWN `:demo` wallet so play money never mixes with real.
+    const tag = demo
+      ? `op:${v.operatorId}:${v.playerId}:${currency}:demo`
+      : `op:${v.operatorId}:${v.playerId}:${currency}`;
     let wallet = await this.prisma.wallet.findFirst({
       where: { currency, user: { username: tag } },
     });
@@ -93,9 +111,22 @@ export class GameSessionService {
         currency,
         locale: v.locale,
         walletId: wallet.id,
+        demo,
         launchJti: v.jti,
       },
     });
+
+    // Demo (fun-mode) wallet: reset to the FULL play-money bankroll on EACH launch
+    // (operator chose reset-on-relaunch). Idempotent per launch via the unique
+    // sessionId key — a retried open is a no-op; a NEW launch tops back up to full.
+    // Goes straight to the internal ledger (never the operator), safe by
+    // construction since a demo wallet is always ledger-backed.
+    if (demo) {
+      await this.ledger.resetTo(wallet.id, DEMO_STARTING_BALANCE, `demo:reset:${session.id}`, {
+        refType: "demo_reset",
+        refId: wallet.id,
+      });
+    }
 
     // Issue a SESSION ("play") token the client uses for the WebSocket handshake
     // — signed with OUR JWT_SECRET (same as a guest token) so the gateway
@@ -115,6 +146,10 @@ export class GameSessionService {
         // token so the gateway applies them on every bet with no extra lookup.
         // Absent → the bet path falls back to the global house defaults.
         ...(limits ? { limits: serializeBetLimits(limits) } : {}),
+        // play-money fun-mode marker the gateway stamps on the bet row. NB: the
+        // actual money routing is by walletId in the WalletRouter, not this claim —
+        // a forged claim can at worst mislabel a bet, never cross play/real money.
+        ...(demo ? { demo: true } : {}),
       },
       { expiresIn: SESSION_TOKEN_TTL_SEC }, // short-lived session token (audit L-C2.2)
     );
@@ -150,6 +185,49 @@ export class GameSessionService {
       data: { revokedAt: new Date() },
     });
     return r.count;
+  }
+
+  /**
+   * Is the wallet bound to this walletId a DEMO ("fun mode") play-money wallet?
+   * The WalletRouter calls this on EVERY money move to settle demo sessions on the
+   * internal ledger and real sessions on the operator. A wallet's mode is fixed for
+   * its lifetime (a demo wallet is a distinct journal under a `:demo` tag), so ANY
+   * session for the walletId is authoritative — no ordering needed.
+   *
+   * Classification:
+   *  - a session with demo=true  → TRUE  (route to the ledger);
+   *  - a session with demo=false → FALSE (route to the operator);
+   *  - NO session → fall back to the immutable wallet TAG: a real operator wallet is
+   *    `op:{op}:{player}:{ccy}` (no `:demo`) → FALSE; a guest (`Thief_…`) / demo-tagged
+   *    / unknown wallet → TRUE (play money). A real operator wallet normally ALWAYS has
+   *    a session; the only way it reaches here is if the session was deleted out from
+   *    under an owed bet (e.g. an operator hard-deleted while a payout was still pending
+   *    — the cascade nukes the session). Classifying it FALSE keeps a REAL obligation
+   *    from silently settling on the play-money ledger; the operator path then fails
+   *    closed (its resolver throws → payout stays pending, loudly retried) instead.
+   *
+   * A genuine lookup ERROR is deliberately NOT swallowed — it PROPAGATES so the money
+   * move fails CLOSED into the existing recovery machinery (a credit → payout_pending
+   * → reconciler; a debit → reservation released) rather than fail-OPEN, which would
+   * silently credit the play-money ledger for a REAL payout and lose it (money-path
+   * audit HIGH). Either way an unsure call NEVER reaches the operator's real wallet.
+   */
+  async isDemoWallet(walletId: string): Promise<boolean> {
+    const s = await this.prisma.gameSession.findFirst({
+      where: { walletId },
+      select: { demo: true },
+    });
+    if (s) return s.demo;
+    // No session → distinguish a real operator wallet (whose session vanished) from a
+    // genuine play-money wallet (guest / demo) by the immutable username tag, so a real
+    // owed payout can't be silently routed to the play-money ledger.
+    const w = await this.prisma.wallet.findUnique({
+      where: { id: walletId },
+      select: { user: { select: { username: true } } },
+    });
+    const name = w?.user?.username ?? "";
+    const isRealOperatorWallet = name.startsWith("op:") && !name.endsWith(":demo");
+    return !isRealOperatorWallet;
   }
 
   /**

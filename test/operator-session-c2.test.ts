@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
+import { LedgerService } from "../src/wallet/ledger.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { startSandboxOperator } from "./helpers/sandbox-operator";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
@@ -31,7 +32,7 @@ const JWT_SECRET = "c2-session-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt);
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
 
 // Track everything we create for FK-safe teardown.
 const createdOperatorIds: string[] = [];

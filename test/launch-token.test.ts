@@ -4,13 +4,14 @@ import { randomUUID } from "node:crypto";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
+import { LedgerService } from "../src/wallet/ledger.service";
 
 const prisma = new PrismaService();
 // A default secret so GameSessionService can sign the session ("play") token;
 // LaunchTokenService passes the per-operator secret explicitly, overriding this.
 const jwt = new JwtService({ secret: "test-secret" });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt);
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
 
 async function freshOperator(enabled = true) {
   return prisma.operator.create({

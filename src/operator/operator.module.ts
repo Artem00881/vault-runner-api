@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtModule } from "@nestjs/jwt";
 import { buildJwtOptions } from "../auth/auth.module";
+import { LedgerModule } from "../wallet/ledger.module";
 import { LaunchTokenService } from "./launch-token.service";
 import { GameSessionService } from "./game-session.service";
 import { OperatorController } from "./operator.controller";
@@ -15,7 +16,10 @@ import { OperatorController } from "./operator.controller";
  * guest token (audit C2: operator players need a socket identity too).
  */
 @Module({
-  imports: [JwtModule.registerAsync({ inject: [ConfigService], useFactory: buildJwtOptions })],
+  imports: [
+    JwtModule.registerAsync({ inject: [ConfigService], useFactory: buildJwtOptions }),
+    LedgerModule, // GameSessionService seeds/resets demo (fun-mode) play-money wallets
+  ],
   controllers: [OperatorController],
   providers: [LaunchTokenService, GameSessionService],
   exports: [LaunchTokenService, GameSessionService],

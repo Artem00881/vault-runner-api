@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
+import { LedgerService } from "../src/wallet/ledger.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
@@ -39,7 +40,7 @@ const JWT_SECRET = "h2-backlog-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt);
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
 const risk = new RiskService();
 const metrics = new MetricsService();
 

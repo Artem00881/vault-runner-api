@@ -21,6 +21,8 @@ export interface LaunchClaims {
   playerId: string; // operator-side player id
   currency: string;
   locale?: string;
+  /** play-money "fun mode" — settle on the internal ledger, never the operator wallet */
+  demo?: boolean;
   /** optional per-launch limit/round context */
   ctx?: Record<string, unknown>;
 }
@@ -28,6 +30,7 @@ export interface LaunchClaims {
 export interface VerifiedLaunch extends LaunchClaims {
   jti: string;
   locale: string;
+  demo: boolean;
 }
 
 const TTL_SECONDS = 120;
@@ -49,6 +52,7 @@ export class LaunchTokenService {
         playerId: claims.playerId,
         currency: claims.currency,
         locale: claims.locale ?? "en",
+        demo: claims.demo ?? false,
         ctx: claims.ctx ?? {},
       },
       { secret: op.launchSecret, expiresIn: TTL_SECONDS, jwtid: randomUUID() },
@@ -89,6 +93,17 @@ export class LaunchTokenService {
       throw new UnauthorizedException("currency_not_allowed");
     }
 
+    // Phase 3: a play-money "fun mode" launch requires the operator to have demo play
+    // ENABLED — a per-operator compliance capability, OFF by default (some jurisdictions
+    // restrict demo gambling), set at provisioning. Checked here, before the jti is
+    // consumed, so a rejected demo launch doesn't burn the token. A real-money launch
+    // (demo absent/false) is unaffected. The flag is operator-signed, so only the
+    // operator can request demo.
+    const demo = payload.demo === true;
+    if (demo && !op.demoEnabled) {
+      throw new UnauthorizedException("demo_not_allowed");
+    }
+
     const jti = payload.jti as string | undefined;
     if (!jti) throw new UnauthorizedException("invalid_launch_token");
 
@@ -101,6 +116,7 @@ export class LaunchTokenService {
       playerId: payload.playerId,
       currency: payload.currency,
       locale: payload.locale ?? "en",
+      demo,
       ctx: payload.ctx ?? {},
       jti,
     };

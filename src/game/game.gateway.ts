@@ -181,6 +181,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         // limits; deserialize once (null/absent → global house defaults) and apply per bet.
         const lim = deserializeBetLimits((payload as any).limits);
         if (lim) client.data.limits = lim;
+        // Phase 3: play-money fun-mode marker from OUR signed play token → stamped on
+        // the bet row. The actual money routing is by walletId (WalletRouter), so this
+        // flag only labels the bet; it can't move money to the wrong source.
+        client.data.demo = (payload as any).demo === true;
         client.join(userRoom(userId));
         // one active game socket per user — drop any previous one (multi-tab abuse)
         const prev = this.userSockets.get(userId);
@@ -255,7 +259,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const { panel, amount, autoCashout } = parsed.data;
     const walletId = client.data.walletId as string | undefined;
     const limits = client.data.limits as PerBetLimits | undefined;
-    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits);
+    const demo = client.data.demo as boolean | undefined;
+    const r = await this.bets.placeBet(userId, panel as Panel, amount, autoCashout, walletId, limits, demo);
     const event = r.ok ? "bet_accepted" : "bet_rejected";
     client.emit(event, r);
     if (r.ok && r.balance !== undefined) {
