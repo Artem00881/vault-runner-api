@@ -329,11 +329,22 @@ order wrong breaks either the whole API stack or monitoring:
    The `op://` ref (step 3) makes `op run` resolve it on EVERY deploy — if the item
    is missing, `./op-compose.sh up` fails the **entire** stack (fail-closed). So the
    item must exist before the ref is committed/deployed.
-2. **Write the host token file** (same value, no newline — Prometheus reads it):
-   `op read 'op://VaultRun-Prod/METRICS_TOKEN/password' | tr -d '\n' > /etc/vaultrun/metrics-token && chmod 600 /etc/vaultrun/metrics-token`.
+2. **Write the host token file** (same value, no newline — Prometheus reads it),
+   then **chown it to the Prometheus container's user**:
+   `op read 'op://VaultRun-Prod/METRICS_TOKEN/password' | tr -d '\n' > /etc/vaultrun/metrics-token && chmod 600 /etc/vaultrun/metrics-token && chown 65534:65534 /etc/vaultrun/metrics-token`.
    This file MUST exist before Prometheus is (re)created — a missing
    `credentials_file` makes Prometheus fail to start (and a missing host path makes
    Docker create an empty directory at the mount). It persists across reboots.
+   **The `chown 65534:65534` is REQUIRED** (verified on prod 2026-06-04): the
+   `prom/prometheus` image runs as user **nobody (uid 65534)**, so a `chmod 600`
+   file owned by `root` is **unreadable** to it — the `vaultrun-api` target then
+   goes DOWN with `unable to read file /etc/prometheus/metrics-token: permission
+   denied`. Keep `chmod 600`; the chown makes it readable to Prometheus only.
+   This is safe because **the APP reads `METRICS_TOKEN` from its env** (injected by
+   `op run`), **not from this file** — only Prometheus reads the file, so handing
+   the file to uid 65534 does not affect the API. (The token value need not be any
+   particular length; the app's env value and this host file just have to be the
+   same string resolved from the one 1Password item.)
 3. **Commit + pull the 3 activation configs** (deferred from the H5 code commit so
    routine deploys/reboots stay safe until the secret+file exist): add
    `METRICS_TOKEN=op://VaultRun-Prod/METRICS_TOKEN/password` to `op.prod.env`; add an
@@ -349,8 +360,15 @@ order wrong breaks either the whole API stack or monitoring:
    `curl -si -H "Authorization: Bearer $(cat /etc/vaultrun/metrics-token)" localhost:3001/metrics | head -1` → 200;
    `curl -s localhost:3001/health` → `{"status":"ok"}` only (no deps);
    `curl -s 'http://127.0.0.1:9090/api/v1/targets' | grep -o '"health":"[a-z]*"' | sort | uniq -c` → `vaultrun-api` up.
-   If `vaultrun-api` is DOWN (401) after this, the app token and the host file
-   disagree — almost always a trailing newline; rewrite with `tr -d '\n'`.
+   If `vaultrun-api` is DOWN after this, check the Prometheus log
+   (`docker logs vaultrun-prometheus --tail 20`) for the cause:
+   - **`permission denied` reading `/etc/prometheus/metrics-token`** → the host file
+     is owned by `root` but Prometheus runs as nobody (uid 65534). Fix:
+     `chown 65534:65534 /etc/vaultrun/metrics-token` (keep `chmod 600`), then the
+     next scrape goes green. (This was the one hiccup on the 2026-06-04 activation —
+     see step 2.)
+   - **`401` / server returned HTTP 401** → the app token and the host file disagree,
+     almost always a trailing newline; rewrite with `tr -d '\n'`.
    UNDO: remove the `op.prod.env` ref + redeploy (token unset → open again).
 
 **Create the Telegram bot (one-time):**
