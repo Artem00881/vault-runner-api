@@ -162,6 +162,10 @@ test("2. demo manual cashOut credits the LEDGER, finalises (not pending), operat
 
   phase = "running";
   liveMult = 2.0;
+  // The authoritative crash gate (bets.service Finding 1) reads the bet's OWN DB Round
+  // row: it must be `running` with crashPoint (5.0) > the cash-out mult (2.0) for a
+  // legitimate running cash-out. Mirror the engine's running phase in the DB.
+  await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running" } });
   const c = await bets.cashOut(userId, "A" as Panel);
   expect(c.ok).toBe(true);
   expect(c.pending).toBeFalsy(); // the ledger credit never pends
@@ -188,6 +192,9 @@ test("3. demo AUTO-cashout (no socket / client.data) pays from the ledger, opera
 
   phase = "running";
   liveMult = 2.0; // past the 1.5 target
+  // Authoritative crash gate: the DB Round must be `running`; auto-cashout pays at the
+  // 1.5 target, well under crashPoint 5.0.
+  await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running" } });
   const cashed = await bets.evaluateAutoCashouts(2.0);
   expect(cashed.length).toBe(1);
   expect(cashed[0].payout).toBe(1500); // 1000 × 1.5
@@ -252,6 +259,9 @@ test("5. money-path HIGH regression: a real cashOut whose mode-lookup THROWS fai
   // payout_pending — it must NOT be silently credited to the play-money ledger and lost.
   phase = "running";
   liveMult = 2.0;
+  // Authoritative crash gate: the DB Round must be `running` (crashPoint 5.0 > mult 2.0)
+  // so this is a legitimate cash-out that reaches the (throwing) credit path.
+  await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running" } });
   const c = await throwBets.cashOut(userId, "A" as Panel);
   expect(c.ok).toBe(true);
   expect(c.pending).toBe(true); // deferred, not finalised

@@ -177,6 +177,10 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
     // CASH OUT at 2.0x → payout 2000, well under the global cap → credits the operator.
     phase = "running";
     liveMult = 2.0;
+    // The authoritative crash gate (bets.service Finding 1) reads the bet's OWN DB Round
+    // row: it must be `running` with crashPoint (5.0) strictly above the cash-out mult
+    // (2.0) for a legitimate running cash-out. Mirror the engine's running phase in the DB.
+    await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running" } });
     const cashed = await bets.cashOut(userId, "A");
     expect(cashed.ok).toBe(true);
     expect(cashed.pending).toBeFalsy(); // operator confirmed the credit (no payout_pending)
@@ -231,6 +235,11 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
     // capPayout intersects to the global → pays exactly 10_000.
     phase = "running";
     liveMult = 100.0;
+    // Authoritative crash gate: the DB Round must be `running` AND its crashPoint strictly
+    // above the cash-out mult (100x) for this to be a legitimate in-flight cash-out — the
+    // round factory's default 5.0 would (correctly) read as already-crashed at 100x. Raise
+    // crashPoint above 100 so the clamp (not the crash gate) is what's under test here.
+    await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running", crashPoint: 200.0 } });
     const cashed = await bets.cashOut(userId, "A");
     expect(cashed.ok).toBe(true);
     expect(cashed.payout).toBe(10_000); // GLOBAL cap, NOT 500_000 and NOT 1_000_000

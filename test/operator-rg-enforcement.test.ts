@@ -253,6 +253,10 @@ describe("RG.2 placeBet enforcement", () => {
     expect(placed.ok).toBe(true);
     phase = "running";
     liveMult = 2.0;
+    // The authoritative crash gate (bets.service Finding 1) reads the bet's OWN DB Round
+    // row, so a legitimate running cash-out needs the DB round `running` with crashPoint
+    // (5.0) > the cash-out mult (2.0). Mirror the engine's running phase in the DB.
+    await prisma.round.update({ where: { id: activeRoundId }, data: { status: "running" } });
     const c = await bets.cashOut(s.userId, "A");
     expect(c.ok).toBe(true); // not blocked by RG
   });

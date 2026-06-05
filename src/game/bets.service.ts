@@ -362,9 +362,22 @@ export class BetsService {
     const mult = atMultiplier ?? this.engine.currentMultiplier();
     const bet = await this.prisma.bet.findUnique({
       where: { roundId_userId_panel: { roundId: state.roundId, userId, panel } },
-      include: { wallet: { select: { currency: true } } },
+      include: { wallet: { select: { currency: true } }, round: { select: { status: true, crashPoint: true } } },
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", userId, panel };
+
+    // Phase 4.5c — AUTHORITATIVE crash gate (money-path-auditor Finding 1). The phase gate
+    // above reads engine.getPublicState(), which on a FOLLOWER node is a CACHED, possibly-
+    // stale view: in the window between the real crash and the leader's `crashed` pub/sub
+    // publish, a follower could otherwise pay a manual cash-out ABOVE the crash. Re-validate
+    // against the bet's OWN Round row (the DB is authoritative): the round must still be
+    // running AND the multiplier must be STRICTLY below the (server-only, never client-
+    // exposed) crashPoint — a cash-out at/above the crash means the bet busted. This makes
+    // cash-out node-independent. On the leader / single node it never trips (the in-memory
+    // phase flips to `crashed` atomically with the crash), so behavior there is unchanged.
+    if (bet.round.status !== "running" || mult >= Number(bet.round.crashPoint)) {
+      return { ok: false, reason: "too_late", userId, panel };
+    }
 
     // payout = stake × multiplier, clamped to THIS bet's max-win cap: the operator
     // per-currency cap stamped at placeBet (Phase 3), or the global house cap when
