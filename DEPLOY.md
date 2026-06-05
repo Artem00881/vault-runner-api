@@ -608,7 +608,7 @@ restart the Prometheus container, see §10).
 > **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
 > (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
 > at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
-> main *at the 2026-06-05 deploy*; origin/main has since advanced to `163d459`, docs/test-only
+> main *at the 2026-06-05 deploy*; origin/main has since advanced to `bb6bed6`, docs/test-only
 > — see the state banner above), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
 > `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
 > (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
@@ -620,12 +620,13 @@ restart the Prometheus container, see §10).
 > 0-discrepancy chaos SLAs are PROVEN ON STAGING** (real Hetzner infra — failover gaps
 > 486–1550 ms, 31 rounds / 38 leader SIGKILLs, `reconcile-check` RECONCILED / 0 money
 > discrepancies). **STAY SINGLE-NODE** — the multi-node cutover now stays gated only on the
-> **at-scale SLA runs that need real infra** (10k concurrent + the full 1e6-round soak), the
-> **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), and
-> `deploy-verifier` + sign-off. **api `origin/main` is now `163d459`; prod still runs
-> `6bfda18`** — the post-deploy `0c58e93` (this §16) + `163d459` (the Race-1 test/comment) are
-> **docs/test-only → NO prod redeploy needed**. The deploy facts are recorded below for
-> reproducibility / rollback.
+> **at-scale SLA runs that need real infra** (10k concurrent + the full 1e6-round soak; the
+> **10k SLA run on Hetzner is the explicit NEXT SESSION** — it also resolves the Go-vs-NestJS
+> rewrite RISK GATE + sizes the multi-node infra), the **multi-node prod infra** (managed
+> Postgres/Redis + ≥2 WS nodes behind a LB), and `deploy-verifier` + sign-off. **api
+> `origin/main` is now `bb6bed6`; prod still runs `6bfda18`** — the post-deploy `0c58e93` +
+> `bb6bed6` (this §16) + `163d459` (the Race-1 test/comment) are **docs/test-only → NO prod
+> redeploy needed**. The deploy facts are recorded below for reproducibility / rollback.
 
 **Deploy record (2026-06-05).** Prod `e40cca1` → **`6bfda18`**; staging the same image
 (staging = Hetzner `ubuntu-4gb-fsn1-2`, 2 vCPU / 3.7 GB; deployed first). `deploy-verifier`
