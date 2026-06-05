@@ -150,6 +150,7 @@ model Round {
   crashPoint     Decimal   @map("crash_point") @db.Decimal(10, 2) // hidden until crash
   status         String    @default("betting") // betting|running|crashed|settling|completed
   bettingOpensAt DateTime  @map("betting_opens_at") @db.Timestamptz(6)
+  phaseEndsAt    DateTime? @map("phase_ends_at") @db.Timestamptz(6) // soft per-phase deadline, written by the engine (Phase 4.5b); forensics + soft-phase cold-start. NOT money/fairness-critical — the crash time is derived from startedAt+crashPoint+GROWTH.
   startedAt      DateTime? @map("started_at") @db.Timestamptz(6)
   crashedAt      DateTime? @map("crashed_at") @db.Timestamptz(6)
   settledAt      DateTime? @map("settled_at") @db.Timestamptz(6)
@@ -158,6 +159,7 @@ model Round {
   seed FairnessSeed @relation(fields: [seedId], references: [id])
   bets Bet[]
 
+  @@unique([seedId]) // Belt A (Phase 4.5a): a seed serves exactly one round, FOREVER — DB-enforced so two transient leaders can never double-mint a round on the same seed (the 2nd round.create hits P2002). The invariant already holds (allocateSeed filters rounds: { none: {} }); this makes it enforced not assumed.
   @@index([createdAt(sort: Desc)])
   @@index([status]) // recoverInterruptedRounds() scans the (rare) open statuses — index-served, not a seq scan (Phase 4.3)
   @@map("game_rounds")
@@ -193,6 +195,21 @@ model Bet {
   @@index([operatorId, currency, createdAt]) // per-operator reporting: scope by operator + currency over a date range (Phase 3.5)
   @@index([status]) // reserving/cancelling sweep + payout_pending reconcile + backlog gauges scan the (rare) transient statuses — index-served (Phase 4.3). A partial index on just the transient set would be leaner at very large scale (revisit with partitioning, Phase 4.7).
   @@map("game_bets")
+}
+
+// Belt B (Phase 4.5a): the single-row engine leadership FENCE. Postgres holds the
+// authoritative leadership token via a session advisory lock (see ElectionService);
+// this table carries the monotonic fencing token a stale leader checks before any
+// engine-authored write. `id` is a singleton boolean (always true) so there is
+// exactly one row; the migration seeds it so an UPDATE always has a row to bump.
+// Wired to the engine in Phase 4.5b — additive/dormant in 4.5a.
+model EngineLeadership {
+  id         Boolean   @id @default(true) // singleton: only ever one row (id = true)
+  fence      BigInt    @default(0) // monotonic; bumped on every leadership acquire
+  nodeId     String?   @map("node_id") // who currently believes it is the leader
+  acquiredAt DateTime? @map("acquired_at") @db.Timestamptz(6)
+
+  @@map("engine_leadership")
 }
 
 model Profile {
