@@ -23,13 +23,33 @@ export class HealthController {
     @Inject(GameEngineService) private readonly engine: GameEngineService,
   ) {}
 
-  private async ping<T>(fn: () => Promise<T>): Promise<{ up: boolean; latencyMs: number; error?: string }> {
+  /**
+   * Ping a dependency with a hard timeout so a HUNG dependency fails fast as
+   * "down" instead of hanging the whole /health response (Phase 4.0). The Redis
+   * client uses `maxRetriesPerRequest`, so a down Redis would otherwise queue +
+   * retry the ping rather than reject promptly → `Promise.all` never resolves →
+   * the LB/monitor sees a hang (`000`) instead of a clean 503. `Promise.race`
+   * keeps a reaction attached to the slow `fn()`, so its late rejection is
+   * consumed (no unhandled rejection); the timer is always cleared.
+   */
+  private async ping<T>(
+    fn: () => Promise<T>,
+    timeoutMs = 800,
+  ): Promise<{ up: boolean; latencyMs: number; error?: string }> {
     const t0 = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await fn();
+      await Promise.race([
+        fn(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
       return { up: true, latencyMs: Date.now() - t0 };
     } catch (e: any) {
       return { up: false, latencyMs: Date.now() - t0, error: e?.message ?? "error" };
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

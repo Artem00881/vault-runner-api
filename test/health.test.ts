@@ -12,12 +12,19 @@ afterEach(() => {
 });
 
 // Minimal fakes — health just needs $queryRaw / client.ping / getPublicState.
-function makeController(opts: { dbUp: boolean; redisUp: boolean; engine: any }) {
+// `redisHang` models a DOWN redis whose client queues+retries (maxRetriesPerRequest)
+// so ping() never settles — the Phase 4.0 timeout path under test.
+function makeController(opts: { dbUp: boolean; redisUp: boolean; engine: any; redisHang?: boolean }) {
   const prisma: any = {
     $queryRaw: async () => { if (!opts.dbUp) throw new Error("db down"); return [{ "?column?": 1 }]; },
   };
   const redis: any = {
-    client: { ping: async () => { if (!opts.redisUp) throw new Error("redis down"); return "PONG"; } },
+    client: {
+      ping: () => {
+        if (opts.redisHang) return new Promise<string>(() => {}); // never settles
+        return Promise.resolve().then(() => { if (!opts.redisUp) throw new Error("redis down"); return "PONG"; });
+      },
+    },
   };
   const engine: any = { getPublicState: () => opts.engine };
   return new HealthController(prisma, redis, engine);
@@ -52,6 +59,43 @@ test("degraded: redis down → throws 503 with per-dep detail", async () => {
     expect(body.deps.redis.up).toBe(false);
     expect(body.deps.db.up).toBe(true);
   }
+});
+
+// ── Phase 4.0: HUNG dependency must fail fast (Promise.race timeout) ─────────
+// A down Redis whose client queues+retries would make ping() never settle, so
+// without the ~800ms timeout the whole Promise.all (and /health) would hang and
+// the LB would see `000` instead of a clean 503. Assert it settles well under
+// the wall-clock ceiling, throws 503, and reports redis down (timeout) / db up.
+test("Phase 4.0: hung redis ping fails fast as 503 (does not hang health)", async () => {
+  // METRICS_TOKEN unset (afterEach restores) → full detail is shown.
+  delete process.env.METRICS_TOKEN;
+  const c = makeController({ dbUp: true, redisUp: false, redisHang: true, engine: null });
+
+  const t0 = Date.now();
+  let threw: unknown;
+  try {
+    await c.health();
+  } catch (e) {
+    threw = e;
+  }
+  const elapsed = Date.now() - t0;
+
+  // Settled fast: the 800ms timeout fired, NOT a hang. Generous ceiling well
+  // below any "hang" but comfortably above the 800ms default + scheduling jitter.
+  expect(elapsed).toBeLessThan(2000);
+  // And it actually waited for the timeout rather than resolving instantly.
+  expect(elapsed).toBeGreaterThanOrEqual(700);
+
+  // Unhealthy → 503 HttpException (degraded).
+  expect(threw).toBeInstanceOf(HttpException);
+  const ex = threw as HttpException;
+  expect(ex.getStatus()).toBe(503);
+  const body = ex.getResponse() as any;
+  expect(body.status).toBe("degraded");
+  // redis down with a timeout-ish error; db unaffected.
+  expect(body.deps.redis.up).toBe(false);
+  expect(body.deps.redis.error).toMatch(/timeout/i);
+  expect(body.deps.db.up).toBe(true);
 });
 
 test("engine off (autostart=false) does NOT fail health", async () => {
