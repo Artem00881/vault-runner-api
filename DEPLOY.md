@@ -600,13 +600,18 @@ restart the Prometheus container, see §10).
 
 ---
 
-## 16. Scale-out foundation (Phase 4) — built 2026-06-05, NOT yet deployed
+## 16. Scale-out foundation + HA core (Phase 4) — built 2026-06-05, NOT yet deployed
 
-> **State:** the Phase-4 **foundation** (sub-phases 4.0–4.4) is built + committed in
-> the repo but **not yet deployed** — prod still runs `e40cca1`. This section
-> documents the ops-relevant facts for when the foundation deploys (staging→prod via
-> the normal `./op-compose.sh up -d --build`, `deploy-verifier` gate). No new
-> required env/secret; it adds one additive migration + dev-only tooling.
+> **State:** the Phase-4 **foundation** (4.0–4.4) **plus the HA core**
+> (**4.5a** leader-election primitives + split-brain DB belts, **4.5b** wire election
+> into the engine/gateway, **4.5c.1** the authoritative crash gate on `cashOut`) are
+> built + committed in the repo but **not yet deployed** — prod still runs `e40cca1`.
+> This section documents the ops-relevant facts for when they deploy (staging→prod via
+> the normal `./op-compose.sh up -d --build`, `deploy-verifier` gate). No new required
+> env/secret; it adds **TWO additive migrations** + dev-only tooling. **Single-node-safe
+> AND now multi-node-safe for cash-out** — the HARD multi-node release gate is **CLOSED**
+> (4.5c.1, see below); the remaining multi-node items (seamless failover-resume, the
+> SLA drills) are 4.5c.2/c.3, and the multi-node cutover stays gated until they land.
 
 **Socket.IO Redis adapter (4.1) — single-node-safe, with a HARD scale gate.**
 The gateway can fan out WS broadcasts through Redis pub/sub
@@ -614,12 +619,45 @@ The gateway can fan out WS broadcasts through Redis pub/sub
 existing `REDIS_URL` (a dedicated pub/sub connection pair). It is **inert on a single
 node** and **degrades gracefully to the in-memory adapter** if Redis is unreachable
 (the app still serves WS), so the deploy is safe on the current single VPS.
-- **⚠️ DO NOT run more than ONE WS/API node yet.** Leader-election / engine failover
-  is **Phase 4.5** (not built). Without it, **each node runs its own engine tick loop
-  → N parallel rounds** (a correctness break, not just a perf issue). Keep a single
-  `vaultrun-api` instance until 4.5 lands.
+- **⚠️ DO NOT run more than ONE WS/API node yet — but the cash-out money hole is now
+  CLOSED.** Leader-election (4.5b) means only one elected leader runs the engine tick
+  loop, and the follower cash-out-above-`crashPoint` hole is **fixed in 4.5c.1** (the
+  cash-out gate below). What still blocks the multi-node cutover is **operational, not a
+  money bug**: seamless failover-resume (4.5c.2) + the multi-node SLA drills (4.5c.3,
+  failover <5 s / 10k concurrency / 1e6-round reconciliation soak). Keep a single
+  `vaultrun-api` instance until those land + `deploy-verifier` + USER sign-off.
 - `main.ts` now calls `app.enableShutdownHooks()` so a rolling deploy drains WS
   cleanly. No config change needed for the single-node prod.
+
+**Engine leader-election (4.5b) — engine no longer self-starts.** `ElectionService`
+(`src/ha/`) holds a dedicated-`pg.Client` `pg_try_advisory_lock(<fixed key>)` =
+leadership; the engine starts on leader-acquired / stops on leader-lost, and
+**`assertStillLeader()` fences every phase transition** (a stale leader self-demotes
+before any DB write). On a single node this is transparent — the one instance acquires
+leadership at boot (fence = 1) and runs exactly as before; `GAME_AUTOSTART=false` ⇒ the
+node never participates (parity with the old engine autostart check). **Failover today
+is the existing close+refund** (`recoverInterruptedRounds()`, §earlier) — seamless
+resume is 4.5c.2. No new env. A dedicated pg connection is opened in addition to the
+Prisma pool (1 extra Postgres connection per instance — negligible single-node).
+
+**✅ HARD MULTI-NODE RELEASE GATE — CLOSED in 4.5c.1 (`f636373`).** Previously a
+**follower** node's running cash-out multiplier was the **uncapped public curve**, so in
+the pub/sub window between the real crash and the `crashed` publish a follower could pay a
+manual cash-out **above the round's `crashPoint`** (a bounded per-round skim,
+multi-node-ONLY; single-node was always safe). **Fixed:** `cashOut` (`src/game/bets.service.ts`)
+now reads the bet's **OWN `Round` row** (`status` + `crashPoint`, folded into the existing
+bet query — no extra round-trip) and rejects `too_late` unless the round is authoritatively
+`running` **AND** `mult < crashPoint`. The leader writes DB `status=crashed` **before** the
+pub/sub publish, so the gate is authoritative in exactly the stale-cache window; cash-out is
+now node-independent (DB-authoritative). **No per-round advisory lock is required** — the
+`crashPoint` read is immutable + strictly conservative, and the existing CAS claim
+(`updateMany WHERE status=active`) already serializes double-pay; all three auditors
+confirmed no TOCTOU gap. `crashPoint` is read **server-side only**, never returned/emitted
+(`CashoutResult` is structurally `crashPoint`-free; `too_late` is the same non-informative
+reason as the existing phase gate). Leader/single-node behaviour is byte-for-byte unchanged
+(the gate never trips there). What still gates the multi-node cutover is **operational, not
+money**: 4.5c.2 (seamless failover-resume) + 4.5c.3 (the SLA drills) + `deploy-verifier` +
+USER sign-off.
 
 **`/health` fast-fail (4.0).** `/health` now races each dependency ping against an
 **800 ms timeout**, so a *hung* (not down) Redis returns **503 fast** instead of
@@ -627,14 +665,33 @@ hanging the endpoint (the old `000`). The 200/503 contract and the §10 H5 slim-
 (`{status:"ok"}` when `METRICS_TOKEN` is set) are unchanged — health checks /
 uptime probes behave the same, just fail faster on a wedged dependency.
 
-**Status indexes migration (4.3).** One additive, forward-only migration
-`20260605140000_scale_status_indexes` adds `@@index([status])` on the round + bet
-tables (`game_rounds_status_idx`, `game_bets_status_idx`) — speeds the
-recovery/sweep/reconcile/backlog queries as the tables grow. It runs automatically on
-boot (the container CMD's `prisma migrate deploy`); it just **adds indexes** (no data
-change). After it deploys, `prisma migrate status` advances from "10 migrations …
-up to date" to **11** on both hosts. Forward-only and harmless under a deeper rollback
-(an unused index on older code).
+**Migrations (4.3 + 4.5a) — TWO additive, forward-only.** Both run automatically on
+boot (the container CMD's `prisma migrate deploy`). After they deploy,
+`prisma migrate status` advances from "10 migrations … up to date" to **12** on both
+hosts (10 → 12, not 10 → 11 — this batch carries BOTH).
+- **`20260605140000_scale_status_indexes` (4.3)** — `@@index([status])` on the round +
+  bet tables (`game_rounds_status_idx`, `game_bets_status_idx`); speeds the
+  recovery/sweep/reconcile/backlog queries as the tables grow. Just **adds indexes**
+  (no data change). Forward-only, harmless under a deeper rollback (an unused index on
+  older code).
+- **`20260605143000_engine_ha_belts` (4.5a)** — engine HA split-brain belts:
+  - **Belt A — `CREATE UNIQUE INDEX "game_rounds_seed_id_key" ON "game_rounds"("seed_id")`**
+    (one seed serves exactly one round, forever; blocks a future double-leader from
+    double-minting a round). **⚠️ PRE-CHECK before deploy:** prod must have **0 duplicate
+    `seed_id`s** or the unique-index build FAILS (and the boot migration aborts). It was
+    verified clean on dev (**2253 rounds = 2253 distinct seed_ids, 0 dups** — the
+    invariant already holds; `allocateSeed` filters `rounds: { none: {} }`). Verify on
+    prod first:
+    `docker exec vaultrun-postgres psql -U vault -d vaultrun -c "SELECT seed_id, count(*) FROM game_rounds GROUP BY seed_id HAVING count(*) > 1;"`
+    — expect **0 rows**. If any rows come back, do NOT deploy until resolved.
+  - **Belt B — `engine_leadership` singleton fence table** (seeded one row
+    `ON CONFLICT DO NOTHING`) — carries the monotonic fencing token a stale leader
+    checks before any write (Postgres advisory lock is the leadership authority).
+  - **`Round.phase_ends_at TIMESTAMPTZ` (nullable)** — forensic/soft-deadline column,
+    written by the engine; **not money/fairness-critical** (crash time stays derived
+    from `started_at + crash_point + GROWTH`).
+  - Forward-only and harmless under a deeper rollback (the unique index + fence table +
+    nullable column are simply unused by older code — do NOT down-migrate).
 
 **Client clock-sync (4.2).** A new `time_sync` WS event (echoes the client timestamp
 + server time via the ack) lets the browser estimate its clock offset (NTP-style).
@@ -661,7 +718,8 @@ up to date" to **11** on both hosts. Forward-only and harmless under a deeper ro
   `place_bet` p99 ~176 ms under a synchronized burst (the per-round
   `pg_advisory_xact_lock` serialization).
 
-Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION".
+Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION" +
+"PHASE 4.5a + 4.5b — HA CORE".
 
 ---
 
