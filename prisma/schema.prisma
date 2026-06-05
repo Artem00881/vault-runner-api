@@ -159,6 +159,7 @@ model Round {
   bets Bet[]
 
   @@index([createdAt(sort: Desc)])
+  @@index([status]) // recoverInterruptedRounds() scans the (rare) open statuses — index-served, not a seq scan (Phase 4.3)
   @@map("game_rounds")
 }
 
@@ -190,6 +191,7 @@ model Bet {
   @@index([userId, createdAt(sort: Desc)])
   @@index([walletId, createdAt]) // per-session RG accounting: sum a wallet's bets since session start (Phase 3)
   @@index([operatorId, currency, createdAt]) // per-operator reporting: scope by operator + currency over a date range (Phase 3.5)
+  @@index([status]) // reserving/cancelling sweep + payout_pending reconcile + backlog gauges scan the (rare) transient statuses — index-served (Phase 4.3). A partial index on just the transient set would be leaner at very large scale (revisit with partitioning, Phase 4.7).
   @@map("game_bets")
 }
 
