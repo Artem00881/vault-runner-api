@@ -604,14 +604,18 @@ restart the Prometheus container, see §10).
 
 > **State:** the Phase-4 **foundation** (4.0–4.4) **plus the HA core**
 > (**4.5a** leader-election primitives + split-brain DB belts, **4.5b** wire election
-> into the engine/gateway, **4.5c.1** the authoritative crash gate on `cashOut`) are
-> built + committed in the repo but **not yet deployed** — prod still runs `e40cca1`.
+> into the engine/gateway, **4.5c.1** the authoritative crash gate on `cashOut`,
+> **4.5c.2** seamless failover-resume) are built + committed in the repo, and the
+> **4.5c.3** multi-node SLA-drill harness is built + run locally, but **none are yet
+> deployed** — prod still runs `e40cca1`.
 > This section documents the ops-relevant facts for when they deploy (staging→prod via
 > the normal `./op-compose.sh up -d --build`, `deploy-verifier` gate). No new required
-> env/secret; it adds **TWO additive migrations** + dev-only tooling. **Single-node-safe
-> AND now multi-node-safe for cash-out** — the HARD multi-node release gate is **CLOSED**
-> (4.5c.1, see below); the remaining multi-node items (seamless failover-resume, the
-> SLA drills) are 4.5c.2/c.3, and the multi-node cutover stays gated until they land.
+> env/secret; it adds **TWO additive migrations** + dev-only tooling. **Single-node-safe,
+> multi-node-safe for cash-out, AND seamless on failover** — the HARD multi-node release
+> gate is **CLOSED** (4.5c.1) and failover now **RESUMES** the live round (4.5c.2, see
+> below). The remaining multi-node item is the **4.5c.3 full-scale SLA runs** (10k / 1e6,
+> need infra) + a concurrent-leader-flip auditor pass, and the multi-node cutover stays
+> gated until those land.
 
 **Socket.IO Redis adapter (4.1) — single-node-safe, with a HARD scale gate.**
 The gateway can fan out WS broadcasts through Redis pub/sub
@@ -620,12 +624,15 @@ existing `REDIS_URL` (a dedicated pub/sub connection pair). It is **inert on a s
 node** and **degrades gracefully to the in-memory adapter** if Redis is unreachable
 (the app still serves WS), so the deploy is safe on the current single VPS.
 - **⚠️ DO NOT run more than ONE WS/API node yet — but the cash-out money hole is now
-  CLOSED.** Leader-election (4.5b) means only one elected leader runs the engine tick
-  loop, and the follower cash-out-above-`crashPoint` hole is **fixed in 4.5c.1** (the
-  cash-out gate below). What still blocks the multi-node cutover is **operational, not a
-  money bug**: seamless failover-resume (4.5c.2) + the multi-node SLA drills (4.5c.3,
-  failover <5 s / 10k concurrency / 1e6-round reconciliation soak). Keep a single
-  `vaultrun-api` instance until those land + `deploy-verifier` + USER sign-off.
+  CLOSED and failover is now seamless.** Leader-election (4.5b) means only one elected
+  leader runs the engine tick loop; the follower cash-out-above-`crashPoint` hole is
+  **fixed in 4.5c.1** (the cash-out gate below); and failover now **RESUMES** the
+  in-flight round instead of close+refund (**4.5c.2**, below). What still blocks the
+  multi-node cutover is the **4.5c.3 full-scale SLA drills** (10k concurrency [multi-host]
+  + the full 1e6-round reconciliation soak [stable long-running multi-node env] — both
+  INFRA-GATED; the local drills already pass: failover ~1.6–2.0 s, settlement p99 ~25 ms,
+  0 reconciliation discrepancies) + a concurrent-leader-flip `money-path-auditor` pass.
+  Keep a single `vaultrun-api` instance until those land + `deploy-verifier` + USER sign-off.
 - `main.ts` now calls `app.enableShutdownHooks()` so a rolling deploy drains WS
   cleanly. No config change needed for the single-node prod.
 
@@ -635,10 +642,16 @@ leadership; the engine starts on leader-acquired / stops on leader-lost, and
 **`assertStillLeader()` fences every phase transition** (a stale leader self-demotes
 before any DB write). On a single node this is transparent — the one instance acquires
 leadership at boot (fence = 1) and runs exactly as before; `GAME_AUTOSTART=false` ⇒ the
-node never participates (parity with the old engine autostart check). **Failover today
-is the existing close+refund** (`recoverInterruptedRounds()`, §earlier) — seamless
-resume is 4.5c.2. No new env. A dedicated pg connection is opened in addition to the
-Prisma pool (1 extra Postgres connection per instance — negligible single-node).
+node never participates (parity with the old engine autostart check). **Failover now
+RESUMES the in-flight round (4.5c.2, `f53b682`)** — a survivor re-attaches the persisted
+round (`crashPoint`/`startedAt`/`phaseEndsAt`/`status`/`seedId`) and continues the
+deterministic outcome via `resumeOrRecover()` → `resumeRound()`; the prior close+refund
+(`closeAndRefundRound()`, extracted from `recoverInterruptedRounds()`) is kept ONLY as the
+safe fallback for anomalous/corrupt/ancient rows (waiting/betting older than 30 s, or a
+row missing `seedId`/`startedAt`). **Single-node behaviour is byte-for-byte unchanged** (a
+single node boots, finds its own just-persisted round, and resumes it). No new env. A
+dedicated pg connection is opened in addition to the Prisma pool (1 extra Postgres
+connection per instance — negligible single-node).
 
 **✅ HARD MULTI-NODE RELEASE GATE — CLOSED in 4.5c.1 (`f636373`).** Previously a
 **follower** node's running cash-out multiplier was the **uncapped public curve**, so in
@@ -656,8 +669,9 @@ confirmed no TOCTOU gap. `crashPoint` is read **server-side only**, never return
 (`CashoutResult` is structurally `crashPoint`-free; `too_late` is the same non-informative
 reason as the existing phase gate). Leader/single-node behaviour is byte-for-byte unchanged
 (the gate never trips there). What still gates the multi-node cutover is **operational, not
-money**: 4.5c.2 (seamless failover-resume) + 4.5c.3 (the SLA drills) + `deploy-verifier` +
-USER sign-off.
+money**: the **4.5c.3 full-scale SLA runs** (10k / 1e6-round — need infra; 4.5c.2 seamless
+failover-resume is now DONE, see below) + a concurrent-leader-flip `money-path-auditor` pass +
+`deploy-verifier` + USER sign-off.
 
 **`/health` fast-fail (4.0).** `/health` now races each dependency ping against an
 **800 ms timeout**, so a *hung* (not down) Redis returns **503 fast** instead of
@@ -718,8 +732,24 @@ hosts (10 → 12, not 10 → 11 — this batch carries BOTH).
   `place_bet` p99 ~176 ms under a synchronized burst (the per-round
   `pg_advisory_xact_lock` serialization).
 
+**Multi-node SLA-drill harness (4.5c.3, `adf51cc`) — dev-only, infra-gated at scale.**
+The `load/` tooling that measures the Phase-4 SLAs (and validates 4.5c.2 under a real
+SIGKILL): `load/failover-drill.ts` (2-node SIGKILL → measures the failover gap +
+confirms seamless resume), `load/recon-soak.ts` (failure-injected, delta-based
+reconciliation soak), `load/cluster-harness.ts` (node-boot + leader-mapping helpers,
+reads the authoritative `engine_leadership.node_id`), and `load/ws-load.ts`'s new
+`AUTH_MODE=operator` (launch-token → play-token client driving the operator-wallet
+settlement path). Run ON staging/dedicated infra against localhost (like §13's k6) —
+they write rows to the DB, so **never point them at prod**. Measured locally: failover
+**~1.6–2.0 s (< 5 s)**, operator settlement **p99 ~25 ms (< 200 ms)**, **0 reconciliation
+discrepancies**. The full-scale **10k concurrent** (multi-host) + the full **1e6-round
+soak** (stable long-running multi-node env) are still to run on real infra. NOTE: a
+pre-existing `-600` residual on `reconcile-check.ts` invariant 1a = legitimate orphan
+ledger rows (bet rows DELETEd on placeBet-failure / reserving-recovery leave their
+FK-to-wallet ledger rows) — NOT a money leak (invariant 2 ledger↔balance is clean).
+
 Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION" +
-"PHASE 4.5a + 4.5b — HA CORE".
+"PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3".
 
 ---
 
