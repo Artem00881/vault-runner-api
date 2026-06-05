@@ -163,12 +163,12 @@ test("GAME_AUTOSTART=false → never participates (pure follower, never acquires
   const a = make(backend, "node-A");
   const ev = captureEvents(a);
 
-  await a.onModuleInit(); // would normally start polling — must be a no-op here
+  await a.onApplicationBootstrap(); // would normally start polling — must be a no-op here
   expect(a.isLeader()).toBe(false);
 
   // even an explicit tick() must not promote a non-participant... but tick() is the raw
-  // mechanic; the guarantee is that onModuleInit never schedules it. Assert the lock was
-  // never acquired by the lifecycle, and the backend is still free for a real node.
+  // mechanic; the guarantee is that onApplicationBootstrap never schedules it. Assert the
+  // lock was never acquired by the lifecycle, and the backend is still free for a real node.
   expect(backend.holder).toBeNull();
   expect(ev.acquired).toEqual([]);
 

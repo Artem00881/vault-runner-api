@@ -9,6 +9,7 @@ import { AuthModule } from "./auth/auth.module";
 import { WalletModule } from "./wallet/wallet.module";
 import { FairnessModule } from "./fairness/fairness.module";
 import { GameModule } from "./game/game.module";
+import { HaModule } from "./ha/ha.module";
 import { LeaderboardModule } from "./leaderboard/leaderboard.module";
 import { OperatorModule } from "./operator/operator.module";
 import { MetricsModule } from "./metrics/metrics.module";
@@ -30,6 +31,7 @@ import { CurrencyController } from "./common/currency.controller";
     AuthModule,
     WalletModule,
     FairnessModule,
+    HaModule, // engine leader election (Phase 4.5b) — drives engine start/stop
     GameModule,
     LeaderboardModule,
     OperatorModule,

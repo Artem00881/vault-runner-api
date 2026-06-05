@@ -41,7 +41,7 @@ const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};
-const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any);
+const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any, {} as any, {} as any);
 // recoverReservingBets() is private; drive it via recoverInterruptedRounds() —
 // the exact entry start() calls on boot (engine-recovery.test.ts does the same).
 const recover = () => (engine as any).recoverInterruptedRounds();

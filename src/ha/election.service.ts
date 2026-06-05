@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/common";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { LeaderLock } from "./leader-lock";
@@ -13,10 +13,14 @@ import type { LeaderLock } from "./leader-lock";
  * expose `isLeader()` / `fence` / `assertStillLeader()` plus `leader-acquired` /
  * `leader-lost` events for the engine wiring in 4.5b.
  *
- * 4.5a SCOPE — ADDITIVE & UNWIRED: this service is NOT registered in AppModule (see
- * HaModule, which is intentionally not imported), and it does NOT call
- * engine.start()/stop(). It only arbitrates + emits; 4.5b consumes the events. The
- * running single-node game is byte-for-byte unchanged.
+ * 4.5b WIRING: HaModule is now imported (via GameModule) and the engine subscribes to
+ * `leader-acquired`→start() / `leader-lost`→stop(). The FIRST acquire runs in
+ * `onApplicationBootstrap` (NOT onModuleInit) so every subscriber — the engine — is
+ * already wired before we can fire `leader-acquired`; the engine ALSO checks
+ * `election.isLeader()` in its own onModuleInit as a belt against DI init-ordering, so a
+ * single node can never miss an acquire that already happened. The running single-node
+ * game stays byte-for-byte identical: one node wins the lock instantly on boot and runs
+ * the engine exactly as today.
  *
  * `GAME_AUTOSTART=false` ⇒ NEVER participate in election (pure follower / WS-only
  * node forever) — the same hard override the engine uses today, and what tests rely on.
@@ -28,7 +32,7 @@ export const HEARTBEAT_INTERVAL_MS = 1000; // leader liveness cadence
 export type ElectionEvent = "leader-acquired" | "leader-lost";
 
 @Injectable()
-export class ElectionService implements OnModuleInit, OnModuleDestroy {
+export class ElectionService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly log = new Logger(ElectionService.name);
   /** `leader-acquired` (fence:bigint) / `leader-lost` () for the engine wiring (4.5b). */
   readonly events = new EventEmitter();
@@ -53,7 +57,12 @@ export class ElectionService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ---- lifecycle ----
-  async onModuleInit() {
+  // The first acquire runs in onApplicationBootstrap (NOT onModuleInit) so every
+  // subscriber (the engine's `leader-acquired` listener, wired in its onModuleInit) is
+  // already attached before we can emit — otherwise a single node could win the lock and
+  // fire `leader-acquired` into the void before the engine subscribed. The engine's own
+  // onModuleInit additionally does `if (election.isLeader()) start()` as a second belt.
+  async onApplicationBootstrap() {
     if (!this.participates) {
       this.log.log(`election: GAME_AUTOSTART=false → pure follower (never acquires) [node=${this.nodeId}]`);
       return;

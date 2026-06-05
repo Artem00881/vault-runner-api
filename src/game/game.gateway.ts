@@ -19,6 +19,7 @@ import { deserializeRg, type EffectiveRg } from "../operator/rg-config";
 import type { PerBetLimits } from "./risk.service";
 import { placeSchema, panelSchema, timeSyncSchema } from "./ws-schemas";
 import { MetricsService } from "../metrics/metrics.service";
+import { ElectionService } from "../ha/election.service";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -130,9 +131,17 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @Inject(JwtService) private readonly jwt: JwtService,
     @Inject(GameSessionService) private readonly sessions: GameSessionService,
     @Inject(MetricsService) private readonly metrics: MetricsService,
+    @Inject(ElectionService) private readonly election: ElectionService,
   ) {}
 
   afterInit(server: Server) {
+    // Phase 4.5b: the engine `events` only ever fire on the LEADER node (a follower has no
+    // engine loop), so these relays are already effectively leader-driven; the Redis IO
+    // adapter fans the leader's server.emit out to clients on EVERY node, which is why
+    // followers need no tick of their own. The leader-only *work* below (onTick auto-cashout
+    // driver, onSettle settlement, reconcile + reserving sweeps) is additionally gated on
+    // election.isLeader() so exactly one node does shared-DB work — even though the timers
+    // are armed on every node (so leadership can flip at runtime without re-wiring).
     const e = this.engine.events;
     e.on("phase", (s) => server.emit("round_state", s));
     e.on("crash", (p) => server.emit("round_crashed", p));
@@ -182,8 +191,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   /** Reconcile pending payouts, guarded against overlapping cycles — a slow cycle
-   *  over a degraded operator can run longer than the 30s interval (audit H2). */
+   *  over a degraded operator can run longer than the 30s interval (audit H2).
+   *  LEADER-ONLY (Phase 4.5b): touches the shared DB, so exactly one node runs it. */
   private async runReconcile() {
+    if (!this.election.isLeader()) return;
     if (this.reconciling) return;
     this.reconciling = true;
     try {
@@ -197,8 +208,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   /** Periodic, age-gated 'reserving' recovery (BOTH wallet modes) — self-heals a
    *  mid-run stranded reservation without a reboot. Guarded against overlap so a
-   *  slow pass can't stack. Per-bet errors are logged inside the engine method. */
+   *  slow pass can't stack. Per-bet errors are logged inside the engine method.
+   *  LEADER-ONLY (Phase 4.5b): touches the shared DB (and the engine's recover path
+   *  refunds money), so exactly one node runs it — this is the multi-instance
+   *  sweep-ownership lock the design called for. */
   private async runReservingSweep(olderThanMs: number) {
+    if (!this.election.isLeader()) return;
     if (this.sweeping) return;
     this.sweeping = true;
     try {
@@ -362,7 +377,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   // ---- realtime drivers ----
+  // LEADER-ONLY (Phase 4.5b): exactly one node computes the multiplier, broadcasts it
+  // (the Redis adapter delivers to clients on ALL nodes), and drives auto-cashouts (a
+  // money action over the shared DB). A follower must NOT tick — it would double-emit
+  // cluster-wide and double-scan auto-cashouts.
   private async onTick() {
+    if (!this.election.isLeader()) return;
     const s = this.engine.getPublicState();
     if (!s || s.phase !== "running") return;
     this.server.emit("multiplier_update", {
@@ -387,6 +407,11 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   private async onSettle(p: { roundId: string }) {
+    // LEADER-ONLY (Phase 4.5b): settlement is initiated only by the leader's engine loop.
+    // The engine `settle` event only fires on the leader anyway (a follower has no loop);
+    // the explicit gate is defense-in-depth so a follower can never initiate settle.
+    // settleRound is itself idempotent (CAS on status=active), so this is belt-and-suspenders.
+    if (!this.election.isLeader()) return;
     // metrics-only: time the crash-leg settlement (crash → busted bets committed)
     // into the shared settlement histogram (Phase 4.4, decision §2 Option A).
     const t0 = Date.now();

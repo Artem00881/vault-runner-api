@@ -6,19 +6,14 @@ import { RedisService } from "../redis/redis.service";
 import { FairnessService } from "../fairness/fairness.service";
 import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
 import { MetricsService } from "../metrics/metrics.service";
+import { ElectionService } from "../ha/election.service";
+import { PublicRoundCache, ROUND_CHANNEL, ROUND_SNAPSHOT_KEY, type PublishedRoundState } from "./public-round-cache";
+import { GROWTH, PHASE_MS, type Phase, type PublicRoundState } from "./round-types";
 
-export type Phase = "waiting" | "betting" | "running" | "crashed" | "settling" | "completed";
-
-export const PHASE_MS = {
-  waiting: 3000,
-  betting: 5000,
-  crashed: 2500,
-  settling: 500,
-  completed: 600,
-} as const;
-
-/** multiplier(t) = e^(GROWTH * elapsedMs). Tunes pacing only; not fairness. */
-export const GROWTH = 0.00012;
+// Re-export the shared round value-types so existing importers (and callers that did
+// `import { GROWTH, PublicRoundState } from "./game-engine.service"`) keep working. The
+// definitions live in ./round-types to avoid an engine↔cache require() cycle (4.5b).
+export { GROWTH, PHASE_MS, type Phase, type PublicRoundState };
 
 interface EngineState {
   roundId: string;
@@ -27,14 +22,6 @@ interface EngineState {
   phaseEndsAt: number;
   startedAt: number | null;
   crashPoint: number; // SECRET — never exposed before the crash
-}
-
-export interface PublicRoundState {
-  roundId: string;
-  phase: Phase;
-  phaseEndsAt: number;
-  multiplier: number;
-  serverTime: number;
 }
 
 @Injectable()
@@ -53,10 +40,25 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     @Inject(FairnessService) private readonly fairness: FairnessService,
     @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
     @Inject(MetricsService) private readonly metrics: MetricsService,
+    @Inject(ElectionService) private readonly election: ElectionService,
+    @Inject(PublicRoundCache) private readonly cache: PublicRoundCache,
   ) {}
 
   onModuleInit() {
-    if (process.env.GAME_AUTOSTART !== "false") {
+    // The engine NO LONGER self-starts on GAME_AUTOSTART. Leadership drives it:
+    //  - subscribe so a later acquire starts us / a loss stops us;
+    //  - AND if election already acquired (DI/bootstrap ordering let it win the lock
+    //    before this listener attached), start now so a single node can't miss it.
+    // Net single-node behavior is identical: one node wins the lock on boot → start().
+    this.election.events.on("leader-acquired", () => {
+      this.log.log("became engine leader → starting the round loop");
+      this.start().catch((e) => this.log.error(`start failed: ${e?.message}`));
+    });
+    this.election.events.on("leader-lost", () => {
+      this.log.warn("lost engine leadership → stopping the round loop");
+      this.stop();
+    });
+    if (this.election.isLeader()) {
       this.start().catch((e) => this.log.error(`start failed: ${e?.message}`));
     }
   }
@@ -195,7 +197,13 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ---- public reads (no secret leakage) ----
+  // Leadership-aware (design §3): the LEADER reads its authoritative in-memory `this.state`
+  // (unchanged — it holds crashPoint for the post-crash reveal). A FOLLOWER has no engine
+  // loop, so it reads the PublicRoundCache (leader-published public state, NO crashPoint)
+  // and computes the running multiplier locally. This is what makes a manual cash-out on a
+  // follower return the correct multiplier instead of 1.0 — with ZERO change to cashOut.
   currentMultiplier(): number {
+    if (!this.election.isLeader()) return this.cache.currentMultiplier();
     const s = this.state;
     if (!s) return 1.0;
     if (s.phase === "crashed" || s.phase === "settling" || s.phase === "completed") {
@@ -209,6 +217,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   getPublicState(): PublicRoundState | null {
+    if (!this.election.isLeader()) return this.cache.getPublicState();
     const s = this.state;
     if (!s) return null;
     return {
@@ -228,14 +237,39 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     }, Math.max(0, ms));
   }
 
+  /**
+   * Publish the PUBLIC round state for followers (design §3). Writes the `round:current`
+   * snapshot (late joiners / a node that boots mid-round) AND publishes on the
+   * `vaultrun:round` pub/sub channel (live follower updates). The payload is the existing
+   * public shape (NO crashPoint) PLUS `startedAt` + `seedId` — `startedAt` so a follower
+   * can recompute the running multiplier locally; `seedId` for the (4.5c) resume anchor.
+   * `crashPoint` is NEVER published — same guarantee as the original mirror().
+   */
   private async mirror() {
     if (!this.state) return;
-    const pub = this.getPublicState();
+    const base = this.getPublicState();
+    if (!base) return;
+    const payload: PublishedRoundState = { ...base, startedAt: this.state.startedAt, seedId: this.state.seedId };
+    const json = JSON.stringify(payload);
     try {
-      await this.redis.client.set("round:current", JSON.stringify(pub), "EX", 120);
+      await this.redis.client.set(ROUND_SNAPSHOT_KEY, json, "EX", 120);
+      await this.redis.client.publish(ROUND_CHANNEL, json);
     } catch {
-      /* redis optional for single instance */
+      /* redis optional for a single instance — the leader path is unaffected */
     }
+  }
+
+  /**
+   * Fence the engine's authored writes (design §2 Belt B). Called at the TOP of every
+   * phase transition: if we are no longer the authoritative leader (a second node bumped
+   * the fence past ours, or our lock died), self-demote BEFORE any DB write so a stale
+   * leader can never touch money/round state. Returns true to proceed, false to abort.
+   */
+  private async stillLeader(where: string): Promise<boolean> {
+    if (await this.election.assertStillLeader()) return true;
+    this.log.warn(`fence check failed at ${where} — self-demoting, aborting the transition`);
+    this.stop();
+    return false;
   }
 
   private emitPhase(phase: Phase) {
@@ -244,6 +278,8 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async enterWaiting() {
+    // Fence FIRST — a stale leader self-demotes before allocating a seed or minting a round.
+    if (!(await this.stillLeader("enterWaiting"))) return;
     // Best-effort fairness upkeep (arm pending epochs, pre-commit the next epoch)
     // — fire-and-forget so it never delays the round; it guards its own errors.
     void this.fairness.maintain();
@@ -258,20 +294,36 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const crashPoint = this.fairness.crashForSeed(seed);
-    const round = await this.prisma.round.create({
-      data: {
-        seedId: seed.id,
-        nonce: BigInt(seed.chainIndex),
-        crashPoint,
-        status: "waiting" as Phase,
-        bettingOpensAt: new Date(Date.now() + PHASE_MS.waiting),
-      },
-    });
+    const phaseEndsAt = Date.now() + PHASE_MS.waiting;
+    let round;
+    try {
+      round = await this.prisma.round.create({
+        data: {
+          seedId: seed.id,
+          nonce: BigInt(seed.chainIndex),
+          crashPoint,
+          status: "waiting" as Phase,
+          bettingOpensAt: new Date(phaseEndsAt),
+          phaseEndsAt: new Date(phaseEndsAt),
+        },
+      });
+    } catch (e) {
+      // Belt A (design §2): @@unique([seedId]). A P2002 here means ANOTHER leader already
+      // minted a round on this seed — i.e. WE are not (or no longer) the authoritative
+      // leader. Treat it as a lost-leadership signal: stop and do NOT retry into safe()
+      // (no busy-loop, no second seed allocation). The real leader owns the loop.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        this.log.warn(`round.create hit P2002 on seed ${seed.id} — another leader minted it; self-demoting (lost leadership)`);
+        this.stop();
+        return;
+      }
+      throw e; // any other DB error → safe() backs off + retries
+    }
     this.state = {
       roundId: round.id,
       seedId: seed.id,
       phase: "waiting",
-      phaseEndsAt: Date.now() + PHASE_MS.waiting,
+      phaseEndsAt,
       startedAt: null,
       crashPoint,
     };
@@ -282,9 +334,13 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
   private async enterBetting() {
     if (!this.state) return;
+    if (!(await this.stillLeader("enterBetting"))) return;
     this.state.phase = "betting";
     this.state.phaseEndsAt = Date.now() + PHASE_MS.betting;
-    await this.prisma.round.update({ where: { id: this.state.roundId }, data: { status: "betting" } });
+    await this.prisma.round.update({
+      where: { id: this.state.roundId },
+      data: { status: "betting", phaseEndsAt: new Date(this.state.phaseEndsAt) },
+    });
     await this.mirror();
     this.emitPhase("betting");
     this.schedule(PHASE_MS.betting, () => this.safe(() => this.enterRunning()));
@@ -292,13 +348,14 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
   private async enterRunning() {
     if (!this.state) return;
+    if (!(await this.stillLeader("enterRunning"))) return;
     const now = Date.now();
     this.state.phase = "running";
     this.state.startedAt = now;
     this.state.phaseEndsAt = now + 60_000; // upper bound; crash fires earlier
     await this.prisma.round.update({
       where: { id: this.state.roundId },
-      data: { status: "running", startedAt: new Date(now) },
+      data: { status: "running", startedAt: new Date(now), phaseEndsAt: new Date(this.state.phaseEndsAt) },
     });
     await this.mirror();
     this.emitPhase("running");
@@ -310,11 +367,12 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
   private async enterCrashed() {
     if (!this.state) return;
+    if (!(await this.stillLeader("enterCrashed"))) return;
     this.state.phase = "crashed";
     this.state.phaseEndsAt = Date.now() + PHASE_MS.crashed;
     await this.prisma.round.update({
       where: { id: this.state.roundId },
-      data: { status: "crashed", crashedAt: new Date() },
+      data: { status: "crashed", crashedAt: new Date(), phaseEndsAt: new Date(this.state.phaseEndsAt) },
     });
     await this.fairness.revealSeed(this.state.seedId); // make the proof public
     await this.mirror();
@@ -325,9 +383,13 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
   private async enterSettling() {
     if (!this.state) return;
+    if (!(await this.stillLeader("enterSettling"))) return;
     this.state.phase = "settling";
     this.state.phaseEndsAt = Date.now() + PHASE_MS.settling;
-    await this.prisma.round.update({ where: { id: this.state.roundId }, data: { status: "settling" } });
+    await this.prisma.round.update({
+      where: { id: this.state.roundId },
+      data: { status: "settling", phaseEndsAt: new Date(this.state.phaseEndsAt) },
+    });
     await this.mirror();
     // M6 will settle bets here (engine ↔ ledger). For M4 this is a no-op hook.
     this.events.emit("settle", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
@@ -337,11 +399,12 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
   private async enterCompleted() {
     if (!this.state) return;
+    if (!(await this.stillLeader("enterCompleted"))) return;
     this.state.phase = "completed";
     this.state.phaseEndsAt = Date.now() + PHASE_MS.completed;
     await this.prisma.round.update({
       where: { id: this.state.roundId },
-      data: { status: "completed", settledAt: new Date() },
+      data: { status: "completed", settledAt: new Date(), phaseEndsAt: new Date(this.state.phaseEndsAt) },
     });
     await this.mirror();
     this.metrics.recordRound(); // metrics-only: vaultrun_rounds_total (Phase 4.4)

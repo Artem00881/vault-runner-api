@@ -11,7 +11,9 @@ const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};
-const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any);
+// Phase 4.5b: +ElectionService +PublicRoundCache args. recover* never reads them, so
+// stubs suffice; this just keeps the constructor arity correct (single-node behavior).
+const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any, {} as any, {} as any);
 const recover = () => (engine as any).recoverInterruptedRounds();
 
 // Track everything we create so afterAll can purge it — otherwise these
