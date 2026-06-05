@@ -600,22 +600,38 @@ restart the Prometheus container, see §10).
 
 ---
 
-## 16. Scale-out foundation + HA core (Phase 4) — built 2026-06-05, NOT yet deployed
+## 16. Scale-out foundation + HA core (Phase 4) — built 2026-06-05, ✅ DEPLOYED single-node on staging + PROD (prod `6bfda18`)
 
 > **State:** the Phase-4 **foundation** (4.0–4.4) **plus the HA core**
 > (**4.5a** leader-election primitives + split-brain DB belts, **4.5b** wire election
 > into the engine/gateway, **4.5c.1** the authoritative crash gate on `cashOut`,
-> **4.5c.2** seamless failover-resume) are built + committed in the repo, and the
-> **4.5c.3** multi-node SLA-drill harness is built + run locally, but **none are yet
-> deployed** — prod still runs `e40cca1`.
-> This section documents the ops-relevant facts for when they deploy (staging→prod via
-> the normal `./op-compose.sh up -d --build`, `deploy-verifier` gate). No new required
-> env/secret; it adds **TWO additive migrations** + dev-only tooling. **Single-node-safe,
-> multi-node-safe for cash-out, AND seamless on failover** — the HARD multi-node release
-> gate is **CLOSED** (4.5c.1) and failover now **RESUMES** the live round (4.5c.2, see
-> below). The remaining multi-node item is the **4.5c.3 full-scale SLA runs** (10k / 1e6,
-> need infra) + a concurrent-leader-flip auditor pass, and the multi-node cutover stays
-> gated until those land.
+> **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
+> (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
+> at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
+> main), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
+> `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
+> (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
+> env/secret**. **Single-node-safe, multi-node-safe for cash-out, AND seamless on failover** —
+> the HARD multi-node release gate is **CLOSED** (4.5c.1) and failover now **RESUMES** the
+> live round (4.5c.2, see below). **STAY SINGLE-NODE** — the remaining multi-node item is the
+> **4.5c.3 at-scale SLA runs** (10k / 1e6, need infra) + a concurrent-leader-flip auditor
+> pass, and the multi-node cutover stays gated until those land + sign-off. The deploy facts
+> are recorded below for reproducibility / rollback.
+
+**Deploy record (2026-06-05).** Prod `e40cca1` → **`6bfda18`**; staging the same image
+(staging = Hetzner `ubuntu-4gb-fsn1-2`, 2 vCPU / 3.7 GB; deployed first). `deploy-verifier`
+= GO. **seed_id pre-check CLEAN on both** (the Belt A `UNIQUE(seed_id)` build below): **prod
+14712 = 14712 distinct / 0 NULL**, **staging 14816 = 14816 / 0 NULL**. **Migrations 10 → 12**
+on both (`20260605140000_scale_status_indexes` + `20260605143000_engine_ha_belts`); prod
+`prisma migrate status` = "Database schema is up to date!". **Prod verification (all PASS):**
+loopback `/health` `{"status":"ok"}`; PUBLIC `/health` via Cloudflare → Caddy (:443 mTLS) →
+`127.0.0.1:3001` `{"status":"ok"}` (edge intact); port still `3001/tcp → 127.0.0.1:3001`
+(localhost, not `0.0.0.0`); boot logs = Sentry on, **Redis adapter active**, **`acquired
+leadership (fence=1)`**, **`Game engine started`**, **0 errors**; rounds minting (6 in 2 min,
+latest `running`); `WALLET_PROVIDER_TYPE=internal` + `SALT_PROVIDER_TYPE=eth-block` (epoch 1)
+unchanged; **H5 still active**. **Rollback (prod): image-only to `cb9f2ba`** (or `e40cca1`,
+the immediate prior image) — **do NOT down-migrate** (the two new migrations are additive /
+forward-only, simply unused by older code).
 
 **Socket.IO Redis adapter (4.1) — single-node-safe, with a HARD scale gate.**
 The gateway can fan out WS broadcasts through Redis pub/sub
@@ -679,10 +695,11 @@ hanging the endpoint (the old `000`). The 200/503 contract and the §10 H5 slim-
 (`{status:"ok"}` when `METRICS_TOKEN` is set) are unchanged — health checks /
 uptime probes behave the same, just fail faster on a wedged dependency.
 
-**Migrations (4.3 + 4.5a) — TWO additive, forward-only.** Both run automatically on
-boot (the container CMD's `prisma migrate deploy`). After they deploy,
-`prisma migrate status` advances from "10 migrations … up to date" to **12** on both
-hosts (10 → 12, not 10 → 11 — this batch carries BOTH).
+**Migrations (4.3 + 4.5a) — TWO additive, forward-only. ✅ APPLIED on boot 2026-06-05.**
+Both ran automatically on boot (the container CMD's `prisma migrate deploy`).
+`prisma migrate status` advanced from "10 migrations … up to date" to **12** on both
+hosts (10 → 12, not 10 → 11 — this batch carries BOTH); prod now reports "Database schema
+is up to date!".
 - **`20260605140000_scale_status_indexes` (4.3)** — `@@index([status])` on the round +
   bet tables (`game_rounds_status_idx`, `game_bets_status_idx`); speeds the
   recovery/sweep/reconcile/backlog queries as the tables grow. Just **adds indexes**
@@ -691,11 +708,12 @@ hosts (10 → 12, not 10 → 11 — this batch carries BOTH).
 - **`20260605143000_engine_ha_belts` (4.5a)** — engine HA split-brain belts:
   - **Belt A — `CREATE UNIQUE INDEX "game_rounds_seed_id_key" ON "game_rounds"("seed_id")`**
     (one seed serves exactly one round, forever; blocks a future double-leader from
-    double-minting a round). **⚠️ PRE-CHECK before deploy:** prod must have **0 duplicate
-    `seed_id`s** or the unique-index build FAILS (and the boot migration aborts). It was
-    verified clean on dev (**2253 rounds = 2253 distinct seed_ids, 0 dups** — the
-    invariant already holds; `allocateSeed` filters `rounds: { none: {} }`). Verify on
-    prod first:
+    double-minting a round). **⚠️ PRE-CHECK (run on every host before deploy):** the host must
+    have **0 duplicate `seed_id`s** or the unique-index build FAILS (and the boot migration
+    aborts). **✅ Verified CLEAN at the 2026-06-05 deploy — prod 14712 = 14712 distinct / 0 NULL,
+    staging 14816 = 14816 / 0 NULL** (and earlier on dev: 2253 = 2253, 0 dups) — the invariant
+    holds (`allocateSeed` filters `rounds: { none: {} }`), so Belt A built fine on both hosts.
+    Re-run before any future fresh build:
     `docker exec vaultrun-postgres psql -U vault -d vaultrun -c "SELECT seed_id, count(*) FROM game_rounds GROUP BY seed_id HAVING count(*) > 1;"`
     — expect **0 rows**. If any rows come back, do NOT deploy until resolved.
   - **Belt B — `engine_leadership` singleton fence table** (seeded one row
