@@ -20,3 +20,8 @@ export const placeSchema = z.object({
 
 // cash_out / cancel_bet payload.
 export const panelSchema = z.object({ panel: z.enum(["A", "B"]) });
+
+// time_sync payload (Phase 4.2 clock-sync). The client's send timestamp, echoed
+// back so it can compute RTT around the ack. Optional + .finite() so a missing or
+// junk t0 is simply not echoed (never throws).
+export const timeSyncSchema = z.object({ t0: z.number().finite().optional() });

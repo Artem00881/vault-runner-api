@@ -17,7 +17,7 @@ import { GameSessionService } from "../operator/game-session.service";
 import { deserializeBetLimits } from "../operator/bet-limits";
 import { deserializeRg, type EffectiveRg } from "../operator/rg-config";
 import type { PerBetLimits } from "./risk.service";
-import { placeSchema, panelSchema } from "./ws-schemas";
+import { placeSchema, panelSchema, timeSyncSchema } from "./ws-schemas";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -389,6 +389,22 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const s = this.engine.getPublicState();
     if (s) client.emit("round_state", s);
     return { ok: true };
+  }
+
+  /**
+   * Phase 4.2 clock-sync: NTP-style time exchange over the WS ack. The client
+   * sends `t0` (its send time) and measures RTT around the ack; the server stamps
+   * `serverTime`. The client derives a latency-corrected server-time offset so
+   * phase countdowns (`phaseEndsAt`) stay aligned across LB'd nodes/regions. Leaks
+   * nothing but the server clock; rate-limited like every other message. No auth
+   * required (guests need aligned countdowns too).
+   */
+  @SubscribeMessage("time_sync")
+  onTimeSync(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+    if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
+    const parsed = timeSyncSchema.safeParse(body);
+    const t0 = parsed.success ? (parsed.data.t0 ?? null) : null;
+    return { ok: true, t0, serverTime: Date.now() };
   }
 
   @SubscribeMessage("place_bet")
