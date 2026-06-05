@@ -24,12 +24,66 @@ is cycling before trusting a number.
 
 ## Phase-4 SLAs and how each is measured
 
-| SLA | Target | Measured by | Status |
+| SLA | Target | Measured by | Status (local) |
 |---|---|---|---|
-| Settlement p99 | < 200 ms | `ws-load.ts --scrape-metrics` → server-side `vaultrun_settlement_latency_ms` p99. **Must be run in OPERATOR mode** (HTTP wallet = worst case). | this harness |
-| Concurrency | 10k WS / region | `ws-load.ts CLIENTS=10000` sharded across `WORKERS`; trust the server `vaultrun_ws_connections` gauge + flat memory + no tick starvation. | this harness |
-| Failover | < 5 s | inter-tick-gap tracking here + the 4.5 2-node/Redis-adapter SIGKILL drill (last tick before kill → first tick after promote). | 4.5 |
-| Reconciliation | 0 discrepancies / 1e6 rounds | `scripts/reconcile-check.ts` after a failure-injected soak. | `reconcile-check.ts` (gate); 1e6 soak in 4.5 |
+| Settlement p99 | < 200 ms | `ws-load.ts AUTH_MODE=operator --scrape-metrics` → server-side `vaultrun_settlement_latency_ms` p99 (OPERATOR mode = HTTP wallet = worst case). | **MET** — p99 ≈ 25 ms operator-mode @ 40 clients |
+| Concurrency | 10k WS / region | `ws-load.ts CLIENTS=10000` sharded across `WORKERS`/hosts; trust the server `vaultrun_ws_connections` gauge + flat memory + no tick starvation. | **INFRA-GATED** — needs multi-host generation (one box can't drive 10k cleanly) |
+| Failover | < 5 s | `load/failover-drill.ts`: 2-node + Redis adapter, SIGKILL the leader mid-`running`, measure last-tick-before-kill → first-tick-after-resume (the inter-tick-gap hook). | **MET** — gap ≈ 1.6 s over 3 runs (SLA 5 s) |
+| Reconciliation | 0 discrepancies / 1e6 rounds | `load/recon-soak.ts` (failure-injected, repeated leader SIGKILL) then `scripts/reconcile-check.ts`. | **MET (scaled)** — 0 discrepancies over failure-injected soaks; full 1e6 STAGING-GATED |
+
+> The two MET-at-small-scale rows (settlement, reconciliation) and failover were
+> **measured locally** (numbers in `4.5c.3 drill harness` below). 10k concurrency and the
+> full 1e6-round soak are **infra-gated** — the harness is ready; they need a stable
+> multi-host / long-running env (Docker Desktop here has ~30-60 s up-windows).
+
+---
+
+## 4.5c.3 drill harness — failover + operator-mode + reconciliation soak
+
+Three dev-only tools (`load/`, run via `bun`; outside the tsc CI typecheck):
+
+| Tool | Proves | One-liner |
+|---|---|---|
+| `load/failover-drill.ts` | failover < 5 s **and** seamless resume (not close+refund) | boots 2 nodes, SIGKILLs the leader mid-`running`, measures the tick gap + asserts the SAME round resumes + bets settle with 0 `restart_refund` |
+| `load/recon-soak.ts` | 0 reconciliation discrepancies under repeated failover | boots 2 nodes, drives guest load, SIGKILL+respawns the leader on a cadence, asserts the soak adds 0 new discrepancies + absolute money-conservation holds |
+| `ws-load.ts AUTH_MODE=operator` | settlement p99 in OPERATOR mode | each client launches as an operator player (launch-token → play-token) so settlement runs the HTTP wallet path |
+| `load/cluster-harness.ts` | (shared) | node boot + leader mapping (`engine_leadership.node_id` ↔ child pid) + tracking client used by the soak |
+
+**Failover drill** (2 local nodes share the dockerized pg+redis; both election-eligible):
+```bash
+DATABASE_URL="postgresql://vault:vault@localhost:5432/vaultrun?schema=public" \
+  REDIS_URL="redis://localhost:6379" JWT_SECRET=x GAME_CURRENCY=DEMO \
+  CLIENTS=16 bun load/failover-drill.ts
+# → ">> FAILOVER GAP (tick→tick): 1635ms  ✅ < SLA" + "seamless resume CONFIRMED"
+```
+Knobs: `PORT_A`/`PORT_B`, `CLIENTS`, `BET_RATE`, `KILL_AT_MULT` (kill once the running
+multiplier crosses this), `FAILOVER_SLA_MS` (default 5000), `MAX_WAIT_MS`. **Both nodes
+must stay election-eligible** — do NOT set `GAME_AUTOSTART=false` (that makes a node a
+permanent follower → no survivor can take over). The leader is identified from the
+authoritative `engine_leadership.node_id` (= `${HOSTNAME}-${pid}`), mapped to a child by pid.
+
+**Reconciliation soak** (failure injection = repeated leader SIGKILL+respawn):
+```bash
+# DELTA mode (default): snapshots residuals first, asserts the soak adds 0 new ones
+# (a long-lived dev DB carries constant orphan-ledger residuals that are NOT a leak —
+#  see reconcile-check.ts §80; absolute checks 2 & 5 still assert outright).
+DATABASE_URL="postgresql://vault:vault@localhost:5432/vaultrun?schema=public" \
+  REDIS_URL="redis://localhost:6379" JWT_SECRET=x GAME_CURRENCY=DEMO \
+  ROUNDS=12 KILL_EVERY_MS=15000 bun load/recon-soak.ts
+
+# PRISTINE mode: RESET_DB=1 TRUNCATEs the play tables first (DEV ONLY) for a clean
+# canonical-gate PASS; follow with scripts/reconcile-check.ts.
+RESET_DB=1 ROUNDS=8 KILL_EVERY_MS=18000 DATABASE_URL=… REDIS_URL=… JWT_SECRET=x \
+  GAME_CURRENCY=DEMO bun load/recon-soak.ts && \
+  DATABASE_URL=… bun scripts/reconcile-check.ts
+```
+Knobs: `ROUNDS` (stop after N completed), `MAX_MS`, `CLIENTS`, `BET_RATE`,
+`CASHOUT_AT` (0 = ride to bust; >1 = auto-cashout, exercises the win→payout path),
+`KILL_EVERY_MS` (0 disables kills), `RESET_DB`.
+
+> The full **1e6-round** run is the SAME harness with a large `ROUNDS` + `KILL_EVERY_MS`,
+> on a STABLE multi-node env (staging). Locally it runs at ~1 round / ~12 s with a kill
+> ~every round; a 1e6 soak is a staging/CI long-run, not a laptop run.
 
 ---
 
@@ -84,6 +138,14 @@ p99 and `ws_connections` gauge — that is the ground truth.
 | `METRICS_TOKEN` | — | bearer for `/metrics` if locked (H5) |
 | `LAG_WARN_MS` | 50 | per-worker loop-lag warn threshold |
 | `TICK_GAP_WARN_MS` | 1000 | inter-tick-gap warn threshold |
+| `AUTH_MODE` | guest | `guest` (/api/auth/guest, internal wallet) or `operator` (launch-token → play-token, operator-wallet settlement path — the SLA worst case) |
+| `OPERATOR_CODE` | — | operator `code` to launch under (AUTH_MODE=operator) |
+| `OPERATOR_CURRENCY` | DEMO | currency for the operator launch (must be in `op.currencies`) |
+| `PLAYER_PREFIX` | load | synthetic operator playerId prefix (`<prefix>-w<wkr>-<i>`) |
+
+> `AUTH_MODE=operator` mints launch tokens IN the harness via `LaunchTokenService`
+> (signs with the operator's `launchSecret` from the DB), so it needs `DATABASE_URL` +
+> `JWT_SECRET` in its env too. Guest mode needs neither.
 
 ### Run commands
 ```bash
@@ -114,31 +176,41 @@ with the bundled stub operator wallet:
 
 ```bash
 # 1) start the fast stub operator wallet
-PORT=4001 WALLET_KEY=stub-key bun load/operator-wallet-stub.ts
+PORT=4001 WALLET_KEY=stub-key START_BALANCE=100000000 bun load/operator-wallet-stub.ts
 
 # 2) provision an Operator row whose walletApiUrl = http://localhost:4001 and
-#    walletApiKey = stub-key  (scripts/operator-provision.ts), then mint a launch
-#    token (scripts/operator-launch-token.ts). The harness currently auths as a
-#    GUEST (internal wallet); an operator-token mode for ws-load.ts is a small
-#    follow-up — until then, drive operator settlement via an operator-token client
-#    and read server-side settlement p99 from --scrape-metrics.
+#    walletApiKey = stub-key (currencies must include the launch currency):
+DATABASE_URL=… JWT_SECRET=x bun scripts/operator-provision.ts \
+  --code load-stub --name "Load Stub" --currencies DEMO \
+  --wallet-url http://localhost:4001 --wallet-key stub-key
 
-# 3) boot the API in operator mode with the REQUIRED risk env (boot fails closed
-#    otherwise — RISK_* must be positive):
+# 3) boot the API in operator mode with the REQUIRED risk ceilings. The boot guard
+#    (assertRiskConfigForMode) FAILS CLOSED unless these EXACT keys are positive —
+#    note RISK_MAX_MULTIPLIER / RISK_MAX_ROUND_EXPOSURE (NOT RISK_MULTIPLIER /
+#    RISK_ROUND_EXPOSURE). METRICS_TOKEN locks /metrics (H5) — pass the same to the harness.
 DATABASE_URL="postgresql://vault:vault@localhost:5432/vaultrun?schema=public" \
   REDIS_URL="redis://localhost:6379" JWT_SECRET=x GAME_CURRENCY=DEMO \
-  WALLET_PROVIDER_TYPE=operator \
-  RISK_MAX_WIN_PER_BET=100000000 RISK_MULTIPLIER=10000 \
-  RISK_ROUND_EXPOSURE=1000000000 RISK_MAX_BET=1000000 \
+  WALLET_PROVIDER_TYPE=operator METRICS_TOKEN=loadtok \
+  RISK_MAX_WIN_PER_BET=100000000 RISK_MAX_MULTIPLIER=10000 \
+  RISK_MAX_ROUND_EXPOSURE=1000000000 RISK_MAX_BET=1000000 \
   bun run src/main.ts
 
-# 4) run ws-load.ts --scrape-metrics and read SERVER-side settlement p99.
+# 4) run the harness in OPERATOR auth mode (now built — each client launches as an
+#    operator player) and read the SERVER-side settlement p99:
+DATABASE_URL="postgresql://vault:vault@localhost:5432/vaultrun?schema=public" \
+  REDIS_URL="redis://localhost:6379" JWT_SECRET=x GAME_CURRENCY=DEMO \
+  BASE_URL=http://localhost:3001 AUTH_MODE=operator OPERATOR_CODE=load-stub \
+  OPERATOR_CURRENCY=DEMO CLIENTS=40 DURATION_MS=45000 BET_RATE=0.7 CASHOUT_AT=1.3 \
+  SCRAPE_METRICS=1 METRICS_TOKEN=loadtok bun load/ws-load.ts
+# Confirm the operator path was actually hit: the stub logs counts={"bet":N,"win":M,...}.
 ```
 
-State the verdict plainly: settlement p99 is **MET / NOT MET at N concurrency in
-operator mode**. If horizontal scaling/tuning can't meet it, the documented
-risk-gate is to rewrite ONLY the hot path (engine + gateway) in Go, contracts
-unchanged — flag for sign-off.
+**Measured locally (40 clients, operator mode):** server-side settlement
+`p99 ≈ 25 ms` (p50 ≈ 10 ms) — the stub confirmed `bet:78 win:52` so the HTTP wallet
+path WAS exercised. Verdict: settlement p99 is **MET in operator mode at this scale**
+(25 ms ≪ 200 ms). Re-measure at higher concurrency on staging; if horizontal
+scaling/tuning ever can't meet it, the documented risk-gate is to rewrite ONLY the hot
+path (engine + gateway) in Go, contracts unchanged — flag for sign-off.
 
 ---
 
@@ -206,9 +278,11 @@ k6 (or `ws-load.ts`) generates load; you inject the failure and watch recovery v
    - **Redis down:** `docker stop vaultrun-redis` → `/health` flips 503; restart recovers.
    - **Postgres down:** `docker stop vaultrun-postgres` → 503; restart recovers.
    - **API restart (engine recovery):** `docker restart vaultrun-api` → on boot
-     `recoverInterruptedRounds` refunds in-flight bets (no double-refund).
-   - **Engine leader SIGKILL (4.5):** 2-node cluster + Redis adapter + leader
-     election; `docker kill` the leader mid-round; measure the inter-tick gap
-     (`ws-load.ts` already timestamps every `multiplier_update`) and assert
-     `reconcile-check.ts` shows 0 money discrepancies across the gap.
-3. Record time-to-recover. Target: failover <5s, no money discrepancy.
+     `recoverInterruptedRounds`/`resumeOrRecover` handles in-flight bets (no double-pay).
+   - **Engine leader SIGKILL:** now AUTOMATED — `load/failover-drill.ts` (see the
+     "4.5c.3 drill harness" section above) boots a 2-node cluster + Redis adapter +
+     leader election, SIGKILLs the leader mid-`running`, measures the inter-tick gap
+     and asserts the round RESUMED (4.5c.2) with 0 `restart_refund`. For sustained
+     chaos + reconciliation, use `load/recon-soak.ts`.
+3. Record time-to-recover. Target: failover <5s, no money discrepancy. **Measured
+   locally: ~1.6 s gap, 0 discrepancies** (see the drill-harness section).

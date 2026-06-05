@@ -38,6 +38,23 @@
  *   LAG_WARN_MS       (50)    per-worker event-loop-lag warn threshold
  *   TICK_GAP_WARN_MS  (1000)  inter-tick-gap warn threshold (failover hook)
  *
+ * AUTH MODES (4.5c.3):
+ *   AUTH_MODE         (guest) "guest" → POST /api/auth/guest (internal play-money wallet);
+ *                             "operator" → mint a one-time launch token signed with the
+ *                             operator's secret, exchange it at POST /api/operator/launch
+ *                             for a play token, handshake as kind:"operator" so settlement
+ *                             routes to the operator wallet (the SeamlessOperatorWallet HTTP
+ *                             path — the SETTLEMENT-SLA worst case). Each client gets a
+ *                             distinct synthetic playerId so they don't share an operator
+ *                             balance. Requires an Operator row whose walletApiUrl points at
+ *                             load/operator-wallet-stub.ts (see load/README.md).
+ *   OPERATOR_CODE     ()      operator `code` to launch under (AUTH_MODE=operator)
+ *   OPERATOR_CURRENCY (DEMO)  currency for the operator launch (must be in op.currencies)
+ *   PLAYER_PREFIX     (load)  synthetic operator playerId prefix → `${prefix}-w<wkr>-<i>`
+ *   This worker mints launch tokens itself via LaunchTokenService (signs with the
+ *   operator's launchSecret from the DB), so the operator-mode harness needs DATABASE_URL +
+ *   JWT_SECRET in its env too (same as the server). Guest mode needs neither.
+ *
  * RUN:
  *   BASE_URL=http://localhost:3001 CLIENTS=100 DURATION_MS=25000 BET_RATE=0.5 \
  *     CASHOUT_AT=1.3 bun load/ws-load.ts
@@ -69,6 +86,12 @@ function buildConfig() {
       /^(1|true|yes)$/i.test(process.env.SCRAPE_METRICS ?? ""),
     LAG_WARN_MS: Number(process.env.LAG_WARN_MS ?? 50),
     TICK_GAP_WARN_MS: Number(process.env.TICK_GAP_WARN_MS ?? 1000),
+    // Auth mode (4.5c.3). "guest" (default) → /api/auth/guest internal wallet.
+    // "operator" → operator launch-token → play token (operator-wallet settlement path).
+    AUTH_MODE: (process.env.AUTH_MODE ?? "guest").toLowerCase() as "guest" | "operator",
+    OPERATOR_CODE: process.env.OPERATOR_CODE ?? "",
+    OPERATOR_CURRENCY: process.env.OPERATOR_CURRENCY ?? "DEMO",
+    PLAYER_PREFIX: process.env.PLAYER_PREFIX ?? "load",
   };
 }
 type Config = ReturnType<typeof buildConfig>;
@@ -214,6 +237,57 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
     return null;
   }
 
+  // ---- OPERATOR auth (4.5c.3): mint a one-time launch token (signed with the operator's
+  // own launchSecret via the production LaunchTokenService), exchange it at the real
+  // POST /api/operator/launch endpoint for a play token, return that. This drives the
+  // SeamlessOperatorWallet HTTP settlement path (settlement-SLA worst case). The launch
+  // token is one-time (jti consumed on session create), so we mint one per client. The
+  // LaunchTokenService + Prisma are loaded lazily, ONCE per worker, so guest mode (the
+  // common case) never pulls NestJS/Prisma into the generator.
+  let opMint:
+    | null
+    | ((playerId: string) => Promise<string>) = null;
+  let opSeq = 0;
+  async function ensureOperatorMint() {
+    if (opMint) return;
+    if (!cfg.OPERATOR_CODE) throw new Error("AUTH_MODE=operator requires OPERATOR_CODE");
+    const { PrismaClient } = await import("@prisma/client");
+    const { JwtService } = await import("@nestjs/jwt");
+    const { LaunchTokenService } = await import("../src/operator/launch-token.service");
+    const prisma = new PrismaClient();
+    const op = await prisma.operator.findUnique({ where: { code: cfg.OPERATOR_CODE } });
+    if (!op) throw new Error(`no operator with code "${cfg.OPERATOR_CODE}" — provision it first`);
+    if (!op.currencies.some((c: string) => c.toUpperCase() === cfg.OPERATOR_CURRENCY.toUpperCase())) {
+      throw new Error(`currency ${cfg.OPERATOR_CURRENCY} not in operator.currencies [${op.currencies.join(",")}]`);
+    }
+    const svc = new LaunchTokenService(new JwtService({}) as any, prisma as any);
+    opMint = (playerId: string) =>
+      svc.issue({ operatorId: op.id, playerId, currency: cfg.OPERATOR_CURRENCY, locale: "en" });
+  }
+  async function authOperator(): Promise<string | null> {
+    // Distinct synthetic player per client so they don't share one operator balance.
+    const playerId = `${cfg.PLAYER_PREFIX}-w${threadId}-${++opSeq}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const launch = await opMint!(playerId); // launchSecret-signed, one-time
+        const r = await fetch(`${cfg.BASE_URL}/api/operator/launch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: launch }),
+        });
+        if (r.ok) {
+          const j = (await r.json()) as { token?: string };
+          if (j.token) return j.token; // the PLAY token for the WS handshake
+        }
+      } catch {
+        /* transient — retry once */
+      }
+      if (attempt === 0) await sleepMs(100 + Math.random() * 400);
+    }
+    return null;
+  }
+  const authClient = cfg.AUTH_MODE === "operator" ? authOperator : authGuest;
+
   // One simulated player on one socket. Returns the socket so we can close it.
   function startClient(token: string) {
     const socket = io(cfg.BASE_URL, {
@@ -347,7 +421,7 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
         while (inFlight < cfg.AUTH_CONCURRENCY && idx < sliceSize && !stop) {
           idx++;
           inFlight++;
-          const p = authGuest()
+          const p = authClient()
             .then((token) => {
               if (token) {
                 sockets.push(startClient(token));
@@ -369,7 +443,16 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
     });
   }
 
-  parentPort?.postMessage({ type: "log", msg: `worker ${threadId} (slice ${sliceIndex}) ramping ${sliceSize} clients…` });
+  // Operator mode: stand up the launch-token minter once before ramping (fail loud here
+  // if the operator/currency is misconfigured, rather than silently authError every client).
+  if (cfg.AUTH_MODE === "operator" && sliceSize > 0) {
+    try {
+      await ensureOperatorMint();
+    } catch (e: any) {
+      parentPort?.postMessage({ type: "log", msg: `worker ${threadId} operator-mint setup FAILED: ${e?.message}` });
+    }
+  }
+  parentPort?.postMessage({ type: "log", msg: `worker ${threadId} (slice ${sliceIndex}) ramping ${sliceSize} clients [auth=${cfg.AUTH_MODE}]…` });
   // Stagger workers so all WORKERS don't fire their auth bursts at the same instant
   // (a synchronized thundering herd on the guest-auth DB-write path self-DoSes a
   // single-host run). Jitter proportional to slice index.
@@ -482,7 +565,8 @@ async function runOrchestrator(cfg: Config) {
   console.log("=== Vault Run WS load harness (Phase 4.4) ===");
   console.log(
     `target=${cfg.BASE_URL} clients=${cfg.CLIENTS} workers=${cfg.WORKERS} duration=${cfg.DURATION_MS}ms ` +
-      `betRate=${cfg.BET_RATE} cashoutAt=${cfg.CASHOUT_AT} betAmount=${cfg.BET_AMOUNT}`,
+      `betRate=${cfg.BET_RATE} cashoutAt=${cfg.CASHOUT_AT} betAmount=${cfg.BET_AMOUNT} auth=${cfg.AUTH_MODE}` +
+      (cfg.AUTH_MODE === "operator" ? ` operator=${cfg.OPERATOR_CODE} ccy=${cfg.OPERATOR_CURRENCY}` : ""),
   );
 
   // Confirm we're hitting a live API before generating load (don't trust a number
@@ -651,7 +735,11 @@ async function runOrchestrator(cfg: Config) {
           `(vs client connected=${totals.connected}; end is ~0 after drain — expected)`,
       );
       console.log(`  rounds_total: start=${before?.rounds_total ?? "?"} end=${after.rounds_total ?? "?"}  cashouts_total end=${after.cashouts_total ?? "?"}`);
-      console.log(`  NOTE: this is INTERNAL mode unless the server runs WALLET_PROVIDER_TYPE=operator. The settlement SLA worst case is OPERATOR mode (see load/README.md).`);
+      if (cfg.AUTH_MODE === "operator") {
+        console.log(`  NOTE: clients authed as OPERATOR players → settlement ran the SeamlessOperatorWallet HTTP path (the settlement-SLA WORST CASE). This server-side p99 IS the operator-mode number — assert it against 200ms.`);
+      } else {
+        console.log(`  NOTE: clients authed as GUESTS → INTERNAL play-money ledger (in-process). The settlement-SLA worst case is OPERATOR mode — re-run with AUTH_MODE=operator (see load/README.md).`);
+      }
     }
   }
 
