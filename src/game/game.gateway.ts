@@ -148,6 +148,22 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     e.on("settle", (p) => this.onSettle(p));
     e.on("settled", (p) => server.emit("round_settled", p));
 
+    // Phase 4.5c.2 — give the engine an AWAITABLE auto-cashout driver for its seamless
+    // failover-resume. When a survivor resumes a round whose crash elapsed during the
+    // failover gap, the engine must pay every due auto-cashout (target < crashPoint) at its
+    // target BEFORE revealing the crash. The engine has no BetsService (it injects the
+    // engine — a cycle), so we hand it the same evaluateAutoCashouts the onTick loop uses;
+    // the engine awaits it deterministically, then crashes. This only fires on resume — the
+    // normal running loop still drives autos through onTick. afterInit runs before any
+    // leader-acquired start(), so the driver is always registered before a resume can occur.
+    // LOAD-BEARING ORDERING: this driver AND the `onSettle` settle-wiring above are registered
+    // here in afterInit (OnGatewayInit), which Nest runs DURING init — strictly before
+    // ElectionService's first acquire in onApplicationBootstrap fires `leader-acquired`→start()
+    // →resume. So both seams are always wired before any resume can call them. If that first
+    // acquire were ever moved back to onModuleInit, the honor-pay (running-resume) and the
+    // settling-resume settle would silently fall through to the onTick fallback.
+    this.engine.setAutoCashoutDriver((m) => this.bets.evaluateAutoCashouts(m));
+
     this.interval = setInterval(() => this.onTick(), 120);
     // H2: in operator mode, retry payouts stuck in payout_pending (a won cash-out
     // whose operator credit we couldn't confirm) — a sweep at startup (recovers

@@ -24,6 +24,35 @@ interface EngineState {
   crashPoint: number; // SECRET — never exposed before the crash
 }
 
+/** The non-terminal round statuses — a round in any of these still owns open state. */
+const OPEN_PHASES: Phase[] = ["waiting", "betting", "running", "crashed", "settling"];
+
+/**
+ * Phase 4.5c.2 — resume staleness bound (ms). SCOPE: this bound gates the PRE-OUTCOME phases
+ * waiting + betting ONLY (enforced in unresumableReason). Those phases have no deterministic
+ * result yet and owe no money — they are merely counting down to the next transition against a
+ * live betting window / multiplier curve. On boot/failover we RESUME such a round only if its
+ * phaseEndsAt is still live or only just elapsed; if that deadline passed more than this long
+ * ago the round is treated as ANCIENT (a long process downtime, a clock jump, or a corrupt row)
+ * and is close+refunded + restarted fresh instead (betting refunds the live bets that can no
+ * longer fairly run; waiting has none, so it just starts fresh).
+ *
+ * The POST-OUTCOME phases running / crashed / settling are DELIBERATELY NOT bounded here: a
+ * crash that already happened (or is mid-flight) is fully deterministic and real money is owed
+ * on it (autos with target<crashPoint won, the rest busted), so resumeRound HONORS + FINISHES
+ * them regardless of age — never staleness-rejected.
+ *
+ * WHY a bound at all: resume re-attaches setTimeouts to absolute persisted epoch-ms deadlines.
+ * After a genuine failover the survivor takes over in <5s (leader-election SLA), so every live
+ * deadline is at most a few seconds stale — well inside this window — and the round resumes
+ * seamlessly. But a node DOWN for minutes/hours would otherwise "resume" a waiting/betting round
+ * whose window is long gone: there is no live curve to climb back into and clients have moved
+ * on, so refund-and-restart is the only correct, non-surprising outcome. 30s is comfortably
+ * above the failover budget yet far below a round's total lifetime (~11.6s + run), so a real
+ * failover always resumes and only a true outage refunds.
+ */
+const RESUME_MAX_STALENESS_MS = 30_000;
+
 @Injectable()
 export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(GameEngineService.name);
@@ -33,6 +62,23 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private state: EngineState | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+
+  /**
+   * Phase 4.5c.2 — optional auto-cashout driver, registered by the gateway (which owns
+   * BetsService). The engine deliberately has NO BetsService dependency (BetsService injects
+   * the engine — a forwardRef cycle otherwise; the gateway is the money-action driver via
+   * onTick/onSettle). The resume path's honor-then-crash branch needs to AWAIT the due
+   * auto-cashouts BEFORE revealing the crash; it does so through this hook so the engine
+   * stays decoupled. Returns the number paid (unused). When unregistered (should not happen
+   * — afterInit runs before any leader-acquired start()), the periodic onTick still honors
+   * the autos, just less deterministically, so the fallback is safe, only less tidy.
+   */
+  private autoCashoutDriver: ((multiplier: number) => Promise<unknown>) | null = null;
+
+  /** Register the auto-cashout driver (gateway.afterInit). Idempotent — last writer wins. */
+  setAutoCashoutDriver(fn: (multiplier: number) => Promise<unknown>) {
+    this.autoCashoutDriver = fn;
+  }
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -71,7 +117,15 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     if (this.running) return;
     this.running = true;
     await this.fairness.ensureChain();
-    await this.recoverInterruptedRounds(); // close any round left hanging by a restart
+    // Phase 4.5c.2: RESUME the in-flight round (seamless failover) instead of always
+    // close+refunding it. resumeOrRecover() either re-attaches the loop to the persisted
+    // round and continues from the correct phase, or — for an anomalous/corrupt/ancient
+    // row — falls back to the SAFE close+refund path and starts fresh. On a clean DB it
+    // finds no open round and simply opens a new one (single-node behavior unchanged).
+    if (await this.resumeOrRecover()) {
+      this.log.log("Game engine started (resumed in-flight round)");
+      return; // resumeRound() already armed the next transition — do NOT also enterWaiting()
+    }
     this.log.log("Game engine started");
     await this.enterWaiting();
   }
@@ -79,43 +133,286 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   /**
    * Crash-safe restart: a round left in betting/running/crashed/settling when the
    * process died is "zombie" — the in-memory loop is gone but the DB row + its
-   * bets are still open. On boot we close every such round and refund its
-   * still-active bets (idempotent `bet:{id}:restart_refund`, so a double boot
-   * can't double-pay). New rounds only start after this.
+   * bets are still open. This is the SAFE FALLBACK path: it closes every such round
+   * and refunds its still-active bets (idempotent `bet:{id}:restart_refund`, so a
+   * double boot can't double-pay). Phase 4.5c.2 prefers resumeOrRecover() (which
+   * RESUMES a clean candidate), but this remains both (a) the direct close+refund
+   * primitive the resume path calls for anomalies, and (b) the historical entry point
+   * still exercised by tests. Kept find-ALL-open so calling it bare closes everything.
    */
   private async recoverInterruptedRounds() {
     // H1: refund/clear stale 'reserving' bets first (regardless of round status).
     await this.recoverReservingBets();
-    const OPEN: Phase[] = ["waiting", "betting", "running", "crashed", "settling"];
     const stuck = await this.prisma.round.findMany({
-      where: { status: { in: OPEN as string[] } },
+      where: { status: { in: OPEN_PHASES as string[] } },
       select: { id: true },
     });
     if (stuck.length === 0) return;
     this.log.warn(`recovering ${stuck.length} interrupted round(s) from a restart`);
+    for (const r of stuck) await this.closeAndRefundRound(r.id);
+  }
 
-    for (const r of stuck) {
-      const activeBets = await this.prisma.bet.findMany({
-        where: { roundId: r.id, status: "active" },
-      });
-      for (const bet of activeBets) {
-        try {
-          await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
-            refType: "bet",
-            refId: bet.id,
-          });
-          await this.prisma.bet.update({
-            where: { id: bet.id },
-            data: { status: "cancelled", settledAt: new Date() },
-          });
-        } catch (e: any) {
-          this.log.error(`restart refund failed for bet ${bet.id}: ${e?.message}`);
-        }
+  /**
+   * Close ONE open round and refund its still-active bets — the shared close+refund
+   * primitive used by recoverInterruptedRounds() AND by the resume path's fallback for
+   * anomalous/corrupt rows. Idempotent: the `bet:{id}:restart_refund` credit key dedups in
+   * the ledger, so a double boot (or a resume that later re-closes) can never double-pay.
+   * Only `active` bets carry a live debit to refund; cashed_out/busted/cancelled are
+   * terminal and untouched. The round is force-marked `completed` (it never reached a real
+   * settlement). NOTE: this refunds — it does NOT honor a deterministic crash — so it is
+   * only ever used when a round is UNRESUMABLE (corrupt/ancient/anomalous), never as the
+   * normal path for a healthy in-flight round.
+   */
+  private async closeAndRefundRound(roundId: string) {
+    const activeBets = await this.prisma.bet.findMany({ where: { roundId, status: "active" } });
+    for (const bet of activeBets) {
+      try {
+        await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
+          refType: "bet",
+          refId: bet.id,
+        });
+        await this.prisma.bet.update({
+          where: { id: bet.id },
+          data: { status: "cancelled", settledAt: new Date() },
+        });
+      } catch (e: any) {
+        this.log.error(`restart refund failed for bet ${bet.id}: ${e?.message}`);
       }
-      await this.prisma.round.update({
-        where: { id: r.id },
-        data: { status: "completed", settledAt: new Date() },
-      });
+    }
+    await this.prisma.round.update({
+      where: { id: roundId },
+      data: { status: "completed", settledAt: new Date() },
+    });
+  }
+
+  /**
+   * Phase 4.5c.2 — SEAMLESS FAILOVER-RESUME entry point (called from start()).
+   *
+   * Instead of always close+refunding the in-flight round (the old behavior), a survivor
+   * that takes leadership mid-round RESUMES the persisted round and continues the
+   * deterministic provably-fair outcome. Returns true if it resumed (start() then does
+   * nothing more), false if there was nothing to resume (start() opens a fresh round).
+   *
+   * Steps (design): (1) clear stale reserving slots first; (2) find OPEN rounds newest-first;
+   * (3) older opens are anomalies (violate single-open-round) → close+refund + log loudly;
+   * (4) validate the newest candidate is resumable, else close+refund it (SAFE FALLBACK) and
+   * return false so start() opens fresh; (5/6) hand the clean candidate to resumeRound().
+   *
+   * The whole thing runs under our authoritative leadership (we just won the lock); every
+   * scheduled transition additionally fences via stillLeader(), and resumeRound() guards its
+   * own money writes — defense in depth.
+   */
+  private async resumeOrRecover(): Promise<boolean> {
+    // (1) H1: refund/clear stale 'reserving' bets first (pre-debit dust / stranded slots).
+    await this.recoverReservingBets();
+
+    // (2) All open rounds, NEWEST first. The healthy invariant is exactly one (or zero).
+    const open = await this.prisma.round.findMany({
+      where: { status: { in: OPEN_PHASES as string[] } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (open.length === 0) return false; // clean DB → start() opens a fresh round
+
+    // (3) Any round OLDER than the newest open one violates the single-open-round invariant
+    // (two simultaneously-open rounds should be impossible). Close+refund every stale extra
+    // and log loudly — never try to resume more than one loop.
+    const [candidate, ...stale] = open;
+    if (stale.length > 0) {
+      this.log.error(
+        `resume: found ${open.length} OPEN rounds (expected 1) — single-open-round invariant violated; ` +
+          `close+refunding ${stale.length} stale extra(s), resuming only the newest (${candidate.id})`,
+      );
+      for (const r of stale) await this.closeAndRefundRound(r.id);
+    }
+
+    // (4) Validate the candidate is resumable. A partial/corrupt row (missing seed,
+    // non-positive crash, a running/crashed/settling round with no startedAt or no
+    // phaseEndsAt) cannot be deterministically resumed → close+refund it (SAFE FALLBACK)
+    // and return false so start() opens fresh.
+    const reason = this.unresumableReason(candidate);
+    if (reason) {
+      this.log.warn(`resume: candidate round ${candidate.id} (${candidate.status}) NOT resumable (${reason}) → close+refund + fresh start`);
+      await this.closeAndRefundRound(candidate.id);
+      return false;
+    }
+
+    // (5/6) Clean candidate → resume the loop from its persisted phase.
+    await this.resumeRound(candidate);
+    return true;
+  }
+
+  /**
+   * Validate that a persisted open round can be deterministically resumed. Returns null
+   * when resumable, else a human reason for the fallback log. The crash time + the running
+   * multiplier are derived from startedAt + crashPoint + GROWTH, so those MUST be present
+   * once the round has left betting; phaseEndsAt anchors every other phase's countdown.
+   */
+  private unresumableReason(r: { status: string; seedId: string | null; crashPoint: Prisma.Decimal; startedAt: Date | null; phaseEndsAt: Date | null }): string | null {
+    if (!r.seedId) return "missing seedId";
+    const crash = Number(r.crashPoint);
+    // crashPoint is ALWAYS >= 1.00 by construction (the crash formula). The ONLY genuinely
+    // corrupt values are < 1 or NaN — reject those. A crashPoint of EXACTLY 1.00 is the
+    // deterministic instant-bust outcome (~3-4% of rounds), NOT corruption: admitting it
+    // uniformly for every phase makes resumeRound bust all bets (house keeps the stake), the
+    // committed outcome. Refunding it (the old `!(crash > 1)` guard) was a player-favorable
+    // conservation deviation (M-1). NaN is still rejected: `NaN >= 1` is false → `!(false)` = true.
+    if (!(crash >= 1)) return `corrupt crashPoint ${String(r.crashPoint)} (<1 or NaN)`;
+    if (r.phaseEndsAt === null) return "missing phaseEndsAt";
+    // Staleness bound — applies to waiting/betting ONLY. These phases have NO deterministic
+    // outcome yet (no crash has happened, no money is owed): the round is just counting down
+    // to its next transition against a live multiplier curve / open betting window. If that
+    // deadline passed more than RESUME_MAX_STALENESS_MS ago, the process was DOWN far longer
+    // than the failover budget — there is no live curve to climb back into and clients have
+    // moved on, so this is UNRESUMABLE → close+refund + fresh start (betting refunds the live
+    // bets that can no longer fairly run; waiting has none, so it just starts fresh). running/
+    // crashed/settling are DELIBERATELY excluded: their outcome is already deterministic and
+    // real money is owed on it, so they are HONORED + FINISHED regardless of age (see
+    // resumeRound) — never staleness-rejected.
+    if (r.status === "waiting" || r.status === "betting") {
+      const staleBy = Date.now() - r.phaseEndsAt.getTime();
+      if (staleBy > RESUME_MAX_STALENESS_MS) {
+        return `ancient ${r.status} (stale >${RESUME_MAX_STALENESS_MS}ms, by ${staleBy}ms)`;
+      }
+    }
+    // running/crashed/settling all imply the round already started → startedAt anchors the
+    // crash time. waiting/betting legitimately have no startedAt yet.
+    if ((r.status === "running" || r.status === "crashed" || r.status === "settling") && r.startedAt === null) {
+      return `status ${r.status} with no startedAt`;
+    }
+    return null;
+  }
+
+  /**
+   * Phase 4.5c.2 — resume the engine loop on a validated persisted round, continuing the
+   * DETERMINISTIC outcome from the correct phase. Rebuilds this.state from the DB row
+   * (incl. the server-only crashPoint), mirrors + re-emits so clients/followers re-sync,
+   * then re-arms the next transition. Every scheduled transition fences via stillLeader();
+   * the one money-bearing branch here (a crash that elapsed during the failover gap) is
+   * additionally guarded by an explicit stillLeader() check before it pays/settles.
+   *
+   * crashPoint is rebuilt into this.state (the leader needs it for the post-crash reveal +
+   * the authoritative cashOut gate) but is NEVER published — mirror() strips it, exactly as
+   * on the normal path.
+   */
+  private async resumeRound(r: { id: string; seedId: string; status: string; crashPoint: Prisma.Decimal; startedAt: Date | null; phaseEndsAt: Date | null }) {
+    const now = Date.now();
+    const phase = r.status as Phase;
+    const crashPoint = Number(r.crashPoint);
+    const startedAt = r.startedAt ? r.startedAt.getTime() : null;
+    const phaseEndsAt = r.phaseEndsAt!.getTime(); // validated non-null for every resumable phase
+    this.state = { roundId: r.id, seedId: r.seedId, phase, phaseEndsAt, startedAt, crashPoint };
+    // Re-publish the public state so followers' caches + clients immediately re-sync to the
+    // resumed round (NO crashPoint — mirror() strips it).
+    await this.mirror();
+    this.emitPhase(phase);
+    this.log.warn(`resume: re-attached round ${r.id} in phase '${phase}' (phaseEndsAt in ${phaseEndsAt - now}ms)`);
+
+    switch (phase) {
+      case "waiting":
+        // No bets exist yet (placeBet gates on 'betting'). Just continue the countdown.
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterBetting()));
+        return;
+
+      case "betting":
+        // Bets are active (reserved/debited) but the round hasn't started climbing. Continue
+        // the betting window; if it already elapsed during the gap, enterRunning() fires
+        // immediately (schedule clamps to >=0) and the round starts — deterministic, no money
+        // moved yet (cash-outs only open once running).
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterRunning()));
+        return;
+
+      case "running": {
+        // Crash time is fully deterministic from the persisted startedAt + crashPoint.
+        const crashTime = startedAt! + Math.max(0, Math.log(crashPoint) / GROWTH);
+        if (now < crashTime) {
+          // SEAMLESS CLIMB: the round is still mid-flight. this.state.phase is already
+          // 'running', so onTick resumes ticking + honoring autos and manual cash-outs work
+          // (4.5c.1 re-reads the authoritative Round). Just re-arm the crash at its real time.
+          this.schedule(crashTime - now, () => this.safe(() => this.enterCrashed()));
+          return;
+        }
+        // CRASH ELAPSED DURING THE GAP. We must HONOR the deterministic outcome — pay every
+        // bet whose autoCashout target is BELOW crashPoint at its target — rather than bust
+        // winners just because the survivor took over a moment late. This is money-bearing,
+        // so do it explicitly and deterministically (NOT via the onTick(120ms)↔schedule(0)
+        // race): with this.state.phase='running' and DB status still 'running', the driver's
+        // evaluateAutoCashouts(crashPoint) pays each due bet via cashOut(target), whose
+        // `mult < crashPoint` gate makes target>=crashPoint correctly BUST. AWAIT it, THEN
+        // enterCrashed() reveals + busts the remainder + drives settlement. Honored regardless
+        // of staleness — real money is owed on a crash that already happened.
+        this.log.warn(`resume: round ${r.id} crash elapsed during the gap (by ${now - crashTime}ms) — honoring due auto-cashouts then crashing`);
+        // Defense in depth: we ARE the lock-holder (just acquired), so this won't trip; but
+        // never move money on a stale leader. Fence before the honor-pay.
+        if (!(await this.stillLeader("resumeRound:running"))) return;
+        if (this.autoCashoutDriver) {
+          await this.autoCashoutDriver(crashPoint); // pays target<crashPoint at target; target>=crashPoint busts
+        } else {
+          // Driver not registered (shouldn't happen — afterInit precedes any start()). The
+          // periodic onTick will still honor the due autos before we cross into 'crashed';
+          // log so the non-deterministic fallback is visible rather than silent.
+          this.log.warn(`resume: no auto-cashout driver registered — relying on onTick to honor autos for round ${r.id}`);
+        }
+        await this.enterCrashed();
+        return;
+      }
+
+      case "crashed":
+        // The crash already happened. Ensure the seed is revealed (revealSeed is idempotent —
+        // an unconditional revealedAt write, safe to call twice), re-emit crash, then continue
+        // into settling. Active bets surviving into the crashed→settling gap are correctly
+        // busted by settleRound (4.5c.1 blocks any above-crash pay since status != running).
+        await this.fairness.revealSeed(this.state.seedId);
+        // fairness-L1 backfill: if the dead leader died in the ~1-statement window between
+        // writing status='crashed' and stamping crashedAt, the row can keep crashedAt=null
+        // forever (forensic-only — no fairness math reads it — but audit-untidy). Backfill it
+        // ONLY when still null, so it's idempotent and cheap (a no-op once stamped).
+        await this.prisma.round.updateMany({
+          where: { id: r.id, crashedAt: null },
+          data: { crashedAt: new Date() },
+        });
+        await this.mirror();
+        this.events.emit("crash", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterSettling()));
+        return;
+
+      case "settling": {
+        // H-1: the dead leader wrote status='settling' but may have died BEFORE/DURING
+        // settleRound's updateMany that busts the losing bets. We are NOT calling enterSettling
+        // here (it would re-do the status='settling' write + reschedule from a fresh deadline) —
+        // so we must DRIVE settlement ourselves, exactly like the forward path does: emit the
+        // 'settle' event now (→ gateway.onSettle → bets.settleRound), then schedule completion
+        // at the PERSISTED deadline. settleRound is idempotent (CAS on status='active'): if the
+        // dead leader already busted the bets it's a no-op; if it didn't, this finally busts the
+        // stranded losing bets. WITHOUT this emit they would be stranded status='active' inside a
+        // 'completed' round FOREVER (future boots scan only OPEN_PHASES, which excludes
+        // 'completed'). Emitting settle FIRST makes it deterministic; even if enterCompleted
+        // (status='completed') somehow raced ahead, settleRound busts by {roundId,status:active}
+        // REGARDLESS of round status, so the ordering race is benign either way.
+        this.events.emit("settle", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterCompleted()));
+        return;
+      }
+
+      case "completed":
+        // UNREACHABLE defensive belt (M2): 'completed' is terminal and is NEVER an OPEN_PHASES
+        // candidate, so resumeOrRecover never hands a completed round here. If we somehow DO
+        // land here it's a real anomaly — make it LOUD (error, not warn). We must NOT bare-return
+        // (that would leave NO loop scheduled = a silent stall); instead open a fresh round so
+        // the engine always keeps running.
+        this.log.error(`resume: UNREACHABLE terminal phase 'completed' for round ${r.id} — defensive fresh-round restart`);
+        await this.enterWaiting();
+        return;
+
+      default: {
+        // COMPILE-TIME exhaustiveness sink: every Phase is handled above, so `phase` here is
+        // `never`. This stops compiling if a new Phase is added without a case — but it must
+        // NOT stall at runtime, so we still log loudly and open a fresh round (the assignment
+        // is type-only; the recovery below always runs).
+        const _exhaustive: never = phase;
+        this.log.error(`resume: UNREACHABLE phase '${String(_exhaustive)}' for round ${r.id} — defensive fresh-round restart`);
+        await this.enterWaiting();
+        return;
+      }
     }
   }
 
