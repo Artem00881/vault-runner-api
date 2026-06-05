@@ -375,6 +375,12 @@ export class BetsService {
     // exposed) crashPoint — a cash-out at/above the crash means the bet busted. This makes
     // cash-out node-independent. On the leader / single node it never trips (the in-memory
     // phase flips to `crashed` atomically with the crash), so behavior there is unchanged.
+    // MULTI-NODE INVARIANT (concurrent-flip audit): this authoritative re-read is what
+    // SUBSTITUTES for a leadership fence on the money path. cashOut/onTick are isLeader()-gated
+    // (a fast boolean), NOT fence-gated — so a stale ex-leader's in-flight onTick can still
+    // reach cashOut for ~1 heartbeat. This DB re-read (+ the `status='active'` CAS below) is the
+    // ONLY thing keeping pay-out exactly-once and never-above-crash across nodes. Do NOT
+    // "optimize away" the bet.round re-read or fold the gate into the cached engine state.
     if (bet.round.status !== "running" || mult >= Number(bet.round.crashPoint)) {
       return { ok: false, reason: "too_late", userId, panel };
     }
