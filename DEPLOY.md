@@ -600,6 +600,71 @@ restart the Prometheus container, see §10).
 
 ---
 
+## 16. Scale-out foundation (Phase 4) — built 2026-06-05, NOT yet deployed
+
+> **State:** the Phase-4 **foundation** (sub-phases 4.0–4.4) is built + committed in
+> the repo but **not yet deployed** — prod still runs `e40cca1`. This section
+> documents the ops-relevant facts for when the foundation deploys (staging→prod via
+> the normal `./op-compose.sh up -d --build`, `deploy-verifier` gate). No new
+> required env/secret; it adds one additive migration + dev-only tooling.
+
+**Socket.IO Redis adapter (4.1) — single-node-safe, with a HARD scale gate.**
+The gateway can fan out WS broadcasts through Redis pub/sub
+(`src/redis/redis-io.adapter.ts`, dep `@socket.io/redis-adapter`), built from the
+existing `REDIS_URL` (a dedicated pub/sub connection pair). It is **inert on a single
+node** and **degrades gracefully to the in-memory adapter** if Redis is unreachable
+(the app still serves WS), so the deploy is safe on the current single VPS.
+- **⚠️ DO NOT run more than ONE WS/API node yet.** Leader-election / engine failover
+  is **Phase 4.5** (not built). Without it, **each node runs its own engine tick loop
+  → N parallel rounds** (a correctness break, not just a perf issue). Keep a single
+  `vaultrun-api` instance until 4.5 lands.
+- `main.ts` now calls `app.enableShutdownHooks()` so a rolling deploy drains WS
+  cleanly. No config change needed for the single-node prod.
+
+**`/health` fast-fail (4.0).** `/health` now races each dependency ping against an
+**800 ms timeout**, so a *hung* (not down) Redis returns **503 fast** instead of
+hanging the endpoint (the old `000`). The 200/503 contract and the §10 H5 slim-body
+(`{status:"ok"}` when `METRICS_TOKEN` is set) are unchanged — health checks /
+uptime probes behave the same, just fail faster on a wedged dependency.
+
+**Status indexes migration (4.3).** One additive, forward-only migration
+`20260605140000_scale_status_indexes` adds `@@index([status])` on the round + bet
+tables (`game_rounds_status_idx`, `game_bets_status_idx`) — speeds the
+recovery/sweep/reconcile/backlog queries as the tables grow. It runs automatically on
+boot (the container CMD's `prisma migrate deploy`); it just **adds indexes** (no data
+change). After it deploys, `prisma migrate status` advances from "10 migrations …
+up to date" to **11** on both hosts. Forward-only and harmless under a deeper rollback
+(an unused index on older code).
+
+**Client clock-sync (4.2).** A new `time_sync` WS event (echoes the client timestamp
++ server time via the ack) lets the browser estimate its clock offset (NTP-style).
+**No auth, no secrets, no new env** — pure timing; rate-limited like other WS events.
+
+**Load + reconciliation tooling (4.4, dev/ops, not on the request path).**
+- `load/ws-load.ts` — a Socket.IO bet/cash-out **load harness** (sharded
+  `socket.io-client`, reports **p50/p95/p99** settlement latency; `--scrape-metrics`
+  reads the server histogram; an inter-tick-gap measure is the 4.5 failover hook).
+  Run it ON staging against localhost (like k6, §13) — it writes rows to the DB, so
+  **never point it at prod**. `load/operator-wallet-stub.ts` is a stub seamless-wallet
+  endpoint for operator-mode runs.
+- `scripts/reconcile-check.ts` — the **SLA "0 reconciliation discrepancies" gate**:
+  re-derives the internal ledger-vs-bets money conservation and reports discrepancies.
+  **Mode-aware** — the ledger invariants are scoped to the **internal book**
+  (`operatorId IS NULL`); operator-wallet reconciliation is **out of scope until 4.5**.
+  Run example (staging or a scratch DB):
+  `DATABASE_URL=… REDIS_URL=… JWT_SECRET=x bun scripts/reconcile-check.ts`.
+- New SLA metrics are wired into the **existing** Prometheus `/metrics` (settlement
+  latency histogram, `vaultrun_ws_connections` gauge, the round counter) — they ship
+  with the normal backend deploy; **no Prometheus restart** is needed for the app-side
+  series (only new *alert rules* need the restart per §10). Baseline at build time
+  (internal, 100 clients): **settlement p99 ~25 ms**; the profiling target is
+  `place_bet` p99 ~176 ms under a synchronized burst (the per-round
+  `pg_advisory_xact_lock` serialization).
+
+Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION".
+
+---
+
 ## Notes
 - Data persists in Docker volumes (`pgdata`, `redisdata`) across restarts.
 - This is the **play-money** build. Real-money launch additionally needs the
