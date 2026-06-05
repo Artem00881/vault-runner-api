@@ -608,15 +608,24 @@ restart the Prometheus container, see §10).
 > **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
 > (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
 > at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
-> main), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
+> main *at the 2026-06-05 deploy*; origin/main has since advanced to `163d459`, docs/test-only
+> — see the state banner above), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
 > `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
 > (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
 > env/secret**. **Single-node-safe, multi-node-safe for cash-out, AND seamless on failover** —
 > the HARD multi-node release gate is **CLOSED** (4.5c.1) and failover now **RESUMES** the
-> live round (4.5c.2, see below). **STAY SINGLE-NODE** — the remaining multi-node item is the
-> **4.5c.3 at-scale SLA runs** (10k / 1e6, need infra) + a concurrent-leader-flip auditor
-> pass, and the multi-node cutover stays gated until those land + sign-off. The deploy facts
-> are recorded below for reproducibility / rollback.
+> live round (4.5c.2, see below). **2026-06-06 cleared TWO pre-cutover gates:** the
+> **concurrent-leader-flip `money-path-auditor` pass is DONE = MONEY-SAFE** (commit `163d459`,
+> all 4 races proven exactly-once, +Race-1 integration test) and the **failover<5s +
+> 0-discrepancy chaos SLAs are PROVEN ON STAGING** (real Hetzner infra — failover gaps
+> 486–1550 ms, 31 rounds / 38 leader SIGKILLs, `reconcile-check` RECONCILED / 0 money
+> discrepancies). **STAY SINGLE-NODE** — the multi-node cutover now stays gated only on the
+> **at-scale SLA runs that need real infra** (10k concurrent + the full 1e6-round soak), the
+> **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), and
+> `deploy-verifier` + sign-off. **api `origin/main` is now `163d459`; prod still runs
+> `6bfda18`** — the post-deploy `0c58e93` (this §16) + `163d459` (the Race-1 test/comment) are
+> **docs/test-only → NO prod redeploy needed**. The deploy facts are recorded below for
+> reproducibility / rollback.
 
 **Deploy record (2026-06-05).** Prod `e40cca1` → **`6bfda18`**; staging the same image
 (staging = Hetzner `ubuntu-4gb-fsn1-2`, 2 vCPU / 3.7 GB; deployed first). `deploy-verifier`
@@ -640,15 +649,19 @@ existing `REDIS_URL` (a dedicated pub/sub connection pair). It is **inert on a s
 node** and **degrades gracefully to the in-memory adapter** if Redis is unreachable
 (the app still serves WS), so the deploy is safe on the current single VPS.
 - **⚠️ DO NOT run more than ONE WS/API node yet — but the cash-out money hole is now
-  CLOSED and failover is now seamless.** Leader-election (4.5b) means only one elected
-  leader runs the engine tick loop; the follower cash-out-above-`crashPoint` hole is
-  **fixed in 4.5c.1** (the cash-out gate below); and failover now **RESUMES** the
-  in-flight round instead of close+refund (**4.5c.2**, below). What still blocks the
-  multi-node cutover is the **4.5c.3 full-scale SLA drills** (10k concurrency [multi-host]
-  + the full 1e6-round reconciliation soak [stable long-running multi-node env] — both
-  INFRA-GATED; the local drills already pass: failover ~1.6–2.0 s, settlement p99 ~25 ms,
-  0 reconciliation discrepancies) + a concurrent-leader-flip `money-path-auditor` pass.
-  Keep a single `vaultrun-api` instance until those land + `deploy-verifier` + USER sign-off.
+  CLOSED, failover is seamless, and the multi-node money path is AUDITED MONEY-SAFE.**
+  Leader-election (4.5b) means only one elected leader runs the engine tick loop; the
+  follower cash-out-above-`crashPoint` hole is **fixed in 4.5c.1** (the cash-out gate below);
+  failover now **RESUMES** the in-flight round instead of close+refund (**4.5c.2**, below);
+  and the **concurrent-leader-flip `money-path-auditor` pass is DONE = MONEY-SAFE** (`163d459`,
+  all 4 races proven exactly-once, +Race-1 integration test). What still blocks the multi-node
+  cutover is the **at-scale SLA drills that need real infra** (10k concurrency [multi-host] +
+  the full 1e6-round reconciliation soak [a bigger long-running box]) + the **multi-node prod
+  infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB). **failover<5s + 0-discrepancy
+  chaos are already PROVEN ON STAGING** (2026-06-06: failover gaps 486–1550 ms, 31 rounds /
+  38 leader SIGKILLs, `reconcile-check` RECONCILED / 0 money discrepancies; the prior local
+  drills also passed: failover ~1.6–2.0 s, settlement p99 ~25 ms). Keep a single `vaultrun-api`
+  instance until the at-scale runs + infra land + `deploy-verifier` + USER sign-off.
 - `main.ts` now calls `app.enableShutdownHooks()` so a rolling deploy drains WS
   cleanly. No config change needed for the single-node prod.
 
@@ -685,8 +698,10 @@ confirmed no TOCTOU gap. `crashPoint` is read **server-side only**, never return
 (`CashoutResult` is structurally `crashPoint`-free; `too_late` is the same non-informative
 reason as the existing phase gate). Leader/single-node behaviour is byte-for-byte unchanged
 (the gate never trips there). What still gates the multi-node cutover is **operational, not
-money**: the **4.5c.3 full-scale SLA runs** (10k / 1e6-round — need infra; 4.5c.2 seamless
-failover-resume is now DONE, see below) + a concurrent-leader-flip `money-path-auditor` pass +
+money** — the concurrent-leader-flip `money-path-auditor` pass is now **DONE = MONEY-SAFE**
+(`163d459`, all 4 races proven exactly-once) and failover<5s + 0-discrepancy chaos are
+**PROVEN on staging**: what remains is the **at-scale SLA runs** (10k / 1e6-round — need real
+infra) + the **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB) +
 `deploy-verifier` + USER sign-off.
 
 **`/health` fast-fail (4.0).** `/health` now races each dependency ping against an
@@ -758,16 +773,53 @@ reconciliation soak), `load/cluster-harness.ts` (node-boot + leader-mapping help
 reads the authoritative `engine_leadership.node_id`), and `load/ws-load.ts`'s new
 `AUTH_MODE=operator` (launch-token → play-token client driving the operator-wallet
 settlement path). Run ON staging/dedicated infra against localhost (like §13's k6) —
-they write rows to the DB, so **never point them at prod**. Measured locally: failover
-**~1.6–2.0 s (< 5 s)**, operator settlement **p99 ~25 ms (< 200 ms)**, **0 reconciliation
-discrepancies**. The full-scale **10k concurrent** (multi-host) + the full **1e6-round
-soak** (stable long-running multi-node env) are still to run on real infra. NOTE: a
-pre-existing `-600` residual on `reconcile-check.ts` invariant 1a = legitimate orphan
-ledger rows (bet rows DELETEd on placeBet-failure / reserving-recovery leave their
-FK-to-wallet ledger rows) — NOT a money leak (invariant 2 ledger↔balance is clean).
+they write rows to the DB, so **never point them at prod**.
+- **RAN ON STAGING (2026-06-06, Hetzner 2 vCPU / 3.7 GB, 2 election-eligible nodes sharing
+  staging's Postgres + Redis; prod never touched):** **failover < 5 s MET** — SIGKILL the
+  leader mid-`running`, gaps **486 / 1550 / 1487 ms** (worst = 31 % of budget), **seamless
+  resume confirmed every run** (same `roundId` rode through to its committed crash, **0
+  `restart_refund`**, fence monotonic; bottleneck = the ~2 s lease re-acquire poll, well
+  inside SLA). **0 reconciliation discrepancies under failure injection** — `recon-soak.ts`
+  **31 rounds / 38 leader SIGKILLs**, fence 8 → 45 monotonic (no split-brain), then the
+  canonical `scripts/reconcile-check.ts` = **RECONCILED / 0 money discrepancies**
+  (`|debit| 27650 == Σ stake`, `payout_credit 19760 == Σ paid wins`, 41 wallets / 0
+  mismatches, backlog 0); boot-recovery (ancient `betting` → close+refund, 16 bets
+  cancelled + 16 refund rows) also verified on real infra. Settlement p99 PARTIAL
+  (guest/internal ≤ 200 ms but bucket-coarse + co-tenancy noise on 2 vCPU; operator-mode
+  worst case still gated — needs a stub-wallet + `Operator` row on staging). Staging left
+  CLEAN (single-node restored, fence = 48, 0 backlog, no orphans).
+- **Prior LOCAL run:** failover **~1.6–2.0 s (< 5 s)**, operator settlement **p99 ~25 ms
+  (< 200 ms)**, **0 reconciliation discrepancies**.
+- **STILL INFRA-GATED:** the full-scale **10k concurrent** (a 2 vCPU box can't honestly
+  serve OR generate it — needs a bigger instance + multi-host load generation) + the full
+  **1e6-round soak** (multi-hour on a bigger box — proven at 31 failure-injected rounds) +
+  operator-mode settlement p99.
+- NOTE: a pre-existing `-600` residual on `reconcile-check.ts` invariant 1a = legitimate
+  orphan ledger rows (bet rows DELETEd on placeBet-failure / reserving-recovery leave their
+  FK-to-wallet ledger rows) — NOT a money leak (invariant 2 ledger↔balance is clean).
+
+**Concurrent-leader-flip money-path audit (2026-06-06, `163d459`) — MONEY-SAFE for the
+multi-node cutover.** The deferred pre-cutover `money-path-auditor` pass proved all four
+concurrent-leader-flip races **exactly-once**: Race 1 (resume honor-pay vs a stale ex-leader's
+`onTick` on the same bet — the `cashOut` CAS `updateMany WHERE status='active'` + idempotent
+ledger key `bet:{id}:payout` + the 4.5c.1 `mult < crashPoint` gate); Race 2 (split-brain lease
+overlap — `assertStillLeader`/fence + Belt A `UNIQUE(seed_id)` P2002-self-demote +
+`isLeader()`-gated drivers; money writes additionally CAS-serialized); Race 3 (`settleRound`
+vs honor-pay — shared `status='active'` predicate ⇒ a bet is `cashed_out` XOR `busted`, never
+twice; settle moves no money); Race 4 (`reserving`/`payout_pending` sweeps across nodes —
+claim-CAS + idempotent `restart_refund`/`payout` keys + leader-gated). Two non-blocking
+recommendations were BOTH closed in `163d459`: a one-line note at `src/game/bets.service.ts`
+(~line 378) that the authoritative `bet.round` re-read **substitutes for a leadership fence on
+the money path** (`cashOut`/`onTick` are `isLeader()`-gated, not fence-gated — do NOT optimize
+the re-read away), and a Race-1 INTEGRATION test `test/ha/concurrent-leader-cashout.test.ts`
+(two live `BetsService` instances sharing real Prisma + ledger run concurrent
+`evaluateAutoCashouts` on one active bet → exactly one `payout_credit`, single balance/loot
+increment, paid at target not the stale live mult; sibling above-crash busts; fail-first).
+Suite 610 → **612/3/0**, tsc clean.
 
 Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION" +
-"PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3".
+"PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3" +
+"PHASE 4.5c.3 — STAGING SLA RUNS + CONCURRENT-LEADER-FLIP MONEY-PATH AUDIT".
 
 ---
 
