@@ -41,7 +41,7 @@ for (const [name, payload] of invalid) {
 }
 
 test("onTimeSync echoes t0 + stamps serverTime", () => {
-  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any);
+  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any, {} as any);
   const before = Date.now();
   const res: any = gw.onTimeSync({ id: "c1" } as any, { t0: 999 });
   const after = Date.now();
@@ -53,14 +53,14 @@ test("onTimeSync echoes t0 + stamps serverTime", () => {
 });
 
 test("onTimeSync nulls a junk t0 (never echoes Infinity/NaN)", () => {
-  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any);
+  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any, {} as any);
   const res: any = gw.onTimeSync({ id: "c2" } as any, { t0: Infinity });
   expect(res.ok).toBe(true);
   expect(res.t0).toBe(null);
 });
 
 test("onTimeSync is rate-limited per socket (WS_MSG_LIMIT)", () => {
-  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any);
+  const gw = new GameGateway({} as any, {} as any, {} as any, {} as any, {} as any);
   const client = { id: "c3" } as any;
   let limited = false;
   // Burst well past the 15 msg/s bucket on one socket → must start rejecting.

@@ -5,6 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { RedisService } from "../redis/redis.service";
 import { FairnessService } from "../fairness/fairness.service";
 import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
+import { MetricsService } from "../metrics/metrics.service";
 
 export type Phase = "waiting" | "betting" | "running" | "crashed" | "settling" | "completed";
 
@@ -51,6 +52,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     @Inject(RedisService) private readonly redis: RedisService,
     @Inject(FairnessService) private readonly fairness: FairnessService,
     @Inject(WALLET_PROVIDER) private readonly wallet$: WalletProvider,
+    @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit() {
@@ -342,6 +344,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
       data: { status: "completed", settledAt: new Date() },
     });
     await this.mirror();
+    this.metrics.recordRound(); // metrics-only: vaultrun_rounds_total (Phase 4.4)
     this.events.emit("settled", { roundId: this.state.roundId });
     this.emitPhase("completed");
     this.schedule(PHASE_MS.completed, () => this.safe(() => this.enterWaiting()));

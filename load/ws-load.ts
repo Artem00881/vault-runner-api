@@ -1,0 +1,685 @@
+/**
+ * Sharded Socket.IO load + latency harness for Vault Run (Phase 4.4).
+ *
+ * WHY a custom harness (not Artillery/k6): the money path is phase-driven over
+ * Socket.IO (auth → wait for `betting` → `place_bet` → time the ack → on crash,
+ * time `bet_busted`). We already depend on `socket.io-client`; a bespoke loop
+ * gives full control of that flow and exact per-action timing off the ack.
+ *
+ * WHY worker_threads: one Node/Bun event loop can't keep ~10k sockets actively
+ * generating without the GENERATOR itself becoming the bottleneck (and then you're
+ * measuring your own loop lag, not the server). We shard CLIENTS across WORKERS
+ * (node:worker_threads — no new dependency). Each worker self-monitors event-loop
+ * lag and marks the run "suspect" if its own loop is starved, so a bad number from
+ * an overloaded generator can't be mistaken for a server SLA failure.
+ *
+ * GROUND TRUTH: client-observed numbers are a lower bound (they include client +
+ * network). For the real settlement SLA, pass `--scrape-metrics` (or
+ * SCRAPE_METRICS=1) to also GET /metrics at start+end and print the SERVER-side
+ * settlement p99 + ws_connections gauge next to the client numbers.
+ *
+ * Inter-tick gap tracking is the FAILOVER hook for 4.5: each worker records the
+ * gap between consecutive `multiplier_update`s; a long gap straddling a leader
+ * SIGKILL is the failover window. Here it just surfaces tick starvation under load.
+ *
+ * ENV KNOBS:
+ *   BASE_URL          (http://localhost:3001)  API base
+ *   CLIENTS           (200)   total sockets across all workers
+ *   WORKERS           (auto)  generator workers (default min(CLIENTS, cpus, 8))
+ *   DURATION_MS       (30000) steady-state run length after warmup
+ *   BET_RATE          (0.5)   fraction of clients that bet each betting window
+ *   BET_AMOUNT        (50)    stake (minor units)
+ *   CASHOUT_AT        (1.5)   auto-cashout target; <=1 disables (ride to bust)
+ *   ACK_TIMEOUT_MS    (5000)  per-action socket.io ack timeout
+ *   AUTH_CONCURRENCY  (50)    max in-flight guest-auth HTTP calls per worker (ramp)
+ *   RAW_SAMPLES       (0)     keep up to N raw latency samples per action (debug)
+ *   METRICS_TOKEN     ()      bearer for /metrics if the server locks it (H5)
+ *   SCRAPE_METRICS    (0)     1/true → scrape /metrics at start+end (or pass --scrape-metrics)
+ *   LAG_WARN_MS       (50)    per-worker event-loop-lag warn threshold
+ *   TICK_GAP_WARN_MS  (1000)  inter-tick-gap warn threshold (failover hook)
+ *
+ * RUN:
+ *   BASE_URL=http://localhost:3001 CLIENTS=100 DURATION_MS=25000 BET_RATE=0.5 \
+ *     CASHOUT_AT=1.3 bun load/ws-load.ts
+ */
+import { Worker, isMainThread, parentPort, workerData, threadId } from "node:worker_threads";
+import os from "node:os";
+
+// ---------------------------------------------------------------------------
+// Config (parsed once on the main thread, passed to workers via workerData).
+// ---------------------------------------------------------------------------
+function buildConfig() {
+  const CLIENTS = Number(process.env.CLIENTS ?? 200);
+  const cpuCount = os.cpus().length || 4;
+  const WORKERS = Math.max(1, Number(process.env.WORKERS ?? Math.min(CLIENTS, cpuCount, 8)));
+  return {
+    BASE_URL: process.env.BASE_URL ?? "http://localhost:3001",
+    CLIENTS,
+    WORKERS,
+    DURATION_MS: Number(process.env.DURATION_MS ?? 30000),
+    BET_RATE: Number(process.env.BET_RATE ?? 0.5),
+    BET_AMOUNT: Number(process.env.BET_AMOUNT ?? 50),
+    CASHOUT_AT: Number(process.env.CASHOUT_AT ?? 1.5),
+    ACK_TIMEOUT_MS: Number(process.env.ACK_TIMEOUT_MS ?? 5000),
+    AUTH_CONCURRENCY: Number(process.env.AUTH_CONCURRENCY ?? 50),
+    RAW_SAMPLES: Number(process.env.RAW_SAMPLES ?? 0),
+    METRICS_TOKEN: process.env.METRICS_TOKEN ?? "",
+    SCRAPE_METRICS:
+      process.argv.includes("--scrape-metrics") ||
+      /^(1|true|yes)$/i.test(process.env.SCRAPE_METRICS ?? ""),
+    LAG_WARN_MS: Number(process.env.LAG_WARN_MS ?? 50),
+    TICK_GAP_WARN_MS: Number(process.env.TICK_GAP_WARN_MS ?? 1000),
+  };
+}
+type Config = ReturnType<typeof buildConfig>;
+
+// ---------------------------------------------------------------------------
+// Compact log-ish histogram: fixed buckets in ms, mergeable across workers as a
+// plain array of counts (so we can sum them in the orchestrator). Percentiles are
+// the bucket UPPER bound — i.e. an upper-bound estimate, conservative for an SLA.
+// ---------------------------------------------------------------------------
+const BUCKETS_MS = [
+  1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 200, 300, 500, 800, 1300, 2100, 3400, 5500, Infinity,
+];
+function emptyHist(): number[] {
+  return new Array(BUCKETS_MS.length).fill(0);
+}
+function histObserve(h: number[], ms: number) {
+  for (let i = 0; i < BUCKETS_MS.length; i++) {
+    if (ms <= BUCKETS_MS[i]) {
+      h[i]++;
+      return;
+    }
+  }
+  h[h.length - 1]++;
+}
+function histMerge(into: number[], from: number[]) {
+  for (let i = 0; i < into.length; i++) into[i] += from[i] ?? 0;
+}
+function histCount(h: number[]): number {
+  return h.reduce((a, b) => a + b, 0);
+}
+function histPercentile(h: number[], p: number): number {
+  const total = histCount(h);
+  if (total === 0) return 0;
+  const target = p * total;
+  let cum = 0;
+  for (let i = 0; i < h.length; i++) {
+    cum += h[i];
+    if (cum >= target) return BUCKETS_MS[i];
+  }
+  return BUCKETS_MS[BUCKETS_MS.length - 1];
+}
+
+type ActionName = "place_bet" | "cash_out" | "bet_busted";
+interface WorkerReport {
+  threadId: number;
+  hist: Record<ActionName, number[]>;
+  counts: {
+    connected: number;
+    connectErrors: number;
+    authErrors: number;
+    betAccepted: number;
+    betRejected: number;
+    cashoutAccepted: number;
+    cashoutRejected: number;
+    busted: number;
+    ackTimeouts: number;
+    ticks: number;
+  };
+  rejectReasons: Record<string, number>;
+  tickGapHist: number[]; // inter-tick gap distribution (ms)
+  maxTickGapMs: number;
+  loopLagMaxMs: number;
+  suspect: boolean; // generator loop was starved → numbers from this worker are unreliable
+  raw?: Record<ActionName, number[]>;
+}
+
+// ===========================================================================
+// WORKER ROLE
+// ===========================================================================
+async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
+  // socket.io-client is a devDependency; load it lazily inside the worker.
+  const { io } = (await import("socket.io-client")) as typeof import("socket.io-client");
+
+  const hist: Record<ActionName, number[]> = {
+    place_bet: emptyHist(),
+    cash_out: emptyHist(),
+    bet_busted: emptyHist(),
+  };
+  const raw: Record<ActionName, number[]> = { place_bet: [], cash_out: [], bet_busted: [] };
+  const counts = {
+    connected: 0,
+    connectErrors: 0,
+    authErrors: 0,
+    betAccepted: 0,
+    betRejected: 0,
+    cashoutAccepted: 0,
+    cashoutRejected: 0,
+    busted: 0,
+    ackTimeouts: 0,
+    ticks: 0,
+  };
+  const rejectReasons: Record<string, number> = {};
+  const tickGapHist = emptyHist();
+  let maxTickGapMs = 0;
+  let loopLagMaxMs = 0;
+  let suspect = false;
+  let stop = false;
+
+  const obs = (a: ActionName, ms: number) => {
+    histObserve(hist[a], ms);
+    if (cfg.RAW_SAMPLES > 0 && raw[a].length < cfg.RAW_SAMPLES) raw[a].push(ms);
+  };
+
+  // Per-worker event-loop-lag guard: schedule a 20ms timer; the overshoot beyond
+  // 20ms is loop lag. If sustained high, this generator is starved → mark suspect.
+  let lagTimer: ReturnType<typeof setInterval> | null = null;
+  {
+    let last = Date.now();
+    let highStreak = 0;
+    lagTimer = setInterval(() => {
+      const now = Date.now();
+      const lag = now - last - 20;
+      last = now;
+      if (lag > loopLagMaxMs) loopLagMaxMs = lag;
+      if (lag > cfg.LAG_WARN_MS) {
+        highStreak++;
+        if (highStreak >= 5) suspect = true; // sustained starvation
+      } else {
+        highStreak = 0;
+      }
+    }, 20);
+  }
+
+  // Bounded-concurrency guest auth so a worker owning thousands of sockets ramps
+  // instead of opening every HTTP+WS at once (which would self-DoS the generator).
+  // One retry with backoff: guest auth is a multi-row DB write; under a startup
+  // burst a transient failure shouldn't permanently drop a client (which would
+  // understate concurrency). A persistent failure still counts as authError.
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function authGuest(): Promise<string | null> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(`${cfg.BASE_URL}/api/auth/guest`, { method: "POST" });
+        if (r.ok) {
+          const j = (await r.json()) as { token?: string };
+          if (j.token) return j.token;
+        }
+      } catch {
+        /* transient — retry once */
+      }
+      if (attempt === 0) await sleepMs(100 + Math.random() * 400);
+    }
+    return null;
+  }
+
+  // One simulated player on one socket. Returns the socket so we can close it.
+  function startClient(token: string) {
+    const socket = io(cfg.BASE_URL, {
+      transports: ["websocket"],
+      reconnection: false,
+      auth: { token },
+      timeout: cfg.ACK_TIMEOUT_MS,
+    });
+
+    // Per-socket round bookkeeping.
+    let lastBetRound: string | null = null; // betting window we've bet this round
+    let activeRound: string | null = null; // round we currently hold a live bet on
+    let cashedThisRound = false;
+    let lastTickAt = 0;
+    let crashSeenAt = 0; // when we saw the crash for the round we hold a bet on
+    const willBet = Math.random() < cfg.BET_RATE; // this client bets each window?
+
+    socket.on("connect", () => {
+      counts.connected++;
+    });
+    socket.on("connect_error", () => {
+      counts.connectErrors++;
+    });
+
+    socket.on("round_state", (s: any) => {
+      if (!s || stop) return;
+      if (s.phase === "betting" && willBet && s.roundId !== lastBetRound) {
+        lastBetRound = s.roundId;
+        cashedThisRound = false;
+        const payload: any = { panel: "A", amount: cfg.BET_AMOUNT };
+        if (cfg.CASHOUT_AT > 1) payload.autoCashout = cfg.CASHOUT_AT;
+        const t0 = Date.now();
+        // socket.io ack with timeout — the gateway handler returns `r` to the ack.
+        socket
+          .timeout(cfg.ACK_TIMEOUT_MS)
+          .emit("place_bet", payload, (err: unknown, r: any) => {
+            const dt = Date.now() - t0;
+            if (err) {
+              counts.ackTimeouts++;
+              return;
+            }
+            obs("place_bet", dt);
+            if (r?.ok) {
+              counts.betAccepted++;
+              activeRound = s.roundId;
+            } else {
+              counts.betRejected++;
+              const reason = r?.reason ?? "unknown";
+              rejectReasons[reason] = (rejectReasons[reason] ?? 0) + 1;
+            }
+          });
+      }
+    });
+
+    // Inter-tick gap (failover hook + tick-starvation signal).
+    socket.on("multiplier_update", (m: any) => {
+      counts.ticks++;
+      const now = Date.now();
+      if (lastTickAt > 0) {
+        const gap = now - lastTickAt;
+        histObserve(tickGapHist, gap);
+        if (gap > maxTickGapMs) maxTickGapMs = gap;
+      }
+      lastTickAt = now;
+
+      // Manual cash-out path: if no auto-cashout is configured, cash out the first
+      // time we cross a small target so the cash_out ack leg is exercised too.
+      if (
+        cfg.CASHOUT_AT <= 1 &&
+        activeRound === m.roundId &&
+        !cashedThisRound &&
+        m.multiplier >= 1.2
+      ) {
+        cashedThisRound = true;
+        const t0 = Date.now();
+        socket.timeout(cfg.ACK_TIMEOUT_MS).emit("cash_out", { panel: "A" }, (err: unknown, r: any) => {
+          const dt = Date.now() - t0;
+          if (err) {
+            counts.ackTimeouts++;
+            return;
+          }
+          // Time the manual cash_out ACK leg (request→response). The accept COUNT is
+          // taken from the `cashout_accepted` push handler below (fires for both manual
+          // and server-auto cash-outs) so we don't double-count the manual path.
+          obs("cash_out", dt);
+          if (!r?.ok) counts.cashoutRejected++;
+        });
+      }
+    });
+
+    // Cash-out confirmation push — fires for BOTH manual cash-outs and server-driven
+    // auto-cashout. Single source of truth for the accepted count (no ack double-count).
+    socket.on("cashout_accepted", () => {
+      counts.cashoutAccepted++;
+      cashedThisRound = true;
+      activeRound = null; // a cashed bet won't bust → stop the bet_busted timer for it
+    });
+
+    socket.on("round_crashed", (p: any) => {
+      // Mark when the crash for OUR active round was observed. NOTE: bet_busted is NOT
+      // emitted now — the engine holds a deliberate `crashed`(2.5s)+`settling`(0.5s)
+      // pacing window before settleRound runs, so the client crash→busted gap is
+      // DOMINATED by that pacing, NOT settlement compute. The real settlement SLA is
+      // the SERVER-side vaultrun_settlement_latency_ms (--scrape-metrics); this client
+      // leg only proves the fan-out reaches every client. Labeled accordingly below.
+      if (activeRound && p?.roundId === activeRound) crashSeenAt = Date.now();
+    });
+
+    socket.on("bet_busted", () => {
+      counts.busted++;
+      // Settlement fan-out latency for a losing bet: crash seen → bet_busted here.
+      if (crashSeenAt > 0) {
+        obs("bet_busted", Date.now() - crashSeenAt);
+        crashSeenAt = 0;
+      }
+      activeRound = null;
+    });
+
+    return socket;
+  }
+
+  // Ramp up this worker's slice with bounded auth concurrency.
+  const sockets: any[] = [];
+  let launched = 0;
+  async function rampUp() {
+    const queue: Promise<void>[] = [];
+    let inFlight = 0;
+    let idx = 0;
+    return new Promise<void>((resolve) => {
+      const pump = () => {
+        while (inFlight < cfg.AUTH_CONCURRENCY && idx < sliceSize && !stop) {
+          idx++;
+          inFlight++;
+          const p = authGuest()
+            .then((token) => {
+              if (token) {
+                sockets.push(startClient(token));
+                launched++;
+              } else {
+                counts.authErrors++;
+              }
+            })
+            .finally(() => {
+              inFlight--;
+              if (idx >= sliceSize && inFlight === 0) resolve();
+              else pump();
+            });
+          queue.push(p);
+        }
+      };
+      pump();
+      if (sliceSize === 0) resolve();
+    });
+  }
+
+  parentPort?.postMessage({ type: "log", msg: `worker ${threadId} (slice ${sliceIndex}) ramping ${sliceSize} clients…` });
+  // Stagger workers so all WORKERS don't fire their auth bursts at the same instant
+  // (a synchronized thundering herd on the guest-auth DB-write path self-DoSes a
+  // single-host run). Jitter proportional to slice index.
+  await sleepMs(sliceIndex * 75 + Math.random() * 150);
+  const rampStart = Date.now();
+  await rampUp();
+  parentPort?.postMessage({
+    type: "log",
+    msg: `worker ${threadId} ramped ${launched}/${sliceSize} clients in ${Date.now() - rampStart}ms`,
+  });
+
+  // Listen for the orchestrator's stop signal, then settle briefly so in-flight
+  // acks / a final bet_busted land before we snapshot + report.
+  await new Promise<void>((resolve) => {
+    parentPort?.on("message", (msg: any) => {
+      if (msg?.type === "stop") resolve();
+    });
+  });
+  stop = true;
+  await new Promise((r) => setTimeout(r, 1500)); // drain in-flight settlement events
+  if (lagTimer) clearInterval(lagTimer);
+
+  // Maxed tick gap → suspect only flags the GENERATOR loop, not the server; report
+  // the tick gap raw and let the orchestrator decide what it means.
+  const report: WorkerReport = {
+    threadId,
+    hist,
+    counts,
+    rejectReasons,
+    tickGapHist,
+    maxTickGapMs,
+    loopLagMaxMs,
+    suspect,
+    raw: cfg.RAW_SAMPLES > 0 ? raw : undefined,
+  };
+  parentPort?.postMessage({ type: "report", report });
+  for (const s of sockets) s.close();
+}
+
+// ===========================================================================
+// ORCHESTRATOR ROLE (main thread)
+// ===========================================================================
+async function scrapeMetrics(cfg: Config): Promise<Record<string, number>> {
+  const headers: Record<string, string> = {};
+  if (cfg.METRICS_TOKEN) headers.authorization = `Bearer ${cfg.METRICS_TOKEN}`;
+  const out: Record<string, number> = {};
+  try {
+    const r = await fetch(`${cfg.BASE_URL}/metrics`, { headers });
+    if (!r.ok) {
+      out.__error = r.status;
+      return out;
+    }
+    const text = await r.text();
+    // Parse the settlement histogram buckets + count/sum, the ws_connections gauge,
+    // and rounds_total so we can print server-side p99 alongside the client number.
+    const lines = text.split("\n");
+    const buckets: { le: number; v: number }[] = [];
+    for (const line of lines) {
+      if (line.startsWith("#")) continue;
+      let m = line.match(/^vaultrun_settlement_latency_ms_bucket\{[^}]*le="([^"]+)"[^}]*\}\s+([0-9.e+]+)/);
+      if (m) {
+        buckets.push({ le: m[1] === "+Inf" ? Infinity : Number(m[1]), v: Number(m[2]) });
+        continue;
+      }
+      m = line.match(/^vaultrun_settlement_latency_ms_count\b[^\s]*\s+([0-9.e+]+)/);
+      if (m) out.settlement_count = Number(m[1]);
+      m = line.match(/^vaultrun_settlement_latency_ms_sum\b[^\s]*\s+([0-9.e+]+)/);
+      if (m) out.settlement_sum = Number(m[1]);
+      m = line.match(/^vaultrun_ws_connections\b[^\s]*\s+([0-9.e+]+)/);
+      if (m) out.ws_connections = Number(m[1]);
+      m = line.match(/^vaultrun_rounds_total\b[^\s]*\s+([0-9.e+]+)/);
+      if (m) out.rounds_total = Number(m[1]);
+      m = line.match(/^vaultrun_cashouts_total\b[^\s]*\s+([0-9.e+]+)/);
+      if (m) out.cashouts_total = Number(m[1]);
+    }
+    // Server-side p99 from cumulative buckets.
+    buckets.sort((a, b) => a.le - b.le);
+    out.__buckets = buckets.length;
+    (out as any).__bucketData = buckets;
+  } catch (e: any) {
+    out.__error = -1;
+  }
+  return out;
+}
+
+// Server-side percentile from Prometheus cumulative histogram buckets.
+function serverPercentile(buckets: { le: number; v: number }[], total: number, p: number): number {
+  if (!buckets.length || total === 0) return 0;
+  const target = p * total;
+  for (const b of buckets) {
+    if (b.v >= target) return b.le;
+  }
+  return buckets[buckets.length - 1].le;
+}
+
+function fmtRow(name: string, h: number[]) {
+  const n = histCount(h);
+  if (n === 0) return `  ${name.padEnd(12)} ${"(no samples)".padStart(10)}`;
+  const p = (q: number) => {
+    const v = histPercentile(h, q);
+    return v === Infinity ? ">5500" : String(v);
+  };
+  return (
+    `  ${name.padEnd(12)} n=${String(n).padEnd(8)} ` +
+    `p50=${p(0.5).padStart(5)}  p95=${p(0.95).padStart(5)}  p99=${p(0.99).padStart(6)}  max≈${p(1).padStart(6)}  (ms, bucket-upper)`
+  );
+}
+
+async function runOrchestrator(cfg: Config) {
+  console.log("=== Vault Run WS load harness (Phase 4.4) ===");
+  console.log(
+    `target=${cfg.BASE_URL} clients=${cfg.CLIENTS} workers=${cfg.WORKERS} duration=${cfg.DURATION_MS}ms ` +
+      `betRate=${cfg.BET_RATE} cashoutAt=${cfg.CASHOUT_AT} betAmount=${cfg.BET_AMOUNT}`,
+  );
+
+  // Confirm we're hitting a live API before generating load (don't trust a number
+  // against a dead/ wrong server).
+  try {
+    const h = await fetch(`${cfg.BASE_URL}/health`).then((r) => r.json());
+    console.log(`health: ${JSON.stringify(h)}`);
+  } catch (e: any) {
+    console.error(`health check FAILED against ${cfg.BASE_URL} — is the server up? (${e?.message})`);
+    process.exit(2);
+  }
+
+  const before = cfg.SCRAPE_METRICS ? await scrapeMetrics(cfg) : null;
+  if (before) console.log(`/metrics @start: ws_connections=${before.ws_connections ?? "?"} settlement_count=${before.settlement_count ?? "?"} rounds_total=${before.rounds_total ?? "?"}`);
+
+  // Spread CLIENTS across WORKERS as evenly as possible.
+  const base = Math.floor(cfg.CLIENTS / cfg.WORKERS);
+  const rem = cfg.CLIENTS % cfg.WORKERS;
+  const slices = Array.from({ length: cfg.WORKERS }, (_, i) => base + (i < rem ? 1 : 0));
+
+  const reports: WorkerReport[] = [];
+  const workers: Worker[] = [];
+  let reported = 0;
+  let midRunWs = -1; // ws_connections gauge sampled mid-run (sockets still live)
+
+  await new Promise<void>((resolveAll) => {
+    slices.forEach((sliceSize, i) => {
+      const w = new Worker(__filename, {
+        workerData: { role: "worker", cfg, sliceSize, sliceIndex: i },
+      });
+      workers.push(w);
+      w.on("message", (msg: any) => {
+        if (msg?.type === "log") console.log(`  · ${msg.msg}`);
+        else if (msg?.type === "report") {
+          reports.push(msg.report);
+          reported++;
+          if (reported === workers.length) resolveAll();
+        }
+      });
+      w.on("error", (e) => console.error(`worker ${i} error:`, e?.message));
+    });
+
+    // Mid-run scrape (sockets still live) so we can report the ws_connections gauge
+    // at peak — the post-run scrape sees 0 (all sockets closed during drain).
+    if (cfg.SCRAPE_METRICS) {
+      setTimeout(
+        () => {
+          void scrapeMetrics(cfg).then((m) => {
+            if (!m.__error) midRunWs = m.ws_connections ?? 0;
+          });
+        },
+        Math.floor(cfg.DURATION_MS * 0.7),
+      );
+    }
+
+    // Steady-state window, THEN tell every worker to stop + report.
+    setTimeout(() => {
+      console.log(`steady-state ${cfg.DURATION_MS}ms elapsed — signalling stop…`);
+      for (const w of workers) w.postMessage({ type: "stop" });
+    }, cfg.DURATION_MS);
+  });
+
+  for (const w of workers) await w.terminate();
+
+  // ---- aggregate ----
+  const merged: Record<ActionName, number[]> = {
+    place_bet: emptyHist(),
+    cash_out: emptyHist(),
+    bet_busted: emptyHist(),
+  };
+  const totals = {
+    connected: 0,
+    connectErrors: 0,
+    authErrors: 0,
+    betAccepted: 0,
+    betRejected: 0,
+    cashoutAccepted: 0,
+    cashoutRejected: 0,
+    busted: 0,
+    ackTimeouts: 0,
+    ticks: 0,
+  };
+  const rejectReasons: Record<string, number> = {};
+  const tickGap = emptyHist();
+  let maxTickGap = 0;
+  let loopLagMax = 0;
+  let anySuspect = false;
+  for (const r of reports) {
+    for (const a of ["place_bet", "cash_out", "bet_busted"] as ActionName[]) histMerge(merged[a], r.hist[a]);
+    for (const k of Object.keys(totals) as (keyof typeof totals)[]) totals[k] += r.counts[k];
+    for (const [reason, n] of Object.entries(r.rejectReasons)) rejectReasons[reason] = (rejectReasons[reason] ?? 0) + n;
+    histMerge(tickGap, r.tickGapHist);
+    maxTickGap = Math.max(maxTickGap, r.maxTickGapMs);
+    loopLagMax = Math.max(loopLagMax, r.loopLagMaxMs);
+    anySuspect = anySuspect || r.suspect;
+  }
+
+  const after = cfg.SCRAPE_METRICS ? await scrapeMetrics(cfg) : null;
+
+  // ---- report ----
+  console.log("\n----- CLIENT-OBSERVED LATENCY (ms, percentiles are bucket upper-bounds) -----");
+  console.log("  (place_bet/cash_out = emit→ack roundtrip; the SETTLEMENT SLA is server-side — see /metrics below)");
+  console.log(fmtRow("place_bet", merged.place_bet));
+  console.log(fmtRow("cash_out", merged.cash_out));
+  console.log(fmtRow("bet_busted", merged.bet_busted));
+  console.log("  NOTE: bet_busted = crash→busted-push; INCLUDES the engine's deliberate ~3s crashed+settling");
+  console.log("        pacing, so it is NOT settlement compute. Read server settlement_latency_ms for the SLA.");
+
+  console.log("\n----- INTER-TICK GAP (failover/starvation hook) -----");
+  console.log(fmtRow("tick_gap", tickGap));
+  console.log(`  maxTickGap≈${maxTickGap}ms (target: ~120ms cadence; a long straddling gap = the failover window in 4.5)`);
+  // A big client-side tick gap is AMBIGUOUS on a single host: it can be the SERVER
+  // stalling its onTick loop, OR the GENERATOR threads being CPU-starved (so they
+  // process incoming ticks late). Cross-check against the server's round cadence: if
+  // the server completed the expected number of rounds (~one per ~12-15s), the gap is
+  // generator-side, not a server tick stall. (In the 4.5 failover drill, on dedicated
+  // generator hosts, a big gap IS the server failover window.)
+  if (maxTickGap > cfg.TICK_GAP_WARN_MS) {
+    const roundsDelta =
+      cfg.SCRAPE_METRICS && after && before ? (after.rounds_total ?? 0) - (before.rounds_total ?? 0) : -1;
+    if (roundsDelta >= 0) {
+      const expectedRounds = Math.floor(cfg.DURATION_MS / 14000); // ~14s/round
+      console.log(
+        `  cross-check: server completed ${roundsDelta} round(s) during the run (expected ~${expectedRounds}). ` +
+          (roundsDelta >= expectedRounds
+            ? "Server cadence OK ⇒ the big gap is GENERATOR-side starvation (single host) — shard across machines for a clean 10k run."
+            : "Server completed FEWER rounds than expected ⇒ a real server-side stall worth investigating."),
+      );
+    } else {
+      console.log("  (pass --scrape-metrics to cross-check the gap against server round cadence.)");
+    }
+  }
+
+  console.log("\n----- COUNTS -----");
+  console.log(`  sockets: connected=${totals.connected}/${cfg.CLIENTS} connectErrors=${totals.connectErrors} authErrors=${totals.authErrors}`);
+  console.log(`  bets:    accepted=${totals.betAccepted} rejected=${totals.betRejected} ackTimeouts=${totals.ackTimeouts}`);
+  console.log(`  cashout: accepted=${totals.cashoutAccepted} rejected=${totals.cashoutRejected}`);
+  console.log(`  busted:  ${totals.busted}   ticksReceived=${totals.ticks}`);
+  if (Object.keys(rejectReasons).length) console.log(`  rejectReasons: ${JSON.stringify(rejectReasons)}`);
+
+  console.log("\n----- GENERATOR HEALTH -----");
+  console.log(`  worker loop-lag max≈${loopLagMax}ms (warn>${cfg.LAG_WARN_MS}ms)`);
+  if (anySuspect) {
+    console.log("  *** RUN SUSPECT: at least one generator worker's event loop was starved.");
+    console.log("  *** The CLIENT numbers above may reflect generator lag, not the server. Add WORKERS / spread across machines and re-run.");
+  } else {
+    console.log("  generator loops healthy — client numbers reflect server behaviour (modulo network).");
+  }
+
+  if (cfg.SCRAPE_METRICS && after) {
+    console.log("\n----- SERVER-SIDE /metrics (GROUND TRUTH for the settlement SLA) -----");
+    if (after.__error) {
+      console.log(`  /metrics scrape failed (status ${after.__error}). If locked (H5), pass METRICS_TOKEN=…`);
+    } else {
+      const bd = (after as any).__bucketData as { le: number; v: number }[] | undefined;
+      const cStart = before?.settlement_count ?? 0;
+      const cEnd = after.settlement_count ?? 0;
+      // Cumulative-since-boot p99 (the histogram isn't windowed; this is all-time).
+      const p99 = bd ? serverPercentile(bd, cEnd, 0.99) : 0;
+      const p50 = bd ? serverPercentile(bd, cEnd, 0.5) : 0;
+      const p95 = bd ? serverPercentile(bd, cEnd, 0.95) : 0;
+      console.log(`  settlement_latency_ms (all-time): p50≈${p50} p95≈${p95} p99≈${p99}  (buckets: 10/25/50/100/200/500/1000)`);
+      console.log(`  settlement observations: start=${cStart} end=${cEnd} (+${cEnd - cStart} during run)`);
+      console.log(
+        `  ws_connections gauge: mid-run=${midRunWs >= 0 ? midRunWs : "?"} (peak, sockets live) end=${after.ws_connections ?? "?"} ` +
+          `(vs client connected=${totals.connected}; end is ~0 after drain — expected)`,
+      );
+      console.log(`  rounds_total: start=${before?.rounds_total ?? "?"} end=${after.rounds_total ?? "?"}  cashouts_total end=${after.cashouts_total ?? "?"}`);
+      console.log(`  NOTE: this is INTERNAL mode unless the server runs WALLET_PROVIDER_TYPE=operator. The settlement SLA worst case is OPERATOR mode (see load/README.md).`);
+    }
+  }
+
+  console.log("\n=== done ===");
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Entrypoint dispatch.
+// ---------------------------------------------------------------------------
+if (isMainThread) {
+  runOrchestrator(buildConfig());
+} else {
+  const { cfg, sliceSize, sliceIndex } = workerData as { cfg: Config; sliceSize: number; sliceIndex: number };
+  runWorker(cfg, sliceSize, sliceIndex).catch((e) => {
+    parentPort?.postMessage({ type: "log", msg: `worker ${threadId} crashed: ${e?.message}` });
+    parentPort?.postMessage({
+      type: "report",
+      report: {
+        threadId,
+        hist: { place_bet: emptyHist(), cash_out: emptyHist(), bet_busted: emptyHist() },
+        counts: { connected: 0, connectErrors: 0, authErrors: 0, betAccepted: 0, betRejected: 0, cashoutAccepted: 0, cashoutRejected: 0, busted: 0, ackTimeouts: 0, ticks: 0 },
+        rejectReasons: {},
+        tickGapHist: emptyHist(),
+        maxTickGapMs: 0,
+        loopLagMaxMs: 0,
+        suspect: true,
+      } as WorkerReport,
+    });
+  });
+}

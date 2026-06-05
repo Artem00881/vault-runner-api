@@ -114,7 +114,7 @@ function operatorEngine(sandbox: SandboxOperator) {
     { timeoutMs: 1000 },
   );
   const provider = new SeamlessOperatorWallet(client, sessions.resolver());
-  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider);
+  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider, {} as any);
   // recoverReservingBets() is private; drive it via recoverInterruptedRounds() —
   // the exact entry start() calls on boot (reserving-recovery-h1.test.ts does the
   // same). Returns the WalletProvider too so a test can debit directly.

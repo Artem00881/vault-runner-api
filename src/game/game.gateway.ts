@@ -18,6 +18,7 @@ import { deserializeBetLimits } from "../operator/bet-limits";
 import { deserializeRg, type EffectiveRg } from "../operator/rg-config";
 import type { PerBetLimits } from "./risk.service";
 import { placeSchema, panelSchema, timeSyncSchema } from "./ws-schemas";
+import { MetricsService } from "../metrics/metrics.service";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -128,6 +129,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @Inject(BetsService) private readonly bets: BetsService,
     @Inject(JwtService) private readonly jwt: JwtService,
     @Inject(GameSessionService) private readonly sessions: GameSessionService,
+    @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
   afterInit(server: Server) {
@@ -340,6 +342,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
     const s = this.engine.getPublicState();
     if (s) client.emit("round_state", s);
+    // metrics-only: live socket count from the server's own registry (Phase 4.4).
+    this.metrics.setWsConnections(this.server.sockets.sockets.size);
   }
 
   handleDisconnect(client: Socket) {
@@ -348,6 +352,13 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.userSockets.delete(userId);
     }
     this.msgRate.delete(client.id);
+    // metrics-only: reflect the live socket count, excluding THIS disconnecting socket.
+    // socket.io may already have removed it from the map by now (then size is correct);
+    // if not, subtract it. Floor at 0 so a mass-disconnect can never drive the gauge
+    // negative (Phase 4.4).
+    const size = this.server.sockets.sockets.size;
+    const live = this.server.sockets.sockets.has(client.id) ? size - 1 : size;
+    this.metrics.setWsConnections(Math.max(0, live));
   }
 
   // ---- realtime drivers ----
@@ -376,7 +387,11 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   private async onSettle(p: { roundId: string }) {
+    // metrics-only: time the crash-leg settlement (crash → busted bets committed)
+    // into the shared settlement histogram (Phase 4.4, decision §2 Option A).
+    const t0 = Date.now();
     const busted = await this.bets.settleRound(p.roundId);
+    this.metrics.observeSettlementLatency(Date.now() - t0);
     for (const b of busted) {
       this.server.to(userRoom(b.userId)).emit("bet_busted", { panel: b.panel });
     }

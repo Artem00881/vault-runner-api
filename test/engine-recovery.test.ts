@@ -11,7 +11,7 @@ const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};
-const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger);
+const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any);
 const recover = () => (engine as any).recoverInterruptedRounds();
 
 // Track everything we create so afterAll can purge it — otherwise these

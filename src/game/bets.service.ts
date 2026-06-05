@@ -355,6 +355,7 @@ export class BetsService {
    * (pays at the exact target); manual cash-outs pay at the live multiplier.
    */
   async cashOut(userId: string, panel: Panel, atMultiplier?: number): Promise<CashoutResult> {
+    const t0 = Date.now(); // metrics-only: settlement-latency start (Phase 4.4)
     const state = this.engine.getPublicState();
     if (!state || state.phase !== "running") return { ok: false, reason: "too_late", userId, panel };
 
@@ -419,6 +420,10 @@ export class BetsService {
     );
 
     this.metrics.recordPayout(Number(payout)); // payout → realized-RTP numerator
+    // metrics-only: confirmed cash-out → settlement latency (cash-out leg). ONLY the
+    // confirmed-credit path; the payout_pending branch above is intentionally excluded
+    // (its latency is dominated by the reconciler, not the hot path) (Phase 4.4, §2 Option A).
+    this.metrics.observeSettlementLatency(Date.now() - t0);
     return { ok: true, userId, panel, multiplier: mult, payout: Number(payout), balance: Number(credit.balanceAfter), currency: bet.wallet.currency };
   }
 

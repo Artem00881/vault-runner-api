@@ -44,7 +44,7 @@ const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};
 // INTERNAL-mode engine (LedgerService as the WalletProvider) for cases 1-3.
-const internalEngine = new GameEngineService(prisma, redisStub, fairnessStub, ledger);
+const internalEngine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any);
 
 // Operator-session wiring for case 4 (mirrors operator-reserving-recovery-h1.test.ts).
 const OP_JWT_SECRET = "reserving-sweep-op-secret";
@@ -166,7 +166,7 @@ function operatorEngine(sandbox: SandboxOperator) {
     { timeoutMs: 1000 },
   );
   const provider = new SeamlessOperatorWallet(client, sessions.resolver());
-  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider);
+  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider, {} as any);
   return { engine, provider };
 }
 

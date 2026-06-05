@@ -49,7 +49,7 @@ const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};
-const internalEngine = new GameEngineService(prisma, redisStub, fairnessStub, ledger);
+const internalEngine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any);
 // recoverReservingBets() is private; drive it via recoverInterruptedRounds() —
 // the exact entry start() calls on boot (reserving-recovery-h1.test.ts does the same).
 const recover = () => (internalEngine as any).recoverInterruptedRounds();
@@ -192,7 +192,7 @@ function operatorEngine(sandbox: SandboxOperator) {
     { timeoutMs: 1000 },
   );
   const provider = new SeamlessOperatorWallet(client, sessions.resolver());
-  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider);
+  const engine = new GameEngineService(prisma, redisStub, fairnessStub, provider, {} as any);
   // recoverReservingBets() is private; drive it via recoverInterruptedRounds().
   return { recover: () => (engine as any).recoverInterruptedRounds(), provider };
 }
@@ -378,7 +378,7 @@ test("Low-1: recovery's claim loses to a live activation — an 'active' bet is 
       return Reflect.get(target, prop, receiver);
     },
   });
-  const guardedEngine = new GameEngineService(claimLosesPrisma, redisStub, fairnessStub, ledger);
+  const guardedEngine = new GameEngineService(claimLosesPrisma, redisStub, fairnessStub, ledger, {} as any);
   await (guardedEngine as any).recoverInterruptedRounds();
 
   // The raced row stayed 'active' (claim lost → continue → never reversed), balance
