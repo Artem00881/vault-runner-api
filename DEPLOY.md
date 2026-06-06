@@ -608,8 +608,8 @@ restart the Prometheus container, see §10).
 > **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
 > (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
 > at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
-> main *at the 2026-06-05 deploy*; origin/main has since advanced to **`c0dfb47`**, all
-> docs/test/tooling-only — see the §16 trailer below), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
+> main *at the 2026-06-05 deploy*; origin/main has since advanced to **`51f45ba`** (web HEAD
+> `aa660b0`), all docs/test/tooling-only — see the §16 trailer below), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
 > `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
 > (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
 > env/secret**. **Single-node-safe, multi-node-safe for cash-out, AND seamless on failover** —
@@ -629,18 +629,23 @@ restart the Prometheus container, see §10).
 > identical in any language); **10k ⇒ 3 nodes** (8-vCPU CCX33 is plenty); **Go-vs-NestJS rewrite
 > RISK GATE = ✅ RESOLVED = STAY on NestJS/Bun** (no CPU wall a Go rewrite would knock down; the
 > one ceiling is an app-level lock a Go rewrite would inherit — no sign-off needed to decline the
-> rewrite). **STAY SINGLE-NODE** — the multi-node cutover now stays gated only on the
-> **`bets.service.ts` reservation-lock refactor** (highest-leverage — atomic exposure accumulator;
-> hot-money-path → money-loop + sign-off), the **at-scale SLA runs that need real infra** (the
-> **multi-node 3-node 10k run + the full 1e6-round soak** — the operator-mode run is DONE), the
-> **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), the **`bet_failed`
-> backpressure fix** (PgBouncer tx pool) before a real betting 10k, and `deploy-verifier` +
-> sign-off. **api `origin/main` is now `c0dfb47`; prod still runs `6bfda18`** — the post-deploy
-> `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` (this §16) + `163d459` (the Race-1 test/comment) +
-> `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run tooling) are **docs/test/tooling-only
-> → NO prod redeploy needed**. The deploy facts are recorded below for reproducibility / rollback;
-> the calibration + operator-mode numbers + harness-bug/tuning notes live in
-> `project_production_roadmap.md` "PHASE 4.5c.3 — OPERATOR-MODE SETTLEMENT-p99 RESULTS" + "…
+> rewrite). **DECISION (2026-06-07): the Phase-4 10k INVESTIGATION is COMPLETE — STOP here.**
+> The part of Phase 4 that needed real infra (the calibration + operator-mode load tests, the
+> Go-rewrite gate, the bottleneck identification, the 10k sizing) is now CLOSED. **STAY SINGLE-NODE**
+> — the remaining multi-node cutover work is **DEFERRED to the operator-go-live track (future work,
+> NOT the immediate next task):** the **`bets.service.ts` reservation-lock refactor** (highest-leverage
+> — atomic exposure accumulator; hot-money-path → money-loop + sign-off), the **at-scale SLA runs that
+> need real infra** (the **multi-node 3-node 10k run + the full 1e6-round soak** — the operator-mode
+> run is DONE), the **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), the
+> **`bet_failed` backpressure fix** (PgBouncer tx pool) before a real betting 10k, and
+> `deploy-verifier` + sign-off. (They do not pinch today's single-node/internal/demo prod and are only
+> needed for real operator betting at 10k, itself gated on a real operator + GLI cert.) **api
+> `origin/main` is now `51f45ba` (web HEAD `aa660b0`); prod still runs `6bfda18`** — the post-deploy
+> `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` + `51f45ba` (this §16) + `163d459` (the Race-1
+> test/comment) + `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run tooling) are
+> **docs/test/tooling-only → NO prod redeploy needed**. The deploy facts are recorded below for
+> reproducibility / rollback; the calibration + operator-mode numbers + harness-bug/tuning notes live
+> in `project_production_roadmap.md` "PHASE 4.5c.3 — OPERATOR-MODE SETTLEMENT-p99 RESULTS" + "…
 > CALIBRATION LOAD-TEST RESULTS" (internal planning doc).
 
 **Deploy record (2026-06-05).** Prod `e40cca1` → **`6bfda18`**; staging the same image
@@ -822,8 +827,12 @@ they write rows to the DB, so **never point them at prod**.
   = backpressure on the per-round `pg_advisory_xact_lock` reserve tx, **failing CLOSED (no money
   moved)** → fix before a real betting 10k = **PgBouncer transaction pool** + reserve-tx
   connections. **⚠️ staging is permanently CPX62 now** (the rescale grew the disk, irreversible
-  on Hetzner — it cannot be shrunk back; staging was RESTORED to the live `6bfda18`
-  op-compose/Caddy/`127.0.0.1:3001`/internal config, leadership acquired, `RestartCount=0`).
+  on Hetzner — it cannot be shrunk back to its old size; staging was RESTORED to the live `6bfda18`
+  op-compose/Caddy/`127.0.0.1:3001`/internal config, leadership acquired, `RestartCount=0`). **Infra
+  teardown (2026-06-07, the investigation is done):** the calibration **generator box (CCX23, nbg1)
+  is being DELETED by the user** (no longer needed); the user **may rescale staging DOWN to a
+  ≥80GB-disk type (e.g. CX32) to save cost** (Hetzner allows growing to a type whose disk ≥ current).
+  **Prod untouched (still `6bfda18`, single-node).**
   Two **`load/hetzner-setup.sh` harness bugs** found + **FIXED + committed (`c0dfb47`)**: (1)
   `maybe_checkout_pin` exits non-zero under `set -e` when `PIN_COMMIT=""`; (2) `detect_bind_addr`
   matches docker0 `172.17.0.1` as private → mis-bind (now filters docker/br-/veth/virbr/lo +
@@ -859,8 +868,8 @@ they write rows to the DB, so **never point them at prod**.
   (~700/round/node, the lock is per-round = round shared cluster-wide → 3 nodes ≈ 2,100 bets/round)
   UNTIL the lock fix lands → plan: **lock fix → re-size → expect per-node ceiling toward 4,400 ⇒
   3 WS nodes + 1 failover + managed Postgres (PgBouncer) + managed Redis**.
-- **STILL INFRA-GATED:** the **`src/game/bets.service.ts` reservation-lock refactor** (highest-leverage
-  next-work — replace the serialized read-modify-write exposure check with an atomic accumulator
+- **DEFERRED to the operator-go-live track (the Phase-4 10k investigation is COMPLETE — STOP here, 2026-06-07; these are future work, NOT the immediate next task):** the **`src/game/bets.service.ts` reservation-lock refactor** (highest-leverage
+  — replace the serialized read-modify-write exposure check with an atomic accumulator
   `UPDATE … SET exposure = exposure + $delta WHERE exposure + $delta <= cap RETURNING`; this is the
   old H1 exposure-cap serialization, **hot-money-path → money-loop + USER sign-off required**) + the
   **multi-node 3-node 10k run** (the Step-1 calibration + the operator-mode run are done; the honest
