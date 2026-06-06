@@ -608,7 +608,7 @@ restart the Prometheus container, see §10).
 > **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
 > (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
 > at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
-> main *at the 2026-06-05 deploy*; origin/main has since advanced to `e573c8f`, all
+> main *at the 2026-06-05 deploy*; origin/main has since advanced to **`c0dfb47`**, all
 > docs/test/tooling-only — see the §16 trailer below), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
 > `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
 > (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
@@ -619,22 +619,28 @@ restart the Prometheus container, see §10).
 > all 4 races proven exactly-once, +Race-1 integration test) and the **failover<5s +
 > 0-discrepancy chaos SLAs are PROVEN ON STAGING** (real Hetzner infra — failover gaps
 > 486–1550 ms, 31 rounds / 38 leader SIGKILLs, `reconcile-check` RECONCILED / 0 money
-> discrepancies). **The Step-1 10k load-test CALIBRATION then RAN on real Hetzner (2026-06-06):**
-> capacity-per-node ≈ **4,400 concurrent** at settlement p99 ≤ 200 ms (internal mode); root
-> cause = **single Node event-loop serialization** (16 cores idle at 10k, no leak — not a
-> CPU/language wall); **10k ⇒ 3 nodes** (8-vCPU CCX33 is plenty); one node HELD all 10k sockets
-> (fan-out MET) but settlement p99 blew past 200 ms above ~4,400; **Go-vs-NestJS rewrite gate =
-> PROVISIONAL-STAY** (confirm with the operator-mode + 3-node runs). **STAY SINGLE-NODE** — the
-> multi-node cutover now stays gated only on the **at-scale SLA runs that need real infra** (the
-> **multi-node 3-node 10k run + the operator-mode settlement-p99 run + the full 1e6-round soak**),
-> the **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), the
-> **`bet_failed` backpressure fix** (PgBouncer tx pool — the next bottleneck after settlement,
-> surfaced by calibration) before a real betting 10k, and `deploy-verifier` + sign-off. **api
-> `origin/main` is now `e573c8f`; prod still runs `6bfda18`** — the post-deploy `0c58e93` +
-> `bb6bed6` + `a180a45` (this §16) + `163d459` (the Race-1 test/comment) + `e573c8f` (the
-> dev-only `load/`+`scripts/` 10k-run tooling) are **docs/test/tooling-only → NO prod redeploy
-> needed**. The deploy facts are recorded below for reproducibility / rollback; the calibration
-> numbers + harness-bug/tuning notes live in `project_production_roadmap.md` "PHASE 4.5c.3 —
+> discrepancies). **The Step-1 10k load-test CALIBRATION + the OPERATOR-MODE settlement-p99 run
+> BOTH RAN on real Hetzner (2026-06-06):** calibration capacity-per-node ≈ **4,400 concurrent**
+> at settlement p99 ≤ 200 ms (internal mode); operator-mode knee ≈ **3,800–4,000 conn/node**
+> (only ~10–15% left of internal — modest), 16-core box ~90% idle, operator-recon-check = 0
+> discrepancies; root cause = **single Node event-loop serialization** (16 cores idle at 10k, no
+> leak — not a CPU/language wall) and the one real ceiling = the **per-round reservation advisory
+> lock** at `src/game/bets.service.ts:207` (~700 reserved bets/round → a money-safe `bet_failed`,
+> identical in any language); **10k ⇒ 3 nodes** (8-vCPU CCX33 is plenty); **Go-vs-NestJS rewrite
+> RISK GATE = ✅ RESOLVED = STAY on NestJS/Bun** (no CPU wall a Go rewrite would knock down; the
+> one ceiling is an app-level lock a Go rewrite would inherit — no sign-off needed to decline the
+> rewrite). **STAY SINGLE-NODE** — the multi-node cutover now stays gated only on the
+> **`bets.service.ts` reservation-lock refactor** (highest-leverage — atomic exposure accumulator;
+> hot-money-path → money-loop + sign-off), the **at-scale SLA runs that need real infra** (the
+> **multi-node 3-node 10k run + the full 1e6-round soak** — the operator-mode run is DONE), the
+> **multi-node prod infra** (managed Postgres/Redis + ≥2 WS nodes behind a LB), the **`bet_failed`
+> backpressure fix** (PgBouncer tx pool) before a real betting 10k, and `deploy-verifier` +
+> sign-off. **api `origin/main` is now `c0dfb47`; prod still runs `6bfda18`** — the post-deploy
+> `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` (this §16) + `163d459` (the Race-1 test/comment) +
+> `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run tooling) are **docs/test/tooling-only
+> → NO prod redeploy needed**. The deploy facts are recorded below for reproducibility / rollback;
+> the calibration + operator-mode numbers + harness-bug/tuning notes live in
+> `project_production_roadmap.md` "PHASE 4.5c.3 — OPERATOR-MODE SETTLEMENT-p99 RESULTS" + "…
 > CALIBRATION LOAD-TEST RESULTS" (internal planning doc).
 
 **Deploy record (2026-06-05).** Prod `e40cca1` → **`6bfda18`**; staging the same image
@@ -818,17 +824,51 @@ they write rows to the DB, so **never point them at prod**.
   connections. **⚠️ staging is permanently CPX62 now** (the rescale grew the disk, irreversible
   on Hetzner — it cannot be shrunk back; staging was RESTORED to the live `6bfda18`
   op-compose/Caddy/`127.0.0.1:3001`/internal config, leadership acquired, `RestartCount=0`).
-  Two **`load/hetzner-setup.sh` harness bugs** found + worked around (NOT committed): (1)
+  Two **`load/hetzner-setup.sh` harness bugs** found + **FIXED + committed (`c0dfb47`)**: (1)
   `maybe_checkout_pin` exits non-zero under `set -e` when `PIN_COMMIT=""`; (2) `detect_bind_addr`
-  matches docker0 `172.17.0.1` as private → mis-bind (pass `BIND_ADDR=0.0.0.0`). Tuning rec
-  (deploy-gated): finer settlement-histogram buckets near 200 ms in
-  `src/metrics/metrics.service.ts` (current `100→200→500` is ambiguous at the SLA edge).
-- **STILL INFRA-GATED:** the **multi-node 3-node 10k run** (the Step-1 calibration is done;
-  the honest 10k needs ~3 WS nodes behind a LB + managed Postgres-w/PgBouncer + managed Redis +
-  ~3 separate generator hosts) + the **operator-mode settlement-p99 run** (the SLA's worst case
-  — needs a stub-wallet + an `Operator` row on the target; `load/operator-wallet-stub.ts` +
-  `AUTH_MODE=operator` are ready) + the full **1e6-round soak** (multi-hour on a bigger box —
-  proven at 31 failure-injected rounds).
+  matches docker0 `172.17.0.1` as private → mis-bind (now filters docker/br-/veth/virbr/lo +
+  `scope global`, falls back to `0.0.0.0`). Tuning rec (deploy-gated, still un-committed): finer
+  settlement-histogram buckets near 200 ms in `src/metrics/metrics.service.ts` (current
+  `100→200→500` is ambiguous at the SLA edge).
+- **OPERATOR-MODE settlement-p99 run — RAN ON REAL HETZNER (2026-06-06, same boxes):** target =
+  the CPX62 staging load-stack at `6bfda18` in **OPERATOR mode** (`WALLET_PROVIDER_TYPE=operator`
+  → `SeamlessOperatorWallet` HTTP debit/credit per bet/cashout against `load/operator-wallet-stub.ts`
+  + an `Operator` row via `scripts/operator-provision.ts`); generator = the CCX23 driving
+  `load/ws-load.ts` `AUTH_MODE=operator`, 4 shards (finer-bucket metrics patch applied target-local,
+  reverted after). **Settlement knee ≈ 3,800–4,000 conn/node** (server p99 = 200 ms; conservative
+  last-clearly-healthy ≈ 3,500 at p99 125 ms; curve 2k→75 / 3k→125 / 4k→250 ms) — **only ~10–15%
+  / ~400–600 conn left of the 4,400 internal baseline (modest)**; settlement MEAN stayed ~40–46 ms
+  while p99 hit 250 ms = a **tail/serialization** issue, the 16-core box ~90% IDLE. **The REAL
+  ceiling (not settlement, not CPU) = the per-round reservation advisory lock at
+  `src/game/bets.service.ts:207`** (`pg_advisory_xact_lock(hashtext(roundId))` serializes every
+  `placeBet` reservation → caps ~700 reserved bets/round → a generic `bet_failed` at
+  `bets.service.ts:273-274`; **money-safe** — rejects before any debit, 0 orphan rows, DB
+  operator-bets == stub debits exactly, backlog drained to 0; **identical in ANY language**).
+  **operator-recon-check (O1–O5) = 0 discrepancies** (575 cashed = one operator win each, 2,131
+  busted got 0 wins, all 2,706 debits == stake, backlog 0, Σbet−Σwin−Σrollback == Σstake−Σpayout
+  = 77,800 — operator book reconciled). **⇒ Go-vs-NestJS rewrite RISK GATE = ✅ RESOLVED = STAY**
+  (no CPU wall a Go rewrite would knock down; the one ceiling is an app-level lock a Go rewrite
+  would inherit — no sign-off needed to decline the rewrite). **Caveat:** the 4-vCPU generator was
+  saturated (loop-lag ~105–125 ms) → the knee + shedding magnitude are a **LOWER BOUND** (a ≥2-host
+  generator fleet would push the knee somewhat higher but would NOT remove the structural ~700/round
+  lock ceiling); the **definitive 10k operator number = a re-run with ≥2 generators AFTER the lock
+  fix**. A **3rd `hetzner-setup.sh` issue remains** (NOT fixed): `start_stub_and_provision` points
+  `walletApiUrl` at the default-bridge gateway vs the loadtest custom network → worked around, fix
+  via `extra_hosts: host-gateway`. **10k operator cluster sizing:** on the settlement knee
+  ceil(10000/3800)=3 + 1 failover = **4 WS nodes**; BUT the binding constraint is **bet throughput**
+  (~700/round/node, the lock is per-round = round shared cluster-wide → 3 nodes ≈ 2,100 bets/round)
+  UNTIL the lock fix lands → plan: **lock fix → re-size → expect per-node ceiling toward 4,400 ⇒
+  3 WS nodes + 1 failover + managed Postgres (PgBouncer) + managed Redis**.
+- **STILL INFRA-GATED:** the **`src/game/bets.service.ts` reservation-lock refactor** (highest-leverage
+  next-work — replace the serialized read-modify-write exposure check with an atomic accumulator
+  `UPDATE … SET exposure = exposure + $delta WHERE exposure + $delta <= cap RETURNING`; this is the
+  old H1 exposure-cap serialization, **hot-money-path → money-loop + USER sign-off required**) + the
+  **multi-node 3-node 10k run** (the Step-1 calibration + the operator-mode run are done; the honest
+  10k needs ~3 WS nodes behind a LB + managed Postgres-w/PgBouncer + managed Redis + ≥2 separate
+  generator hosts) + the full **1e6-round soak** (multi-hour on a bigger box — proven at 31
+  failure-injected rounds). Secondary tuning before a real betting 10k: explicit Prisma
+  `connection_limit` + PgBouncer; operator credit-on-cashout fire-and-confirm (the `payout_pending`
+  recovery path already exists) to flatten the p99 tail.
 - NOTE: a pre-existing `-600` residual on `reconcile-check.ts` invariant 1a = legitimate
   orphan ledger rows (bet rows DELETEd on placeBet-failure / reserving-recovery leave their
   FK-to-wallet ledger rows) — NOT a money leak (invariant 2 ledger↔balance is clean).
