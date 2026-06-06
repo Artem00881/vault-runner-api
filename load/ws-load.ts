@@ -24,10 +24,22 @@
  *
  * ENV KNOBS:
  *   BASE_URL          (http://localhost:3001)  API base
- *   CLIENTS           (200)   total sockets across all workers
+ *   CLIENTS           (200)   total sockets across all workers (FIXED-N mode)
  *   WORKERS           (auto)  generator workers (default min(CLIENTS, cpus, 8))
- *   DURATION_MS       (30000) steady-state run length after warmup
+ *   DURATION_MS       (30000) steady-state run length after warmup (hold at target)
  *   BET_RATE          (0.5)   fraction of clients that bet each betting window
+ *
+ * RAMPING MODE (4.5c.3 calibration — find the per-node degradation knee):
+ *   RAMP_TO           (0)     >0 → RAMP mode: grow connected sockets 0→RAMP_TO over
+ *                             RAMP_SECONDS, then hold DURATION_MS. RAMP_TO is the
+ *                             ceiling (overrides CLIENTS). In RAMP mode the orchestrator
+ *                             prints a LIVE time-series (elapsed, ws_connections gauge,
+ *                             server settlement p99, inter-tick max, loop-lag) every
+ *                             SAMPLE_EVERY_MS so you can SEE p99 / tick-gap degrade as
+ *                             concurrency climbs — that inflection is capacity/node.
+ *   RAMP_SECONDS      (120)   ramp duration; clients arrive ~linearly over this window.
+ *   SAMPLE_EVERY_MS   (5000)  live-sample cadence in RAMP mode (needs SCRAPE_METRICS for
+ *                             the server p99 column; client-side cols always print).
  *   BET_AMOUNT        (50)    stake (minor units)
  *   CASHOUT_AT        (1.5)   auto-cashout target; <=1 disables (ride to bust)
  *   ACK_TIMEOUT_MS    (5000)  per-action socket.io ack timeout
@@ -66,13 +78,23 @@ import os from "node:os";
 // Config (parsed once on the main thread, passed to workers via workerData).
 // ---------------------------------------------------------------------------
 function buildConfig() {
-  const CLIENTS = Number(process.env.CLIENTS ?? 200);
+  // RAMP mode: RAMP_TO is the ceiling and OVERRIDES CLIENTS as the target socket count.
+  const RAMP_TO = Number(process.env.RAMP_TO ?? 0);
+  const RAMP_SECONDS = Number(process.env.RAMP_SECONDS ?? 120);
+  const SAMPLE_EVERY_MS = Number(process.env.SAMPLE_EVERY_MS ?? 5000);
+  const RAMP = RAMP_TO > 0;
+  // In RAMP mode the effective client total IS the ramp ceiling.
+  const CLIENTS = RAMP ? RAMP_TO : Number(process.env.CLIENTS ?? 200);
   const cpuCount = os.cpus().length || 4;
   const WORKERS = Math.max(1, Number(process.env.WORKERS ?? Math.min(CLIENTS, cpuCount, 8)));
   return {
     BASE_URL: process.env.BASE_URL ?? "http://localhost:3001",
     CLIENTS,
     WORKERS,
+    RAMP,
+    RAMP_TO,
+    RAMP_SECONDS,
+    SAMPLE_EVERY_MS,
     DURATION_MS: Number(process.env.DURATION_MS ?? 30000),
     BET_RATE: Number(process.env.BET_RATE ?? 0.5),
     BET_AMOUNT: Number(process.env.BET_AMOUNT ?? 50),
@@ -190,10 +212,25 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
   let suspect = false;
   let stop = false;
 
+  // Recent-window samples for the LIVE ramp series (sliding, capped) so the orchestrator
+  // can show p99 climbing in real time (the cumulative hist hides the inflection).
+  const recent: Record<"place_bet" | "cash_out", number[]> = { place_bet: [], cash_out: [] };
+  const RECENT_CAP = 2000;
   const obs = (a: ActionName, ms: number) => {
     histObserve(hist[a], ms);
     if (cfg.RAW_SAMPLES > 0 && raw[a].length < cfg.RAW_SAMPLES) raw[a].push(ms);
+    if (a === "place_bet" || a === "cash_out") {
+      const r = recent[a];
+      r.push(ms);
+      if (r.length > RECENT_CAP) r.shift();
+    }
   };
+  function recentP99(a: "place_bet" | "cash_out"): number {
+    const r = recent[a];
+    if (r.length === 0) return 0;
+    const sorted = [...r].sort((x, y) => x - y);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
+  }
 
   // Per-worker event-loop-lag guard: schedule a 20ms timer; the overshoot beyond
   // 20ms is loop lag. If sustained high, this generator is starved → mark suspect.
@@ -213,6 +250,36 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
         highStreak = 0;
       }
     }, 20);
+  }
+
+  // RAMP-mode live snapshot: emit a lightweight per-window summary to the orchestrator
+  // so it can print the degradation series. windowTickGapMax/windowLoopLagMax reset each
+  // emit so the series reflects the CURRENT window, not the all-time max.
+  let windowTickGapMax = 0;
+  let windowLoopLagMax = 0;
+  let snapTimer: ReturnType<typeof setInterval> | null = null;
+  if (cfg.RAMP) {
+    let lastLag = Date.now();
+    snapTimer = setInterval(() => {
+      const lag = Date.now() - lastLag - cfg.SAMPLE_EVERY_MS;
+      lastLag = Date.now();
+      if (lag > windowLoopLagMax) windowLoopLagMax = lag;
+      parentPort?.postMessage({
+        type: "snap",
+        threadId,
+        launched,
+        connected: counts.connected,
+        betAccepted: counts.betAccepted,
+        ackTimeouts: counts.ackTimeouts,
+        placeP99: recentP99("place_bet"),
+        cashP99: recentP99("cash_out"),
+        windowTickGapMax,
+        loopLagMax: loopLagMaxMs,
+        suspect,
+      });
+      windowTickGapMax = 0;
+      windowLoopLagMax = 0;
+    }, cfg.SAMPLE_EVERY_MS);
   }
 
   // Bounded-concurrency guest auth so a worker owning thousands of sockets ramps
@@ -302,6 +369,7 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
     let activeRound: string | null = null; // round we currently hold a live bet on
     let cashedThisRound = false;
     let lastTickAt = 0;
+    let lastTickRoundId: string | null = null; // for same-round gap detection
     let crashSeenAt = 0; // when we saw the crash for the round we hold a bet on
     const willBet = Math.random() < cfg.BET_RATE; // this client bets each window?
 
@@ -348,10 +416,16 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
       const now = Date.now();
       if (lastTickAt > 0) {
         const gap = now - lastTickAt;
-        histObserve(tickGapHist, gap);
+        histObserve(tickGapHist, gap); // ALL gaps (failover hook) — incl. between-round
         if (gap > maxTickGapMs) maxTickGapMs = gap;
+        // The LIVE/knee tick-starvation signal is SAME-ROUND gaps only: between rounds there
+        // are NO ticks for the whole crashed+settling+betting+waiting window (~10s+), which is
+        // EXPECTED and would otherwise masquerade as a stall. A same-round gap >> ~120ms IS the
+        // engine's onTick loop or the fan-out falling behind under load (the real signal).
+        if (lastTickRoundId === m.roundId && gap > windowTickGapMax) windowTickGapMax = gap;
       }
       lastTickAt = now;
+      lastTickRoundId = m.roundId;
 
       // Manual cash-out path: if no auto-cashout is configured, cash out the first
       // time we cross a small target so the cash_out ack leg is exercised too.
@@ -412,8 +486,8 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
   // Ramp up this worker's slice with bounded auth concurrency.
   const sockets: any[] = [];
   let launched = 0;
-  async function rampUp() {
-    const queue: Promise<void>[] = [];
+  // FIXED-N mode: open the whole slice as fast as AUTH_CONCURRENCY allows, then hold.
+  async function rampUpFast() {
     let inFlight = 0;
     let idx = 0;
     return new Promise<void>((resolve) => {
@@ -421,7 +495,7 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
         while (inFlight < cfg.AUTH_CONCURRENCY && idx < sliceSize && !stop) {
           idx++;
           inFlight++;
-          const p = authClient()
+          authClient()
             .then((token) => {
               if (token) {
                 sockets.push(startClient(token));
@@ -435,13 +509,61 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
               if (idx >= sliceSize && inFlight === 0) resolve();
               else pump();
             });
-          queue.push(p);
         }
       };
       pump();
       if (sliceSize === 0) resolve();
     });
   }
+
+  // RAMP mode: release new client-launches at a TARGET RATE so connected sockets grow
+  // ~linearly to the slice ceiling over RAMP_SECONDS (the orchestrator prints the live
+  // ws_connections/p99 series while this climbs → the degradation knee is visible). Still
+  // capped at AUTH_CONCURRENCY in-flight so a transient auth stall can't burst-open. If
+  // auth can't keep up with the target rate, the run is RATE-LIMITED by the generator —
+  // surfaced as a suspect-style note (launched < ceiling at ramp end).
+  async function rampUpPaced() {
+    if (sliceSize === 0) return;
+    const perSecond = Math.max(0.5, sliceSize / Math.max(1, cfg.RAMP_SECONDS));
+    const stepMs = 100; // release cadence
+    const perStep = (perSecond * stepMs) / 1000; // fractional clients to release per step
+    let credit = 0;
+    let started = 0; // launches BEGUN (in-flight + done) — paces against the schedule
+    let inFlight = 0;
+    const launchOne = () => {
+      started++;
+      inFlight++;
+      authClient()
+        .then((token) => {
+          if (token) {
+            sockets.push(startClient(token));
+            launched++;
+          } else {
+            counts.authErrors++;
+          }
+        })
+        .finally(() => {
+          inFlight--;
+        });
+    };
+    await new Promise<void>((resolve) => {
+      const timer = setInterval(() => {
+        if (stop || started >= sliceSize) {
+          clearInterval(timer);
+          resolve();
+          return;
+        }
+        credit += perStep;
+        while (credit >= 1 && started < sliceSize && inFlight < cfg.AUTH_CONCURRENCY) {
+          credit -= 1;
+          launchOne();
+        }
+      }, stepMs);
+    });
+    // Drain any still-in-flight auths from the final step.
+    while (inFlight > 0 && !stop) await sleepMs(50);
+  }
+  const rampUp = cfg.RAMP ? rampUpPaced : rampUpFast;
 
   // Operator mode: stand up the launch-token minter once before ramping (fail loud here
   // if the operator/currency is misconfigured, rather than silently authError every client).
@@ -474,6 +596,7 @@ async function runWorker(cfg: Config, sliceSize: number, sliceIndex: number) {
   stop = true;
   await new Promise((r) => setTimeout(r, 1500)); // drain in-flight settlement events
   if (lagTimer) clearInterval(lagTimer);
+  if (snapTimer) clearInterval(snapTimer);
 
   // Maxed tick gap → suspect only flags the GENERATOR loop, not the server; report
   // the tick gap raw and let the orchestrator decide what it means.
@@ -564,10 +687,14 @@ function fmtRow(name: string, h: number[]) {
 async function runOrchestrator(cfg: Config) {
   console.log("=== Vault Run WS load harness (Phase 4.4) ===");
   console.log(
-    `target=${cfg.BASE_URL} clients=${cfg.CLIENTS} workers=${cfg.WORKERS} duration=${cfg.DURATION_MS}ms ` +
-      `betRate=${cfg.BET_RATE} cashoutAt=${cfg.CASHOUT_AT} betAmount=${cfg.BET_AMOUNT} auth=${cfg.AUTH_MODE}` +
+    `target=${cfg.BASE_URL} ${cfg.RAMP ? `RAMP→${cfg.RAMP_TO} over ${cfg.RAMP_SECONDS}s then hold ${cfg.DURATION_MS}ms` : `clients=${cfg.CLIENTS} duration=${cfg.DURATION_MS}ms`} ` +
+      `workers=${cfg.WORKERS} betRate=${cfg.BET_RATE} cashoutAt=${cfg.CASHOUT_AT} betAmount=${cfg.BET_AMOUNT} auth=${cfg.AUTH_MODE}` +
       (cfg.AUTH_MODE === "operator" ? ` operator=${cfg.OPERATOR_CODE} ccy=${cfg.OPERATOR_CURRENCY}` : ""),
   );
+  if (cfg.RAMP && !cfg.SCRAPE_METRICS) {
+    console.log("  NOTE: RAMP mode without --scrape-metrics → the live series shows CLIENT-side cols only");
+    console.log("        (launched/p99/tickgap/lag); add --scrape-metrics for the server ws_connections + settlement p99 columns (ground truth).");
+  }
 
   // Confirm we're hitting a live API before generating load (don't trust a number
   // against a dead/ wrong server).
@@ -591,6 +718,14 @@ async function runOrchestrator(cfg: Config) {
   const workers: Worker[] = [];
   let reported = 0;
   let midRunWs = -1; // ws_connections gauge sampled mid-run (sockets still live)
+  let peakWs = 0; // highest ws_connections gauge seen across the whole run (RAMP peak)
+  // Latest live snapshot per worker (RAMP mode) — aggregated by the sampler.
+  const snaps = new Map<number, any>();
+  // Captured live-series rows for the end-of-run knee summary.
+  const series: { tMs: number; wsConn: number; launched: number; placeP99: number; serverP99: number; tickGap: number; lag: number; suspect: boolean; acceptRate: number }[] = [];
+  const runStart = Date.now();
+  // Total wall-clock before we signal stop: RAMP = ramp window + hold; FIXED = hold only.
+  const totalRunMs = cfg.RAMP ? cfg.RAMP_SECONDS * 1000 + cfg.DURATION_MS : cfg.DURATION_MS;
 
   await new Promise<void>((resolveAll) => {
     slices.forEach((sliceSize, i) => {
@@ -600,6 +735,7 @@ async function runOrchestrator(cfg: Config) {
       workers.push(w);
       w.on("message", (msg: any) => {
         if (msg?.type === "log") console.log(`  · ${msg.msg}`);
+        else if (msg?.type === "snap") snaps.set(msg.threadId, msg);
         else if (msg?.type === "report") {
           reports.push(msg.report);
           reported++;
@@ -609,9 +745,67 @@ async function runOrchestrator(cfg: Config) {
       w.on("error", (e) => console.error(`worker ${i} error:`, e?.message));
     });
 
+    // ---- RAMP-mode LIVE degradation series ----
+    // Every SAMPLE_EVERY_MS: scrape the server gauge + settlement p99 (ground truth) and
+    // print it next to the aggregated client snapshots. Watch ws_connections climb and
+    // p99 / tick-gap inflect — that knee is empirical per-node capacity. The orchestrator
+    // is on its OWN thread (not a generator worker), so its scrape isn't CPU-starved.
+    let sampleTimer: ReturnType<typeof setInterval> | null = null;
+    if (cfg.RAMP) {
+      console.log(
+        "\n----- LIVE RAMP SERIES (watch ws_conn climb; p99/tickGap inflect = the knee) -----\n" +
+          "  cols: wsConn=server gauge | launch=client launched | cliP99=client place_bet p99 |\n" +
+          "        srvP99=server settlement p99 | tickGap=max SAME-ROUND inter-tick gap (mid-flight\n" +
+          "        starvation; ~120ms healthy) | lag=worker loop lag | accept%=bet acks not timing out\n" +
+          "   t(s)  wsConn  launch  cliP99  srvP99  tickGap  lag  accept%  note",
+      );
+      sampleTimer = setInterval(async () => {
+        const tMs = Date.now() - runStart;
+        // Aggregate the latest per-worker snapshots (client-side ground for this window).
+        let launched = 0,
+          connected = 0,
+          betAccepted = 0,
+          ackTimeouts = 0,
+          placeP99 = 0,
+          tickGap = 0,
+          lag = 0,
+          anySuspect = false;
+        for (const s of snaps.values()) {
+          launched += s.launched ?? 0;
+          connected += s.connected ?? 0;
+          betAccepted += s.betAccepted ?? 0;
+          ackTimeouts += s.ackTimeouts ?? 0;
+          placeP99 = Math.max(placeP99, s.placeP99 ?? 0);
+          tickGap = Math.max(tickGap, s.windowTickGapMax ?? 0);
+          lag = Math.max(lag, s.loopLagMax ?? 0);
+          anySuspect = anySuspect || !!s.suspect;
+        }
+        let wsConn = -1,
+          serverP99 = -1;
+        if (cfg.SCRAPE_METRICS) {
+          const m = await scrapeMetrics(cfg);
+          if (!m.__error) {
+            wsConn = m.ws_connections ?? 0;
+            if (wsConn > peakWs) peakWs = wsConn;
+            const bd = (m as any).__bucketData as { le: number; v: number }[] | undefined;
+            serverP99 = bd ? serverPercentile(bd, m.settlement_count ?? 0, 0.99) : -1;
+          }
+        }
+        const acceptRate = betAccepted + ackTimeouts > 0 ? betAccepted / (betAccepted + ackTimeouts) : 1;
+        series.push({ tMs, wsConn: wsConn < 0 ? connected : wsConn, launched, placeP99, serverP99, tickGap, lag, suspect: anySuspect, acceptRate });
+        const note = anySuspect ? "GEN-SUSPECT" : acceptRate < 0.98 ? "acks-dropping" : "";
+        console.log(
+          `  ${String(Math.round(tMs / 1000)).padStart(5)}  ${String(wsConn < 0 ? connected : wsConn).padStart(6)}  ${String(launched).padStart(6)}  ` +
+            `${String(placeP99).padStart(6)}  ${String(serverP99 < 0 ? "-" : serverP99).padStart(6)}  ${String(tickGap).padStart(7)}  ${String(lag).padStart(4)}  ` +
+            `${(acceptRate * 100).toFixed(1).padStart(6)}  ${note}`,
+        );
+      }, cfg.SAMPLE_EVERY_MS);
+    }
+
     // Mid-run scrape (sockets still live) so we can report the ws_connections gauge
-    // at peak — the post-run scrape sees 0 (all sockets closed during drain).
-    if (cfg.SCRAPE_METRICS) {
+    // at peak — the post-run scrape sees 0 (all sockets closed during drain). In RAMP
+    // mode peakWs (tracked in the sampler) is the better peak; keep this for FIXED-N.
+    if (cfg.SCRAPE_METRICS && !cfg.RAMP) {
       setTimeout(
         () => {
           void scrapeMetrics(cfg).then((m) => {
@@ -622,11 +816,16 @@ async function runOrchestrator(cfg: Config) {
       );
     }
 
-    // Steady-state window, THEN tell every worker to stop + report.
+    // Run window (ramp + hold, or just hold), THEN tell every worker to stop + report.
     setTimeout(() => {
-      console.log(`steady-state ${cfg.DURATION_MS}ms elapsed — signalling stop…`);
+      if (sampleTimer) clearInterval(sampleTimer);
+      console.log(
+        cfg.RAMP
+          ? `ramp+hold ${Math.round(totalRunMs / 1000)}s elapsed — signalling stop…`
+          : `steady-state ${cfg.DURATION_MS}ms elapsed — signalling stop…`,
+      );
       for (const w of workers) w.postMessage({ type: "stop" });
-    }, cfg.DURATION_MS);
+    }, totalRunMs);
   });
 
   for (const w of workers) await w.terminate();
@@ -731,8 +930,9 @@ async function runOrchestrator(cfg: Config) {
       console.log(`  settlement_latency_ms (all-time): p50≈${p50} p95≈${p95} p99≈${p99}  (buckets: 10/25/50/100/200/500/1000)`);
       console.log(`  settlement observations: start=${cStart} end=${cEnd} (+${cEnd - cStart} during run)`);
       console.log(
-        `  ws_connections gauge: mid-run=${midRunWs >= 0 ? midRunWs : "?"} (peak, sockets live) end=${after.ws_connections ?? "?"} ` +
-          `(vs client connected=${totals.connected}; end is ~0 after drain — expected)`,
+        `  ws_connections gauge: ${cfg.RAMP ? `peak=${peakWs} (ramp peak)` : `mid-run=${midRunWs >= 0 ? midRunWs : "?"} (peak, sockets live)`} end=${after.ws_connections ?? "?"} ` +
+          `(vs client connected=${totals.connected}; end is ~0 after drain — expected). ` +
+          `This gauge is the HONEST concurrency number — sum it across generator hosts.`,
       );
       console.log(`  rounds_total: start=${before?.rounds_total ?? "?"} end=${after.rounds_total ?? "?"}  cashouts_total end=${after.cashouts_total ?? "?"}`);
       if (cfg.AUTH_MODE === "operator") {
@@ -741,6 +941,50 @@ async function runOrchestrator(cfg: Config) {
         console.log(`  NOTE: clients authed as GUESTS → INTERNAL play-money ledger (in-process). The settlement-SLA worst case is OPERATOR mode — re-run with AUTH_MODE=operator (see load/README.md).`);
       }
     }
+  }
+
+  // ---- RAMP knee summary: the empirical per-node capacity call ----
+  if (cfg.RAMP && series.length) {
+    console.log("\n----- RAMP DEGRADATION SUMMARY (empirical per-node capacity) -----");
+    // "Healthy" = server settlement p99 < 200ms (or unknown), inter-tick gap under the
+    // warn threshold, generator NOT suspect, and accept-rate ≥ 98% (acks not dropping).
+    // The LAST healthy sample's ws_connections is the conservative sustained ceiling;
+    // the FIRST unhealthy sample marks the knee.
+    const healthy = (s: (typeof series)[number]) =>
+      (s.serverP99 < 0 || s.serverP99 <= 200) &&
+      s.tickGap <= cfg.TICK_GAP_WARN_MS &&
+      !s.suspect &&
+      s.acceptRate >= 0.98;
+    let lastHealthy: (typeof series)[number] | null = null;
+    let firstBad: (typeof series)[number] | null = null;
+    for (const s of series) {
+      if (healthy(s)) lastHealthy = s;
+      else if (!firstBad) firstBad = s;
+    }
+    console.log(`  peak ws_connections reached : ${peakWs}${cfg.SCRAPE_METRICS ? "" : " (client-side; add --scrape-metrics for the server gauge)"}`);
+    if (lastHealthy) {
+      console.log(`  last HEALTHY sample          : ws_conn=${lastHealthy.wsConn} @ t+${Math.round(lastHealthy.tMs / 1000)}s (cliP99=${lastHealthy.placeP99} srvP99=${lastHealthy.serverP99 < 0 ? "?" : lastHealthy.serverP99} tickGap=${lastHealthy.tickGap} accept=${(lastHealthy.acceptRate * 100).toFixed(1)}%)`);
+    } else {
+      console.log("  last HEALTHY sample          : NONE — degraded from the very first sample (start lower / add WORKERS / more generator hosts)");
+    }
+    if (firstBad) {
+      const reasons = [
+        firstBad.serverP99 > 200 ? `srvP99=${firstBad.serverP99}>200` : "",
+        firstBad.tickGap > cfg.TICK_GAP_WARN_MS ? `tickGap=${firstBad.tickGap}>${cfg.TICK_GAP_WARN_MS}` : "",
+        firstBad.suspect ? "generator-suspect" : "",
+        firstBad.acceptRate < 0.98 ? `accept=${(firstBad.acceptRate * 100).toFixed(1)}%<98%` : "",
+      ].filter(Boolean).join(", ");
+      console.log(`  KNEE (first degraded sample) : ws_conn=${firstBad.wsConn} @ t+${Math.round(firstBad.tMs / 1000)}s → ${reasons}`);
+      if (firstBad.suspect) {
+        console.log("  *** the knee is GENERATOR-side (suspect) — this run measured the generator's ceiling, NOT the server's.");
+        console.log("  *** add WORKERS and/or more generator HOSTS and re-run; the true server knee is higher.");
+      } else {
+        console.log("  *** the knee is SERVER-side (generator healthy) — THIS is the per-node capacity signal. Size the cluster from the last-healthy ws_conn.");
+      }
+    } else {
+      console.log("  KNEE                         : not reached — server stayed healthy to the ceiling. Raise RAMP_TO and/or add generator hosts to find it.");
+    }
+    console.log("  (capacity/node ⇒ cluster sizing: nodes ≳ ceil(10000 / last-healthy-ws_conn-per-node), then add headroom + a node for failover.)");
   }
 
   console.log("\n=== done ===");

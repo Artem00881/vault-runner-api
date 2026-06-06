@@ -58,6 +58,22 @@ const applied = new Map<string, { operatorTxId: string; balance: number }>();
 // transactionId → signed delta (for exact rollback)
 const deltas = new Map<string, number>();
 
+// OPERATOR-BOOK reconciliation ledger, keyed by the server's betId (the seamless wallet
+// sends `betId` on every bet/win/rollback — see seamless-operator-wallet.ts move()). This
+// is the operator-side counterpart to the internal ledger: scripts/operator-recon-check.ts
+// pulls it via GET /debug/book and cross-matches it against the DB's operator bets, so an
+// OPERATOR-mode soak gets the same money-conservation gate the internal book gets from
+// scripts/reconcile-check.ts. Per betId we track the net bet (debit), win (credit), and
+// any rollback so the check can assert: every cashed_out op-bet got exactly one win, every
+// busted op-bet got NO win, and Σ stake == Σ kept + Σ paid on the operator's own book.
+interface BookEntry { bet: number; win: number; rollback: number; player: string; currency: string }
+const book = new Map<string, BookEntry>();
+function bookEntry(betId: string, player: string, currency: string): BookEntry {
+  let e = book.get(betId);
+  if (!e) { e = { bet: 0, win: 0, rollback: 0, player, currency }; book.set(betId, e); }
+  return e;
+}
+
 let opSeq = 0;
 const counts = { bet: 0, win: 0, rollback: 0, balance: 0, dup: 0, insufficient: 0, unauthorized: 0 };
 
@@ -92,6 +108,12 @@ const server = Bun.serve({
     const body = (await req.json().catch(() => ({}))) as any;
     if (LATENCY_MS > 0) await sleep(LATENCY_MS);
 
+    if (req.method === "GET" && path === "debug/book") {
+      // Operator-book dump for scripts/operator-recon-check.ts (Bearer-gated above).
+      // betId → {bet,win,rollback,player,currency}; plus counts + balances summary.
+      const entries = Object.fromEntries(book);
+      return json({ counts, players: balances.size, book: entries });
+    }
     if (path === "balance") {
       counts.balance++;
       const bal = balances.get(key(body.playerId, body.currency)) ?? START_BALANCE;
@@ -99,12 +121,17 @@ const server = Bun.serve({
     }
     if (path === "bet") {
       counts.bet++;
+      const fresh = !applied.has(body.transactionId);
       const r = apply(body.transactionId, body.playerId, body.currency, -Number(body.amount));
+      // Record on the operator book only on first apply (dup retries mustn't double-count).
+      if (r && fresh && body.betId) bookEntry(body.betId, body.playerId, body.currency).bet += Number(body.amount);
       return r ? json(r) : json({ error: "insufficient_funds" }, 402);
     }
     if (path === "win") {
       counts.win++;
+      const fresh = !applied.has(body.transactionId);
       const r = apply(body.transactionId, body.playerId, body.currency, +Number(body.amount));
+      if (r && fresh && body.betId) bookEntry(body.betId, body.playerId, body.currency).win += Number(body.amount);
       return r ? json(r) : json({ error: "insufficient_funds" }, 402);
     }
     if (path === "rollback") {
@@ -116,6 +143,8 @@ const server = Bun.serve({
         balances.set(k, (balances.get(k) ?? START_BALANCE) - delta);
         applied.delete(body.transactionId);
         deltas.delete(body.transactionId);
+        // Reflect the reversal on the operator book (the rolled-back debit no longer counts).
+        if (body.betId && book.has(body.betId)) bookEntry(body.betId, body.playerId, body.currency).rollback += -delta;
       }
       return json({ operatorTxId: `op-${++opSeq}`, balance: balances.get(k) ?? START_BALANCE });
     }

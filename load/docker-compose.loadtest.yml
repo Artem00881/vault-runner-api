@@ -1,0 +1,101 @@
+# Vault Run — LOAD-TEST target stack (Phase 4.5c.3 10k SLA run).
+#
+# A SELF-CONTAINED target: postgres + redis + the API, all on one box, in TEST env
+# (NO 1Password / Caddy / mTLS — those are prod edge concerns, irrelevant to a load box).
+# The API is BUILT from the working tree on the box (the Dockerfile runs
+# `prisma migrate deploy` on boot, so a fresh DB is migrated automatically) and bound on
+# the chosen interface so a SEPARATE generator host can reach it over the private net.
+#
+# Driven by load/hetzner-setup.sh (which writes a .env.loadtest with the knobs). Run via:
+#   docker compose --env-file load/.env.loadtest -f load/docker-compose.loadtest.yml up -d --build
+#
+# KEY load-box choices vs the prod compose:
+#  - THROTTLE_LIMIT is RAISED to ~10M (prod default 120/min/IP would 429 a generator that
+#    opens thousands of guest auths from ONE IP — proven in the local smoke). The app.module
+#    comment says exactly this: "raise for load tests."
+#  - METRICS_TOKEN is set so /metrics is reachable for --scrape-metrics (H5 still locks it).
+#  - GAME_AUTOSTART is left ON (default) so the engine elects a leader + cycles rounds.
+#  - WALLET_PROVIDER_TYPE defaults to `internal` (guest book). For the OPERATOR-mode
+#    settlement run, set it to `operator` + the RISK_* ceilings (see hetzner-setup.sh
+#    --operator and load/RUN-10K.md) and run the stub wallet alongside.
+#  - The API port is published on ${BIND_ADDR} (default 0.0.0.0 → reachable on the private
+#    AND public IP; prefer setting BIND_ADDR to the box's PRIVATE IP + a Hetzner firewall).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vaultrun-postgres
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: vaultrun
+    # localhost-only on the box; the API reaches it over the compose network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Tuned a bit hotter than the dev default — a 10k run drives a lot of short txns.
+    command:
+      - postgres
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-300}"
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-512MB}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vaultrun"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: vaultrun-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--appendonly", "no"]
+    volumes:
+      - redisdata:/data
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: vaultrun-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://vault:vault@postgres:5432/vaultrun?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      JWT_SECRET: "${JWT_SECRET:-loadtest-jwt-secret}"
+      GAME_CURRENCY: "${GAME_CURRENCY:-DEMO}"
+      PORT: "3001"
+      # /metrics bearer (H5). The harness passes the same value via METRICS_TOKEN.
+      METRICS_TOKEN: "${METRICS_TOKEN:-loadtok}"
+      # CRITICAL for a load box: do not 429 the generator's guest-auth burst.
+      THROTTLE_LIMIT: "${THROTTLE_LIMIT:-10000000}"
+      THROTTLE_TTL_MS: "${THROTTLE_TTL_MS:-60000}"
+      # Wallet mode: internal (default) or operator (set via --env-file for the op-mode run).
+      WALLET_PROVIDER_TYPE: "${WALLET_PROVIDER_TYPE:-internal}"
+      # Risk ceilings — only consulted in operator mode (boot guard fails closed without
+      # them when WALLET_PROVIDER_TYPE=operator). Harmless in internal mode.
+      RISK_MAX_WIN_PER_BET: "${RISK_MAX_WIN_PER_BET:-100000000}"
+      RISK_MAX_MULTIPLIER: "${RISK_MAX_MULTIPLIER:-10000}"
+      RISK_MAX_ROUND_EXPOSURE: "${RISK_MAX_ROUND_EXPOSURE:-1000000000}"
+      RISK_MAX_BET: "${RISK_MAX_BET:-1000000}"
+      # Salt provider: random fallback is fine for a play-money load box (NOT real money).
+      SALT_PROVIDER_TYPE: "${SALT_PROVIDER_TYPE:-random}"
+      NODE_ENV: "production"
+    # Publish on the chosen interface so the generator host can reach it. Default 0.0.0.0
+    # (public+private); set BIND_ADDR to the PRIVATE IP for a private-only target.
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:3001:3001"
+    # Scale to N API replicas for a multi-node-on-one-box experiment (default 1 — a single
+    # "node" is what Step-1 calibration measures). For the real Step-2 cluster use SEPARATE
+    # boxes behind a LB, not replicas here. NOTE: replicas need the published-port line
+    # removed + a real LB; keep 1 unless you know you want this.
+    deploy:
+      replicas: ${API_REPLICAS:-1}
+
+volumes:
+  pgdata:
+  redisdata:

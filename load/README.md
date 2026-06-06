@@ -125,9 +125,12 @@ p99 and `ws_connections` gauge — that is the ground truth.
 | Var | Default | Meaning |
 |---|---|---|
 | `BASE_URL` | `http://localhost:3001` | API base |
-| `CLIENTS` | 200 | total sockets across all workers |
-| `WORKERS` | auto `min(CLIENTS, cpus, 8)` | generator worker threads |
-| `DURATION_MS` | 30000 | steady-state run length |
+| `CLIENTS` | 200 | total sockets across all workers (FIXED-N mode) |
+| `WORKERS` | auto `min(CLIENTS, cpus, 8)` | generator worker threads (set `WORKERS=$(nproc)` per box) |
+| `RAMP_TO` | 0 | **>0 ⇒ RAMP mode**: grow 0→`RAMP_TO` sockets over `RAMP_SECONDS`, then hold `DURATION_MS`. Prints a LIVE degradation series + a knee summary. `RAMP_TO` overrides `CLIENTS`. |
+| `RAMP_SECONDS` | 120 | ramp duration (clients arrive ~linearly) |
+| `SAMPLE_EVERY_MS` | 5000 | live-series cadence in RAMP mode (needs `--scrape-metrics` for the server cols) |
+| `DURATION_MS` | 30000 | steady-state hold length (after the ramp, in RAMP mode) |
 | `BET_RATE` | 0.5 | fraction of clients betting each window |
 | `BET_AMOUNT` | 50 | stake (minor units) |
 | `CASHOUT_AT` | 1.5 | auto-cashout target; `<=1` ⇒ manual cash-out at 1.2x (exercises the cash_out ack leg) |
@@ -156,15 +159,31 @@ BASE_URL=http://localhost:3001 CLIENTS=100 DURATION_MS=25000 BET_RATE=0.5 \
 # Exercise the manual cash_out ack leg (no auto-cashout):
 CLIENTS=200 CASHOUT_AT=0 DURATION_MS=30000 bun load/ws-load.ts
 
-# Concurrency push toward the 10k SLA (shard hard; ideally across machines):
+# RAMP mode (calibration — find the per-node degradation knee). Grows 0→4000 over
+# 5 min, holds 60s; prints a live ws_conn/p99/tickGap series + a knee verdict:
+BASE_URL=http://<target>:3001 RAMP_TO=4000 RAMP_SECONDS=300 SAMPLE_EVERY_MS=5000 \
+  DURATION_MS=60000 WORKERS=$(nproc) BET_RATE=0.2 CASHOUT_AT=1.3 \
+  SCRAPE_METRICS=1 METRICS_TOKEN=loadtok bun load/ws-load.ts
+
+# Concurrency push toward the 10k SLA (shard hard; ALWAYS across machines):
 CLIENTS=10000 WORKERS=16 BET_RATE=0.2 DURATION_MS=60000 SCRAPE_METRICS=1 \
   AUTH_CONCURRENCY=100 bun load/ws-load.ts
 ```
 
+> **CRITICAL — raise the throttle on the target.** The global per-IP rate limit
+> (`THROTTLE_LIMIT`, default **120/min/IP**) will `429` a generator that opens
+> thousands of guest auths from one IP (proven locally: 40 rapid `/api/auth/guest`
+> → 40×429; with `THROTTLE_LIMIT=10000000` → 40×201). The load-box compose sets it
+> to ~10M. Symptom if you forget: `authErrors` high, `connected ≪ CLIENTS`.
+
 > A single host rarely sustains 10k active sockets cleanly — watch the SUSPECT
 > flag and the loop-lag line. To truly hit 10k, run several copies on separate
-> boxes pointed at the same target and **sum the server `ws_connections` gauge**
+> boxes pointed at the same target and **sum the server `ws_connections` gauge`**
 > (ground truth), not the per-process client counters.
+
+> **For the full multi-host Hetzner 10k run procedure, see [`RUN-10K.md`](./RUN-10K.md)**
+> (box bootstrap via `hetzner-setup.sh`, calibration → cluster → failover/recon at
+> scale → operator-mode settlement run, with exact commands + SLA pass/fail thresholds).
 
 ---
 
@@ -233,12 +252,31 @@ discrepancy (CI/soak-gate friendly).
 for internal/guest play, so the ledger-conservation invariants (1, 3, 4) are scoped
 to `operatorId IS NULL` and validate the **internal book**. Operator-mode bets keep
 their book on the operator side (no ledger rows) and are reported as
-out-of-scope-here — never silently passed; their reconciliation against the operator
-statement is the **4.5** operator-soak's job. Invariants 2 and 5 are mode-agnostic.
+out-of-scope-here — never silently passed. Invariants 2 and 5 are mode-agnostic.
+
+**Operator-book reconciliation — `scripts/operator-recon-check.ts` (NEW).** The
+operator-mode counterpart: it pulls the stub operator wallet's book (the new
+bearer-gated `GET /debug/book` on `operator-wallet-stub.ts`, keyed by the server
+`betId` the seamless wallet sends on every move) and cross-matches it against our
+`game_bets` where `operatorId IS NOT NULL`. Invariants: **O1** every `cashed_out`
+op-bet has exactly one operator `win` == `payout`; **O2** no `busted` op-bet got a
+win; **O3** every wagered op-bet has a `bet` debit == stake (net of rollback); **O4**
+no op-bet stuck in `reserving|cancelling|payout_pending`; **O5** book conservation
+`Σbet − Σwin − Σrollback == Σstake(wagered) − Σpayout(cashed)`. Run it AFTER an
+operator-mode soak, BEFORE the stub restarts (its book is in-memory; for a real
+operator the equivalent input is the operator's transaction statement):
+```bash
+DATABASE_URL=… STUB_URL=http://localhost:4001 STUB_KEY=stub-key OPERATOR_CODE=load-stub \
+  bun scripts/operator-recon-check.ts
+```
+> The op-book check needs a stub instance whose in-memory book covers ALL the op-bets
+> being checked — do NOT restart the stub mid-run, and start from a clean op-bet slate
+> (a stale DB + fresh stub shows false "missing-debit/missing-win" for the pre-restart bets).
+
 The full failure-injected 1e6-round soak that EXERCISES the recovery paths (kill
-nodes, toxiproxy the operator wallet to force `payout_pending`, strand `reserving`),
-plus the operator-token client for `ws-load.ts` (it auths as a guest today), are
-driven in **4.5**; this is the check you run against the resulting DB.
+nodes, toxiproxy the operator wallet to force `payout_pending`, strand `reserving`)
+is the multi-host run in **`RUN-10K.md`**; these two checks are what you run against
+the resulting DB (internal book) + operator book.
 
 ---
 
