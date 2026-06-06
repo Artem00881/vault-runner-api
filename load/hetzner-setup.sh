@@ -64,11 +64,19 @@ usage() {
 }
 
 # --- detect the Hetzner private IP (ens10 / enp7s0 on Cloud), else 0.0.0.0 ---
+# BUG-FIX (4.5c.3): the old version grepped ALL interfaces' addrs for an RFC-1918
+# range and took head -1. On a box where Docker is already up, the docker bridges
+# (docker0=172.17.0.1, br-*=172.18.0.1) ARE in 172.16/12 and get listed before the
+# real cloud private NIC — so it bound the API to the docker bridge gateway, which
+# the generator host cannot reach. Fix: enumerate by INTERFACE and skip docker/
+# bridge/veth/lo devices, so only a genuine NIC (eth0 private alias / ens10 / enp7s0)
+# can win. Still falls back to 0.0.0.0 when there's no private NIC (cross-DC boxes
+# talk over public IPv4 anyway; the firewall, not the bind, restricts access).
 detect_bind_addr() {
   if [ -n "${BIND_ADDR:-}" ]; then echo "$BIND_ADDR"; return; fi
   local ip
-  ip="$(ip -4 -o addr show 2>/dev/null \
-    | awk '{print $4}' | cut -d/ -f1 \
+  ip="$(ip -4 -o addr show scope global 2>/dev/null \
+    | awk '$2 !~ /^(docker|br-|veth|lo|virbr)/ {print $4}' | cut -d/ -f1 \
     | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -1 || true)"
   if [ -n "$ip" ]; then echo "$ip"; else echo "0.0.0.0"; fi
 }
@@ -108,8 +116,14 @@ maybe_checkout_pin() {
     git -C "$REPO_DIR" fetch --all --tags --quiet || true
     git -C "$REPO_DIR" checkout "$PIN_COMMIT" || err "could not checkout $PIN_COMMIT — measuring the current tree instead"
     log "now at $(git -C "$REPO_DIR" rev-parse --short HEAD)"
-  else
-    [ -n "$PIN_COMMIT" ] && log "not a git checkout (rsync'd tree?) — measuring the tree as-is"
+  elif [ -n "$PIN_COMMIT" ]; then
+    # BUG-FIX (4.5c.3): the old `[ -n "$PIN_COMMIT" ] && log …` one-liner was the
+    # function's LAST command. When PIN_COMMIT='' (the documented "use the rsync'd
+    # tree as-is" override) the test is false → the && chain returns exit 1 → under
+    # `set -e` that aborts the whole script before bring_up_stack ever runs. Using an
+    # explicit elif (a normal compound statement, not a trailing &&) returns 0 either
+    # way, so PIN_COMMIT='' now correctly proceeds to measure the tree as-is.
+    log "not a git checkout (rsync'd tree?) — measuring the tree as-is"
   fi
 }
 
