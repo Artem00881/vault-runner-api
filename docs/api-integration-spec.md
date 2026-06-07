@@ -715,6 +715,20 @@ All strings below are emitted verbatim by the code (no paraphrase).
 > (ambiguous timeout → compensated), `wallet_error`, and `payout_pending`
 > (see §9) — these manifest to the client as the rows above.
 
+**Bet void (`POST /api/operator/bets/:betId/void`, §13.3):**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `invalid betId` | **400** | `:betId` is not a UUID. |
+| `bet_not_found` | **404** | The bet is unknown, is not in **your** operator scope, or is internal/guest play. Returned identically in all three cases (no cross-tenant existence oracle). |
+| `bet_not_settled` | **409** | The bet is still `active` (live in the round) — settle it first, then void. |
+| `bet_transient` | **409** | The bet is in a transient money state (`reserving` / `cancelling` / `payout_pending`) — retry the void once it settles. |
+| `bet_state_changed` | **409** | The settle-state CAS lost a race (the bet changed under us) — safe to retry. |
+
+> The void route is authenticated by the **reporting API key** (§13.1), so the
+> launch/session and WebSocket error tables above do not apply to it; failures
+> surface as the HTTP status + error string in this table.
+
 ---
 
 ## 13. Reporting, round history & provably-fair
@@ -736,6 +750,7 @@ can exceed 2^53); demo bets are excluded unless `includeDemo=true`.
 | `GET /api/operator/reports/daily?from&to[&currency][&includeDemo]` | The same, bucketed per UTC day. |
 | `GET /api/operator/reports/bets?from&to[&currency][&includeDemo][&cursor][&limit]` | Paginated per-bet rows (id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo, timestamps) with `nextCursor`. |
 | `GET /api/operator/reports/transaction?transactionId=…` (or `?betId=…`) | Single-transaction status lookup (§13.2) — the disposition of one money-move when a wallet response was lost. |
+| `POST /api/operator/bets/:betId/void` | **Money-write** — fully reverse a settled bet so it is as if it never happened (refund the stake; reclaim the payout if it won). Idempotent, tenant-scoped (§13.3). |
 
 Example `summary` response:
 
@@ -821,7 +836,151 @@ Success **200**:
 >   404. (404 is returned identically for not-found, another operator's transaction, and
 >   internal/guest play — no cross-tenant existence signal.)
 
-### 13.3 Player read-only endpoints (session-token auth)
+### 13.3 Bet void / refund (operator-initiated)
+
+Source of truth: `src/game/operator-bets.controller.ts`,
+`src/game/bets.service.ts` (`voidBet` / `performVoidReversals`),
+`src/wallet/operator-wallet.types.ts` (the `/rollback` contract).
+
+Fully reverse a **settled** bet so it is as if it never happened: **refund the
+stake**, and for a **won** bet ALSO **reclaim the payout** (the clawback). This is
+the operator's correction/dispute tool (e.g. a confirmed fraud or platform error on
+a single bet). It is **idempotent on the bet**, **tenant-scoped**, and **resumable**
+(a reversal interrupted mid-flight is finished on retry — see the operator-facing
+notes).
+
+```http
+POST /api/operator/bets/{betId}/void HTTP/1.1
+Authorization: Bearer vrk_<operatorId>.<secret>
+Content-Type: application/json
+
+{ "reason": "chargeback #88213 — confirmed fraud" }
+```
+
+- **Auth.** The **reporting API key** (§13.1), `Authorization: Bearer
+  vrk_<operatorId>.<secret>`. The route is **hard-scoped** to your `operatorId`
+  (taken only from the key) and `voidBet` re-checks `bet.operatorId` — a bet that is
+  not yours returns **404** `bet_not_found` (no cross-tenant existence oracle).
+- **Path param.** `betId` — our bet UUID (the same `betId` we sent on every `/bet` /
+  `/win` / `/rollback`). A non-UUID → **400** `invalid betId`.
+- **Body.** `{ "reason"?: string }` — optional. Logged (audit trail) only; capped at
+  **500 characters**, control characters are stripped and whitespace collapsed, a
+  non-string is treated as absent. The body may be empty (`{}`).
+
+#### Void rules (status → behaviour)
+
+The action depends on the bet's current status. Only **settled** bets can be voided;
+everything else is either an idempotent no-op or a retryable conflict.
+
+| Bet status | Behaviour | Result |
+|---|---|---|
+| `busted` (lost) | Refund the stake. | **200**, `status:"voided"`, `reversed:true`. |
+| `cashed_out` (won) | Reclaim the payout **first**, then refund the stake. | **200**, `status:"voided"`, `reversed:true`. |
+| `active` (live in the round) | Not settled — settle it first. | **409** `bet_not_settled`. |
+| `reserving` / `cancelling` / `payout_pending` | Transient money state — retry once settled. | **409** `bet_transient`. |
+| `voided` | Already voided — idempotent no-op. | **200**, `status:"voided"`, `reversed:false`. |
+| `cancelled` (player pre-settlement cancel) | Already net-zero (stake was refunded at cancel) — no-op. | **200**, `status:"cancelled"`, `reversed:false`. |
+| not yours / not found / internal or guest | No such bet **in your scope**. | **404** `bet_not_found`. |
+| (path) non-UUID `betId` | Malformed request. | **400** `invalid betId`. |
+| (race) settle-state CAS lost a race | The bet changed under us — retry. | **409** `bet_state_changed`. |
+
+> The reclaim of a won bet runs **before** the stake refund by design: if the
+> operator rejects the clawback (see note 2), nothing has been refunded yet and the
+> void aborts cleanly and is retryable — the player can never end up refunded-but-not-
+> reclaimed.
+
+#### Success response (`VoidResult`)
+
+**200**:
+
+```json
+{
+  "ok": true,
+  "betId": "f3a1c2d4-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+  "status": "voided",
+  "reversed": true,
+  "refundedStake": "100",
+  "reclaimedPayout": "245"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `ok` | Always `true` on a 200 (failures are HTTP 4xx with an error string per §12). |
+| `betId` | Echoes the path `betId`. |
+| `status` | The bet's **final** status — `voided` (a settled bet was reversed, or a prior void replayed) or `cancelled` (a player-cancelled bet, already net-zero). |
+| `reversed` | Did **this** call perform the reversal? `true` = this call moved money; `false` = the bet was already net-zero before this call (an idempotent replay of a `voided`/`cancelled` bet). Use this to distinguish a first void from a retry. |
+| `refundedStake` | The bet's **lifetime** void outcome — minor units returned to the player (the stake). A **minor-unit string**. |
+| `reclaimedPayout` | The bet's **lifetime** void outcome — minor units reclaimed from the player (the original payout; `"0"` if the bet never won). A **minor-unit string**. |
+
+> `refundedStake` / `reclaimedPayout` describe the bet's **lifetime** void outcome,
+> not necessarily what this specific call moved. On an idempotent replay
+> (`reversed:false`) they still report the same figures (a re-voided won bet returns
+> the original stake **and** payout). To know whether **this** call did the work,
+> read `reversed`, not the money figures.
+
+#### Operator-facing notes (read before enabling void)
+
+These determine how a void interacts with **your** wallet and your books. They are
+not optional reading — a wrong assumption here double-reverses money.
+
+1. **A void is issued as `/rollback`s of the ORIGINAL transactions — not new
+   `/bet`/`/win` calls.** In operator mode we reverse the bet by rolling back the
+   exact `transactionId`s of the original moves:
+   - the stake refund = `POST /rollback` with `transactionId =
+     "bet:{roundId}:{userId}:{panel}:debit"` (the original `/bet`);
+   - the payout reclaim = `POST /rollback` with `transactionId =
+     "bet:{betId}:payout"` (the original `/win`).
+
+   Because these are rollbacks of the original moves (not fresh debits/credits), a
+   void **does not inflate turnover or GGR** — the original bet/win are simply undone
+   on your statement. Your `/rollback` (§7.3) **MUST be idempotent BOTH ways**: a
+   rollback of a `transactionId` you never applied is a no-op, **and** a **repeated**
+   rollback of the **same** `transactionId` is a no-op returning the same
+   authoritative balance. The RGS relies on repeat-rollback idempotency because a
+   void interrupted between its reclaim and refund legs is **retried** (by the
+   operator re-POSTing the void, and by our internal `voiding` finalizer sweep),
+   re-issuing the same rollback. **A non-idempotent repeat-rollback would
+   double-reverse the money.**
+
+2. **The clawback's net effect is operator-defined.** The reclaim of a won payout is
+   a rollback of the `win`; whether it is *allowed*, and what it does if the player
+   has already spent the funds, is **your wallet's decision**. You may apply it
+   (possibly taking the player's balance negative) or **reject** it. If you reject
+   the reclaim, our `reverse` call propagates the failure: the void **aborts cleanly
+   on our side** (nothing was refunded yet — the reclaim runs first), the bet is left
+   in an internal `voiding` state, and the action is **retryable** (re-POST the void,
+   or our finalizer sweep retries it) once you can honour the reclaim. A `409`
+   `bet_transient` is *not* what a rejected clawback returns — a rejected clawback
+   surfaces as the void not completing (the bet does not reach `voided`); poll
+   `transaction status` (§13.2) / reporting to confirm.
+
+3. **A voided bet is excluded from GGR / turnover** in the reporting API (§13.1) —
+   it is treated as-if-never-happened. Its **transaction status** (§13.2) reflects
+   the reversal: `debitState:"reversed"` (the stake was refunded) and
+   `payoutState:"none"` (the payout, if any, was reclaimed). Reconcile (§10) sees the
+   void net cleanly: the stake refund nets the original debit and the payout reclaim
+   nets the original payout, both keyed `refType:"bet"` / `refId:betId`.
+
+#### Activation prerequisites (REQUIRED before an operator is granted void access)
+
+This is a **money-write** endpoint authenticated by the **reporting** key. Two
+controls are **pending and required before** any operator is enabled with void
+access — until they are in place, treat void as a privileged, secured operation:
+
+- **Per-operator rate limit (pending / required).** Today only the **global per-IP**
+  request throttle applies; there is **no per-operator rate limit** on this
+  money-write route. A per-operator limit MUST be added before enabling void in
+  production.
+- **Read-vs-write key scope (pending / decision required).** The **same reporting
+  key** that authorizes read-only reports (§13.1) currently **also authorizes this
+  money write**. Until a separate **write-capability / dedicated write key** exists,
+  **treat the reporting key as write-capable**: rotate and store it accordingly, and
+  an **IP allow-list** (the reporting allow-list, §3) is **strongly recommended** for
+  the void caller. A decision on splitting read vs write capability is required
+  before activation.
+
+### 13.4 Player read-only endpoints (session-token auth)
 
 Source of truth: `src/wallet/wallet.controller.ts`.
 
@@ -830,13 +989,13 @@ Source of truth: `src/wallet/wallet.controller.ts`.
 | `GET /api/wallet/balance` | Returns `{ currency, balance }`. In operator mode this is **your authoritative balance** (via `/balance`), not our journal. |
 | `GET /api/wallet/transactions` | Returns our **local journal** (last 50 ledger rows). In operator mode this is a reconciliation aid, **not** the player's authoritative statement (that lives at the operator). |
 
-### 13.4 Round history (public)
+### 13.5 Round history (public)
 
 `GET /api/rounds/history` (source: `src/game/rounds.controller.ts`) — the last 30
 finished rounds: `[{ id, crashMult, endedAt }]`. `GET /api/round/current` returns the
 current public round snapshot (no crash leak).
 
-### 13.5 Provably-fair
+### 13.6 Provably-fair
 
 Crash points are verifiable with zero trust in our server. Public endpoints:
 `GET /api/fairness/current` (active chain commitment), `GET /api/fairness/round/:id`

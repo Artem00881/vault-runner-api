@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { ConflictException, Inject, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
@@ -45,6 +45,19 @@ export interface CashoutResult {
   currency?: string;
   /** operator-mode: the win is recorded but not yet confirmed (H2 reconciler). */
   pending?: boolean;
+}
+
+/** Result of an operator-initiated VOID (Phase 6). Money as minor-unit strings.
+ *  `refundedStake`/`reclaimedPayout` describe the bet's VOID OUTCOME (lifetime), not
+ *  necessarily what THIS call moved — check `reversed` to know if this call did the work
+ *  (an idempotent re-void returns `reversed:false` with the same outcome figures). */
+export interface VoidResult {
+  ok: boolean;
+  betId: string;
+  status: string; // final bet status (voided | cancelled)
+  reversed: boolean; // true if THIS call performed the reversal (false = already net-zero before this call)
+  refundedStake: string; // minor units returned to the player (the stake)
+  reclaimedPayout: string; // minor units reclaimed from the player (0 if the bet wasn't a win)
 }
 
 /**
@@ -480,6 +493,153 @@ export class BetsService {
       data: { status: "busted", settledAt: new Date() },
     });
     return active.map((b) => ({ userId: b.userId, panel: b.panel as Panel }));
+  }
+
+  /**
+   * Operator-initiated VOID of a SETTLED bet (Phase 6) — fully reverse its money so it
+   * is as if it never happened: refund the stake, and for a won bet ALSO reclaim the
+   * payout (the clawback). Tenant-scoped by operatorId; idempotent (re-void → no-op);
+   * resumable (a partial reversal is finished on retry — the reversals are idempotent).
+   *
+   * Void rules (operator-signed-off "standard full void"):
+   *   busted     → refund stake.
+   *   cashed_out → reclaim payout (FIRST) + refund stake.
+   *   active                              → reject `bet_not_settled` (settle first).
+   *   reserving|cancelling|payout_pending → reject `bet_transient` (retry once settled).
+   *   voided                             → idempotent no-op success.
+   *   cancelled (player pre-settle cancel)→ already net-zero → no-op success.
+   *
+   * Atomicity: a CAS claims the bet into `voiding` so two concurrent voids can't both
+   * move money. The reclaim runs FIRST — if it fails (e.g. the operator can't reclaim a
+   * spent payout) NOTHING was refunded yet and the void aborts cleanly (bet left
+   * `voiding`, retryable). The stake refund (returning money) runs second. All moves
+   * carry stable idempotency keys and, in operator mode, reverse the ORIGINAL operator
+   * transactions (so a void posts as rollbacks, never new turnover → no GGR inflation).
+   *
+   * NB (cosmetic, not money): the leaderboard total_loot / biggest_multiplier and the
+   * realized-RTP metric are NOT reversed here — a void is a rare admin action and those
+   * are non-money aggregates. Tracked as a follow-up if exact stat reversal is needed.
+   */
+  async voidBet(operatorId: string, betId: string, reason?: string): Promise<VoidResult> {
+    const bet = await this.prisma.bet.findUnique({
+      where: { id: betId },
+      select: {
+        id: true, operatorId: true, status: true, walletId: true,
+        amount: true, payout: true, panel: true, roundId: true, userId: true,
+      },
+    });
+    // Tenant gate: not ours / not found / internal-or-guest (operatorId null) → 404,
+    // identical either way (no cross-tenant existence oracle).
+    if (!bet || bet.operatorId !== operatorId) throw new NotFoundException("bet_not_found");
+
+    // Idempotent terminal short-circuits (already net-zero).
+    if (bet.status === "voided")
+      return { ok: true, betId, status: "voided", reversed: false, refundedStake: bet.amount.toString(), reclaimedPayout: bet.payout.toString() };
+    if (bet.status === "cancelled")
+      return { ok: true, betId, status: "cancelled", reversed: false, refundedStake: bet.amount.toString(), reclaimedPayout: "0" };
+
+    // Reject in-flight / transient states — a void must never race a money move.
+    if (bet.status === "active") throw new ConflictException("bet_not_settled");
+    if (bet.status === "reserving" || bet.status === "cancelling" || bet.status === "payout_pending")
+      throw new ConflictException("bet_transient");
+
+    // Claim a SETTLED bet (busted|cashed_out) into `voiding` via CAS — unless we are
+    // RESUMING our own `voiding` (a prior call reversed part and failed to finalise).
+    if (bet.status !== "voiding") {
+      const claim = await this.prisma.bet.updateMany({
+        where: { id: betId, status: bet.status }, // busted | cashed_out
+        data: { status: "voiding" },
+      });
+      if (claim.count === 0) throw new ConflictException("bet_state_changed"); // raced — retry
+    }
+
+    // Reverse the money (reclaim-first, idempotent) then finalise voiding → voided.
+    const hadPayout = bet.payout > 0n;
+    await this.performVoidReversals(bet);
+    await this.prisma.bet.updateMany({ where: { id: betId, status: "voiding" }, data: { status: "voided" } });
+    this.log.warn(
+      `bet ${betId} VOIDED by operator ${operatorId}${reason ? ` (reason: ${reason})` : ""} — ` +
+        `refund stake ${bet.amount}${hadPayout ? `, reclaim payout ${bet.payout}` : ""}`,
+    );
+    return {
+      ok: true,
+      betId,
+      status: "voided",
+      reversed: true,
+      refundedStake: bet.amount.toString(),
+      reclaimedPayout: hadPayout ? bet.payout.toString() : "0",
+    };
+  }
+
+  /**
+   * The two idempotent money reversals of a void, shared by voidBet and the
+   * `voiding` finalizer sweep so they ALWAYS use identical keys + ledger types.
+   *
+   * Reclaim FIRST (the risky clawback) so a failure leaves nothing refunded. Ledger
+   * types are chosen so a void NETS CLEANLY in scripts/reconcile-check.ts WITHOUT a
+   * script change, exactly like a player cancel: the stake refund is a `refund` (nets
+   * invariant 1a) and the payout reclaim is a NEGATIVE `payout_credit` (nets 1b), BOTH
+   * `refType:"bet"`/`refId:betId` so the reconcile join sees them. In operator mode each
+   * `reverse` rolls back the ORIGINAL operator transaction (no GGR inflation). All
+   * idempotent on their reverse keys (and on the original key at the operator).
+   */
+  private async performVoidReversals(bet: {
+    id: string; walletId: string; amount: bigint; payout: bigint; roundId: string; userId: string; panel: string;
+  }): Promise<void> {
+    if (bet.payout > 0n) {
+      await this.wallet$.reverse(bet.walletId, {
+        originalKey: `bet:${bet.id}:payout`,
+        reverseKey: `bet:${bet.id}:void_reclaim`,
+        amount: bet.payout,
+        originalDirection: "credit",
+        type: "payout_credit", // negative payout_credit → nets the original payout in reconcile 1b
+        ref: { refType: "bet", refId: bet.id },
+      });
+    }
+    await this.wallet$.reverse(bet.walletId, {
+      originalKey: `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`,
+      reverseKey: `bet:${bet.id}:void_refund`,
+      amount: bet.amount,
+      originalDirection: "debit",
+      type: "refund", // mirrors a cancel refund → nets the original debit in reconcile 1a
+      ref: { refType: "bet", refId: bet.id },
+    });
+  }
+
+  /**
+   * Finalize bets stranded in `voiding` (an operator void interrupted between the
+   * reclaim and refund legs, or before the status flip) — re-run the idempotent
+   * reversals and finalise. The owed money is thus self-healed without relying on the
+   * operator to re-POST the void (the H2-style recovery the other half-done money
+   * states already have). Both wallet modes (a demo void reverses on the ledger).
+   * Overlap-guarded by the caller; leader-gated by the gateway. Loudly alerts on any
+   * that remain stuck (owed refunds), never abandoning them. Returns how many finalised.
+   */
+  async reconcileVoidingBets(limit = 50): Promise<number> {
+    const stuck = await this.prisma.bet.findMany({
+      where: { status: "voiding" },
+      take: limit,
+      select: { id: true, walletId: true, amount: true, payout: true, roundId: true, userId: true, panel: true },
+    });
+    let finalized = 0;
+    for (const bet of stuck) {
+      try {
+        await this.performVoidReversals(bet);
+        const done = await this.prisma.bet.updateMany({ where: { id: bet.id, status: "voiding" }, data: { status: "voided" } });
+        if (done.count > 0) finalized++;
+      } catch {
+        // Still failing (e.g. operator down / a clawback the operator rejects) — leave
+        // `voiding`, retry next sweep. Per-bet errors recorded; never abandoned.
+        this.metrics.recordError("void_reconcile");
+      }
+    }
+    // Alert on anything still stuck AFTER the retry loop (owed refunds not yet finalised).
+    const remaining = await this.prisma.bet.count({ where: { status: "voiding" } });
+    if (remaining > 0)
+      this.log.error(
+        `${remaining} bet(s) stuck in 'voiding' — an operator void is incomplete (owed refund not finalised); the sweep keeps retrying.`,
+      );
+    return finalized;
   }
 
   /**

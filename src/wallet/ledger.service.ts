@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { Prisma, type LedgerTransaction } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
-import type { WalletProvider } from "./wallet-provider";
+import type { WalletProvider, ReverseParams } from "./wallet-provider";
 
 export type LedgerType =
   | "deposit"
@@ -55,6 +55,21 @@ export class LedgerService implements WalletProvider {
    */
   async rollback(): Promise<void> {
     return;
+  }
+
+  /**
+   * Reverse a settled move on the internal ledger by posting its INVERSE entry
+   * (operator-initiated void/refund). Refund a debit → a credit; reclaim a credit →
+   * a debit. Idempotent on `reverseKey` (record() dedups). A reclaim that exceeds the
+   * balance throws `insufficient_balance` (the clawback-fail case) — the caller aborts
+   * the void atomically. (The operator wallet overrides this with rollback-of-original.)
+   */
+  async reverse(walletId: string, p: ReverseParams): Promise<void> {
+    if (p.originalDirection === "debit") {
+      await this.credit(walletId, p.amount, p.type, p.reverseKey, p.ref); // refund a stake debit
+    } else {
+      await this.debit(walletId, p.amount, p.type, p.reverseKey, p.ref); // reclaim a payout credit
+    }
   }
 
   /**

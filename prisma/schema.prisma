@@ -173,7 +173,7 @@ model Bet {
   panel       String // A | B
   amount      BigInt
   autoCashout Decimal?  @map("auto_cashout") @db.Decimal(10, 2)
-  status      String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending
+  status      String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending|voiding|voided (voiding/voided = operator void, Phase 6)
   cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
   payout      BigInt    @default(0)
   demo        Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)

@@ -1,6 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import type { LedgerType, LedgerRef } from "./ledger.service";
-import type { WalletProvider, WalletTxResult } from "./wallet-provider";
+import type { WalletProvider, WalletTxResult, ReverseParams } from "./wallet-provider";
 import {
   type OperatorWalletApi,
   OperatorInsufficientFunds,
@@ -82,6 +82,26 @@ export class SeamlessOperatorWallet implements WalletProvider {
       transactionId: idempotencyKey,
       roundId: s.roundId ?? "",
       betId: ref?.refId ?? "",
+    });
+  }
+
+  /**
+   * Reverse a settled move by undoing the ORIGINAL transaction on the operator's
+   * statement (operator-initiated void/refund). Unlike a debit's ambiguous-failure
+   * compensation, this rollback is the INTENDED effect, so it is NOT swallowed — a
+   * failure (e.g. the operator can't reclaim a spent payout) propagates so the caller
+   * aborts the void rather than leaving it half-done. Idempotent at the operator on the
+   * original `transactionId`. (`amount`/`reverseKey`/`originalDirection` are unused
+   * here — the operator reverses by the original key; they exist for the ledger mode.)
+   */
+  async reverse(walletId: string, p: ReverseParams): Promise<void> {
+    const s = await this.resolveSession(walletId);
+    await this.operator.rollback(s.operatorId, {
+      playerId: s.playerId,
+      currency: s.currency,
+      transactionId: p.originalKey,
+      roundId: s.roundId ?? "",
+      betId: p.ref?.refId ?? "",
     });
   }
 

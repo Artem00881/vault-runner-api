@@ -66,6 +66,16 @@ export interface OperatorWalletApi {
   balance(operatorId: string, playerId: string, currency: string): Promise<number>;
   bet(operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse>;
   win(operatorId: string, req: OperatorWinRequest): Promise<OperatorWalletResponse>;
+  /**
+   * Undo a previously-applied bet/win identified by its `transactionId` (reversing the
+   * ORIGINAL move on your statement — not a new turnover-affecting entry, so GGR stays
+   * correct). MUST be idempotent BOTH ways: a rollback of a txId that never applied is a
+   * no-op, AND a REPEATED rollback of the SAME txId is a no-op returning the same
+   * authoritative balance. The RGS relies on repeat-rollback idempotency for two paths:
+   * ambiguous-debit compensation, and the operator-VOID resume (a void interrupted
+   * between its reclaim and refund legs is retried, re-issuing the same rollback). A
+   * non-idempotent repeat-rollback would double-reverse — so it is a hard requirement.
+   */
   rollback(operatorId: string, req: OperatorRollbackRequest): Promise<OperatorWalletResponse>;
 }
 

@@ -28,6 +28,27 @@ export interface WalletTxResult {
   balanceAfter: bigint;
 }
 
+/**
+ * Parameters for {@link WalletProvider.reverse} — reversing an already-APPLIED,
+ * settled money move (an operator-initiated void/refund). Carries BOTH the original
+ * move's key (so the operator wallet can roll it back on its own statement) AND a
+ * fresh reverse key + the amount/direction (so the internal ledger can post the
+ * inverse entry). Each provider uses only what its mode needs.
+ */
+export interface ReverseParams {
+  /** The ORIGINAL move's idempotency key — the operator's rollback target. */
+  originalKey: string;
+  /** Idempotency key for the internal ledger's INVERSE entry (operator mode ignores it). */
+  reverseKey: string;
+  /** The original move's magnitude (positive minor units). */
+  amount: bigint;
+  /** What the original move was: refund a `debit` = credit back; reclaim a `credit` = debit back. */
+  originalDirection: "debit" | "credit";
+  /** Ledger type for the internal inverse entry. */
+  type: LedgerType;
+  ref?: LedgerRef;
+}
+
 export interface WalletProvider {
   /** Move `amount` (positive minor units) OUT of the wallet (e.g. place a bet). */
   debit(
@@ -55,6 +76,20 @@ export interface WalletProvider {
    * operator wallet it calls the operator's rollback endpoint.
    */
   rollback(walletId: string, idempotencyKey: string, ref?: LedgerRef): Promise<void>;
+
+  /**
+   * Reverse an already-APPLIED, settled money move — an operator-initiated
+   * void/refund. UNLIKE {@link rollback} (which compensates an AMBIGUOUS move and is
+   * a no-op on the internal ledger), `reverse` ALWAYS returns the money, with
+   * mode-correct bookkeeping:
+   *  - internal ledger: posts the INVERSE entry under `reverseKey` (refund a debit =
+   *    a credit; reclaim a credit = a debit). Idempotent on `reverseKey`. Throws
+   *    `insufficient_balance` if a reclaim can't be covered (the clawback-fail case).
+   *  - operator wallet: calls the operator's idempotent rollback on `originalKey`, so
+   *    the original /bet or /win is undone on the operator's statement — no new
+   *    turnover / no GGR inflation. Idempotent on `originalKey` at the operator.
+   */
+  reverse(walletId: string, params: ReverseParams): Promise<void>;
 
   /** Current balance (minor units). */
   getBalance(walletId: string): Promise<bigint>;

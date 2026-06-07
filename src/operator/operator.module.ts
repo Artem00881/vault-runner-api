@@ -27,6 +27,9 @@ import { OperatorAuthGuard } from "./operator-auth.guard";
   // ReportingService + OperatorAuthGuard need only PrismaService (global). The guard
   // is registered so @UseGuards(OperatorAuthGuard) resolves it with its dependency.
   providers: [LaunchTokenService, GameSessionService, ReportingService, OperatorAuthGuard],
-  exports: [LaunchTokenService, GameSessionService],
+  // OperatorAuthGuard is exported so the GameModule's operator-facing controllers
+  // (e.g. the bet-void endpoint, which lives with BetsService) can reuse the same
+  // per-operator reporting-key auth + tenant scoping (Phase 6).
+  exports: [LaunchTokenService, GameSessionService, OperatorAuthGuard],
 })
 export class OperatorModule {}

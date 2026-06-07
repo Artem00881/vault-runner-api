@@ -213,13 +213,15 @@ async function main() {
       (paidBusted.length ? ` e.g. ${paidBusted.slice(0, 3).map((b) => b.id).join(", ")}` : ""),
   });
 
-  // --- 5. BACKLOG DRAINED: reserving|cancelling == 0 AND payout_pending == 0 ---
-  const reservingSlots = await prisma.bet.count({ where: { status: { in: ["reserving", "cancelling"] } } });
+  // --- 5. BACKLOG DRAINED: reserving|cancelling|voiding == 0 AND payout_pending == 0 ---
+  // `voiding` = an operator void stranded mid-reversal (owed refund not yet finalised);
+  // the reconcileVoidingBets sweep drains it, so it must be 0 after a clean soak (Phase 6).
+  const reservingSlots = await prisma.bet.count({ where: { status: { in: ["reserving", "cancelling", "voiding"] } } });
   const pendingPayouts = await prisma.bet.count({ where: { status: "payout_pending" } });
   checks.push({
-    name: "5. backlog drained (reserving|cancelling == 0, payout_pending == 0)",
+    name: "5. backlog drained (reserving|cancelling|voiding == 0, payout_pending == 0)",
     ok: reservingSlots === 0 && pendingPayouts === 0,
-    detail: `reserving_slots=${reservingSlots} pending_payouts=${pendingPayouts}`,
+    detail: `reserving|cancelling|voiding=${reservingSlots} pending_payouts=${pendingPayouts}`,
   });
 
   // ---- report ----

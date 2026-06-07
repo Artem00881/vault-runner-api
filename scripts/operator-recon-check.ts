@@ -120,10 +120,12 @@ async function main() {
       (o3mismatch.length ? ` mismatch e.g. ${o3mismatch.slice(0, 3).join(", ")}` : ""),
   });
 
-  // O4 — BACKLOG DRAINED (no operator bet stuck reserving|cancelling|payout_pending).
-  const backlog = opBets.filter((b) => ["reserving", "cancelling", "payout_pending"].includes(b.status));
+  // O4 — BACKLOG DRAINED (no operator bet stuck reserving|cancelling|payout_pending|voiding).
+  // `voiding` = an operator void stranded mid-reversal (Phase 6); the reconcileVoidingBets
+  // sweep drains it, so a clean soak ends with none.
+  const backlog = opBets.filter((b) => ["reserving", "cancelling", "payout_pending", "voiding"].includes(b.status));
   checks.push({
-    name: "O4. backlog drained (no op-bet in reserving|cancelling|payout_pending)",
+    name: "O4. backlog drained (no op-bet in reserving|cancelling|payout_pending|voiding)",
     ok: backlog.length === 0,
     detail: `${backlog.length} op-bet(s) in a transient state` + (backlog.length ? ` e.g. ${backlog.slice(0, 3).map((b) => `${b.id}:${b.status}`).join(", ")}` : ""),
   });

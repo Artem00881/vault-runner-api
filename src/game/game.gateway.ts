@@ -235,6 +235,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     try {
       await this.engine.recoverReservingBets(olderThanMs);
       await this.bets.reportReservingBacklog(); // refresh the backlog gauges + alert on stuck (Low-4)
+      // Phase 6: self-heal any operator void stranded mid-reversal (status 'voiding') by
+      // re-running its idempotent reversals + finalising — both wallet modes. Leader-gated
+      // (shared DB + money) by the guard above; alerts on anything still stuck.
+      await this.bets.reconcileVoidingBets();
     } catch (e: any) {
       // Per-bet failures are already logged inside recoverReservingBets; this catches a
       // top-level failure (e.g. the findMany itself on a DB blip) so it isn't silent.

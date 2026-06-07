@@ -1,5 +1,5 @@
 import type { LedgerType, LedgerRef } from "./ledger.service";
-import type { WalletProvider, WalletTxResult } from "./wallet-provider";
+import type { WalletProvider, WalletTxResult, ReverseParams } from "./wallet-provider";
 
 /**
  * Per-wallet money router for demo / fun mode (Phase 3).
@@ -64,6 +64,13 @@ export class WalletRouter implements WalletProvider {
 
   async rollback(walletId: string, idempotencyKey: string, ref?: LedgerRef): Promise<void> {
     return (await this.pick(walletId)).rollback(walletId, idempotencyKey, ref);
+  }
+
+  async reverse(walletId: string, params: ReverseParams): Promise<void> {
+    // Route by the wallet's persisted mode: a demo wallet reverses on the ledger; a
+    // real operator wallet reverses by rolling back the original at the operator — so
+    // a void NEVER posts play-money moves to a real wallet, or vice-versa.
+    return (await this.pick(walletId)).reverse(walletId, params);
   }
 
   async getBalance(walletId: string): Promise<bigint> {

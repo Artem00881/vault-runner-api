@@ -91,19 +91,19 @@ export type PayoutState = "none" | "pending" | "paid";
 // truth). A transient status is ALWAYS reported as "pending" — never as a flat boolean
 // that an operator could read as "did not happen". Pure functions (no I/O), unit-testable.
 export function debitStateOf(status: string): DebitState {
-  if (status === "reserving") return "pending"; // debit may or may not have applied — the RGS reconciles/rolls back
-  if (status === "cancelled") return "reversed"; // debit applied, then fully refunded (net zero)
+  if (status === "reserving" || status === "voiding") return "pending"; // debit may/will be reconciled (reserving) or is mid-reversal (voiding)
+  if (status === "cancelled" || status === "voided") return "reversed"; // debit applied then fully refunded (player cancel) / reversed (operator void)
   return "applied"; // active | cashed_out | busted | payout_pending | cancelling → the stake WAS debited
 }
 export function refundStateOf(status: string): RefundState {
-  if (status === "cancelling") return "pending"; // a refund is in flight
-  if (status === "cancelled") return "applied"; // refund completed
+  if (status === "cancelling" || status === "voiding") return "pending"; // a refund/reversal is in flight
+  if (status === "cancelled" || status === "voided") return "applied"; // refund/reversal completed
   return "none";
 }
 export function payoutStateOf(status: string): PayoutState {
   if (status === "cashed_out") return "paid"; // payout credited AND confirmed at the operator
-  if (status === "payout_pending") return "pending"; // win owed; operator credit unconfirmed (reconciler retries, may already be applied)
-  return "none";
+  if (status === "payout_pending" || status === "voiding") return "pending"; // win owed (reconciler) / payout mid-reclaim (voiding)
+  return "none"; // voided → the payout (if any) was reclaimed → net none
 }
 
 export interface TransactionStatusResponse {

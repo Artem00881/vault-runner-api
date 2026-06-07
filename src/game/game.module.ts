@@ -13,12 +13,13 @@ import { PublicRoundCache } from "./public-round-cache";
 import { RiskService, assertRiskConfigForMode } from "./risk.service";
 import { RoundsController } from "./rounds.controller";
 import { BetsController } from "./bets.controller";
+import { OperatorBetsController } from "./operator-bets.controller";
 
 @Module({
   // HaModule exports ElectionService (engine + gateway inject it for leadership).
   // HaModule imports ONLY RedisModule — it must NOT import GameModule (no cycle).
   imports: [PrismaModule, RedisModule, FairnessModule, WalletModule, AuthModule, OperatorModule, HaModule],
-  controllers: [RoundsController, BetsController],
+  controllers: [RoundsController, BetsController, OperatorBetsController],
   providers: [
     GameEngineService,
     GameGateway,
