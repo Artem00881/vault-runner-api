@@ -1,0 +1,560 @@
+{
+  "info": {
+    "_postman_id": "vaultrun-rgs-b2b-collection-0001",
+    "name": "Vault Run — RGS B2B Integration",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Runnable Postman collection for integrating the **Vault Run** crash-game Remote Game Server (RGS) into an online-casino platform via the **seamless-wallet** model.\n\nAuthoritative source: `docs/api-integration-spec.md` (v1.0). Every route, header, body, and field here is derived from that spec and the production controllers (`src/operator/`, `src/wallet/`, `src/game/`, `src/fairness/`, `src/common/`). All money values on the wire are **integer minor units** (spec §8): `100` = €1.00 for EUR.\n\n**Convention (spec §0):**\n- Routes prefixed `/api/...` are **exposed by the RGS** — you call them (folders 1–4).\n- Routes with no `/api` prefix (`/bet`, `/win`, `/rollback`, `/balance`) are **exposed by YOU, the operator** — the RGS calls them. Folder 5 lets you fire example requests at your own wallet to confirm it speaks our protocol.\n\n**Setup:**\n1. Import this collection AND `vaultrun-sandbox.postman_environment.json`, then select the environment (top-right).\n2. Fill the secret-ish variables: `launchSecret`, `reportingKey`, `walletApiUrl`, `walletApiKey` (placeholders are present; replace with the values we issue you).\n3. Run **1. Operator — launch & session → POST /api/operator/launch** first: its pre-request script mints a signed launch JWT into `{{launchToken}}`, and its test script saves the returned session token into `{{sessionToken}}` for every other authenticated request.\n\n**WebSocket:** the live game protocol is Socket.IO (spec §6). Postman's Socket.IO request type is a GUI/app construct that is not part of the importable Collection v2.1 JSON schema, so folder 6 is a **documentation-only stub**; the full, copy-pasteable Socket.IO usage (handshake auth, emits, listeners) is in `postman-collection-guide.md`.\n\n**Status:** the wire contract is implemented and stable; production currently runs operator-mode OFF (internal play-money demo) and the hosted operator-mode sandbox URL is TBD — do not hardcode any hostname (spec §14).",
+    "version": "1.0.0"
+  },
+  "item": [
+    {
+      "name": "1. Operator — launch & session",
+      "description": "The signed launch protocol (spec §4/§5). You mint a short-lived HMAC-SHA256 launch JWT with your `launchSecret`, the client posts it to `POST /api/operator/launch`, and the RGS returns a **session (play) token** used for the WebSocket handshake. Closing the session is a logout.\n\nThe `POST /api/operator/launch` request includes a **pre-request script** that mints the launch JWT for you (so you don't need a server) and a **test script** that captures the session token into `{{sessionToken}}`.",
+      "item": [
+        {
+          "name": "POST /api/operator/launch",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Mint a launch JWT (HMAC-SHA256) signed with {{launchSecret}} and store it in {{launchToken}}.",
+                  "// Mirrors src/operator/launch-token.service.ts: claims operatorId, playerId, currency,",
+                  "// demo:false, jti (unique, one-time), iat, exp = iat + 120 (TTL_SECONDS = 120). See spec §4.",
+                  "// Uses Postman's built-in CryptoJS — no external deps.",
+                  "var CryptoJS = require('crypto-js');",
+                  "",
+                  "// base64url of a UTF-8 string",
+                  "function b64urlStr(str) {",
+                  "  return CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(str))",
+                  "    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+                  "}",
+                  "// base64url of a CryptoJS WordArray (used for the HMAC signature bytes)",
+                  "function b64urlWords(wordArray) {",
+                  "  return CryptoJS.enc.Base64.stringify(wordArray)",
+                  "    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+                  "}",
+                  "// RFC4122 v4 uuid for the one-time jti",
+                  "function uuidv4() {",
+                  "  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {",
+                  "    var r = (Math.random() * 16) | 0;",
+                  "    var v = c === 'x' ? r : (r & 0x3) | 0x8;",
+                  "    return v.toString(16);",
+                  "  });",
+                  "}",
+                  "",
+                  "var secret = pm.environment.get('launchSecret');",
+                  "if (!secret || secret.indexOf('REPLACE') === 0) {",
+                  "  console.warn('launchSecret is not set — set it in the environment before launching.');",
+                  "}",
+                  "",
+                  "var iat = Math.floor(Date.now() / 1000);",
+                  "var header = { alg: 'HS256', typ: 'JWT' };",
+                  "var payload = {",
+                  "  operatorId: pm.environment.get('operatorId'),",
+                  "  playerId: pm.environment.get('playerId'),",
+                  "  currency: pm.environment.get('currency'),",
+                  "  demo: false,",
+                  "  jti: uuidv4(),",
+                  "  iat: iat,",
+                  "  exp: iat + 120",
+                  "};",
+                  "",
+                  "var encHeader = b64urlStr(JSON.stringify(header));",
+                  "var encPayload = b64urlStr(JSON.stringify(payload));",
+                  "var signingInput = encHeader + '.' + encPayload;",
+                  "var signature = b64urlWords(CryptoJS.HmacSHA256(signingInput, secret));",
+                  "var jwt = signingInput + '.' + signature;",
+                  "",
+                  "pm.environment.set('launchToken', jwt);",
+                  "console.log('Minted launch JWT (jti=' + payload.jti + ', exp in 120s).');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Capture the session (play) token for every other authenticated request + the WS handshake.",
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "var data = {};",
+                  "try { data = pm.response.json(); } catch (e) { /* non-JSON error body */ }",
+                  "pm.test('response has a session token', function () {",
+                  "  pm.expect(data).to.have.property('token');",
+                  "});",
+                  "if (data && data.token) {",
+                  "  pm.environment.set('sessionToken', data.token);",
+                  "  console.log('Saved sessionToken (currency=' + data.currency + ', decimals=' + data.decimals + ', sessionId=' + data.sessionId + ').');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{launchToken}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/launch",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "launch"]
+            },
+            "description": "Open the game from a launch token (spec §5). **No auth header** — the launch JWT in the body is the credential.\n\nThe **pre-request script** mints the JWT into `{{launchToken}}` (HMAC-SHA256 over `header.payload` with `{{launchSecret}}`; claims `operatorId`, `playerId`, `currency`, `demo:false`, unique `jti`, `iat`, `exp=iat+120`). The **test script** saves `token` (the session/play token) into `{{sessionToken}}`.\n\n**Body:** `{ \"token\": \"<launch JWT>\" }`. `token` must be ≥ 10 chars else **400** `invalid_body`; a failed verification is **401** with the error string (`invalid_launch_token`, `unknown_operator`, `currency_not_allowed`, `demo_not_allowed`, `launch_token_already_used`).\n\n**200 response fields:** `token` (session token → WS `auth.token`), `sessionId`, `walletId`, `currency`, `decimals`, `locale`, `callbackUrl`. Session-token TTL defaults to 4 h. See spec §4, §5, §12."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /api/operator/session/close",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{sessionToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/session/close",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "session", "close"]
+            },
+            "description": "Close (revoke) the caller's session(s) — a logout (spec §5). Authenticated by the player's **own** session token (`Authorization: Bearer {{sessionToken}}`).\n\nSoft-revokes every live `GameSession` bound to that wallet: the token can no longer reconnect or bet, while in-flight settlements still resolve. A guest (no session-bound wallet) is a no-op.\n\n**200 response:** `{ \"ok\": true, \"revoked\": 1 }`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Player (session-token auth)",
+      "description": "Player read-only endpoints authenticated by the **session token** (`Authorization: Bearer {{sessionToken}}`), captured by the launch request (spec §13.2). In operator mode the balance is the **operator's authoritative balance** (fetched via your `/balance`); the transactions list is our **local reconciliation journal**, not the player's authoritative statement.",
+      "item": [
+        {
+          "name": "GET /api/wallet/balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{sessionToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/wallet/balance",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wallet", "balance"]
+            },
+            "description": "Returns `{ currency, balance }` (balance in minor units). In operator mode this is **your authoritative balance** (resolved via your `POST /balance`), not our journal. Requires a valid session token. See spec §13.2."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/wallet/transactions",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{sessionToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/wallet/transactions",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wallet", "transactions"]
+            },
+            "description": "Returns our **local ledger journal** (last 50 rows: `id, type, amount, balanceAfter, refType, refId, createdAt`). In operator mode this is a **reconciliation aid**, not the player's authoritative statement (which lives at the operator). See spec §13.2."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Operator reporting (reporting-key auth)",
+      "description": "B2B reporting (spec §13.1), authenticated by your **reporting API key** `Authorization: Bearer {{reportingKey}}` (format `vrk_<operatorId>.<secret>`). Every route is hard-scoped to your `operatorId` (taken only from the key, never from the query). Money is summed in minor units and returned as decimal **strings** (sums can exceed 2^53). Demo bets are excluded unless `includeDemo=true`. Dates accept ISO instants or `YYYY-MM-DD` (date-only snaps to start/end of UTC day).",
+      "item": [
+        {
+          "name": "GET /api/operator/reports/summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{reportingKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/reports/summary?from=2026-06-01T00:00:00.000Z&to=2026-06-07T00:00:00.000Z",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "reports", "summary"],
+              "query": [
+                { "key": "from", "value": "2026-06-01T00:00:00.000Z", "description": "Inclusive start (ISO instant or YYYY-MM-DD)." },
+                { "key": "to", "value": "2026-06-07T00:00:00.000Z", "description": "Inclusive end (ISO instant or YYYY-MM-DD)." },
+                { "key": "currency", "value": "EUR", "description": "Optional currency filter (ISO-4217, case-insensitive).", "disabled": true },
+                { "key": "includeDemo", "value": "true", "description": "Optional; include play-money bets (default false).", "disabled": true }
+              ]
+            },
+            "description": "Per-currency totals over `[from, to]`: `betCount`, `wagered`, `won`, `ggr`, `uniquePlayers`, `rtp`, `decimals`. Money fields are decimal strings in minor units. See spec §13.1."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/operator/reports/daily",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{reportingKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/reports/daily?from=2026-06-01T00:00:00.000Z&to=2026-06-07T00:00:00.000Z",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "reports", "daily"],
+              "query": [
+                { "key": "from", "value": "2026-06-01T00:00:00.000Z", "description": "Inclusive start (ISO instant or YYYY-MM-DD)." },
+                { "key": "to", "value": "2026-06-07T00:00:00.000Z", "description": "Inclusive end. Range is capped at 366 days." },
+                { "key": "currency", "value": "EUR", "description": "Optional currency filter.", "disabled": true },
+                { "key": "includeDemo", "value": "true", "description": "Optional; include play-money bets (default false).", "disabled": true }
+              ]
+            },
+            "description": "The same per-currency totals as `summary`, **bucketed per UTC day**. The date range is capped at 366 days (else **400**). See spec §13.1."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/operator/reports/bets",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{reportingKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/reports/bets?from=2026-06-01T00:00:00.000Z&to=2026-06-07T00:00:00.000Z&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "reports", "bets"],
+              "query": [
+                { "key": "from", "value": "2026-06-01T00:00:00.000Z", "description": "Inclusive start (ISO instant or YYYY-MM-DD)." },
+                { "key": "to", "value": "2026-06-07T00:00:00.000Z", "description": "Inclusive end." },
+                { "key": "limit", "value": "50", "description": "Page size, clamped to [1, 200] (default 50)." },
+                { "key": "currency", "value": "EUR", "description": "Optional currency filter.", "disabled": true },
+                { "key": "includeDemo", "value": "true", "description": "Optional; include play-money bets (default false).", "disabled": true },
+                { "key": "cursor", "value": "", "description": "Optional keyset cursor — pass the previous page's nextCursor (a bet UUID).", "disabled": true }
+              ]
+            },
+            "description": "Paginated per-bet rows: `id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo`, timestamps, plus `nextCursor`. Page with `cursor` (a bet UUID) + `limit` (max 200). Key your reconciliation book by `betId` = `id` (spec §10). See spec §13.1."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Public (no auth)",
+      "description": "Public, unauthenticated endpoints (spec §8, §13.3, §13.4). Currency precision, round history/current snapshot, and provably-fair verification. Crash points are never leaked before the crash; a round's seed/salt are disclosed only after its seed is revealed.",
+      "item": [
+        {
+          "name": "GET /api/currencies",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/currencies",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "currencies"]
+            },
+            "description": "Canonical per-currency precision table: `{ currencies: [{ code, decimals, name }] }`. Cacheable (Cache-Control public, max-age 3600). Use the `decimals` to render minor units. See spec §8."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/rounds/history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/rounds/history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "rounds", "history"]
+            },
+            "description": "The last 30 finished rounds: `[{ id, crashMult, endedAt }]`. Use a returned `id` as `{{fairnessRoundId}}` for the fairness round endpoint. See spec §13.3."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/round/current",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/round/current",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "round", "current"]
+            },
+            "description": "Current public round snapshot — `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` (or `{ phase:\"waiting\", multiplier:1.0 }` when idle). **No crash leak** — only the live climbing multiplier while running. See spec §13.3, §6.2."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/fairness/current",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/fairness/current",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fairness", "current"]
+            },
+            "description": "The active fairness chain's public commitment (commit hash, epoch, salt source). The crash point for upcoming rounds is bound by this commitment before betting closes. See spec §13.4 and `provably-fair-guide.md`."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/fairness/round/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/fairness/round/{{fairnessRoundId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fairness", "round", "{{fairnessRoundId}}"]
+            },
+            "description": "Reveal + verification data for a finished round: revealed `seed` + `salt`, `commitHash`, `chainIndex`, `prevSeed`, the on-chain `crashPoint`, the independently `recomputedCrash`, `matches`, and `linkVerified` (SHA256 chain link). If the round's seed is not yet revealed, returns `{ roundId, status, revealed:false }`. Set `{{fairnessRoundId}}` from `GET /api/rounds/history`. See spec §13.4 and `provably-fair-guide.md`."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/fairness/epochs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/fairness/epochs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fairness", "epochs"]
+            },
+            "description": "Public commitments for ALL fairness epochs (chain-of-custody, including exhausted chains). Use an epoch number as `{{fairnessEpoch}}` for the seed dump. See spec §13.4."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/fairness/epoch/:epoch/seeds",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/fairness/epoch/{{fairnessEpoch}}/seeds",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fairness", "epoch", "{{fairnessEpoch}}", "seeds"]
+            },
+            "description": "Per-epoch **revealed** seed dump for chain-of-custody reconstruction. Never returns an unrevealed (future) seed. `400 invalid_epoch` for a non-integer/negative epoch; `404 epoch_not_found` if unknown. See spec §13.4 and `provably-fair-guide.md`."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /api/fairness/verify",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seed\": \"\",\n  \"salt\": \"\",\n  \"prevSeed\": \"\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/fairness/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fairness", "verify"]
+            },
+            "description": "Recompute a crash point from a `seed` + `salt` (and optional `prevSeed` for the chain-link check) — exactly what a client can also do offline. Returns `{ crash, linkVerified }`.\n\n**Body:** `{ \"seed\": \"<hex>\", \"salt\": \"<string>\", \"prevSeed\": \"<hex, optional>\" }`. `seed`/`prevSeed` must be hex and `salt` non-empty, else **400**. Fill `seed`/`salt` from a `GET /api/fairness/round/:id` reveal. See spec §13.4 and `provably-fair-guide.md`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Operator wallet (YOU implement — examples to test YOUR wallet)",
+      "description": "**These call the OPERATOR's endpoint, not the RGS.** They target `{{walletApiUrl}}` with `Authorization: Bearer {{walletApiKey}}` and reproduce the EXACT requests the RGS makes on every money move (spec §7). Fire them at your own wallet implementation to confirm it speaks our protocol: correct request shapes, Bearer auth, idempotency on `transactionId`, the `{ operatorTxId, balance }` / `{ balance }` responses, and `402`/`409`/`{error:\"insufficient_funds\"}` on insufficient funds.\n\nTransaction-id formats (spec §9): stake = `bet:{roundId}:{userId}:{panel}:debit`, payout = `bet:{betId}:payout`, cancel refund = `bet:{betId}:refund`. The same `betId` accompanies the stake, win, and any rollback. All amounts are integer minor units. Reference implementation: `load/operator-wallet-stub.ts`.\n\nTip: run `/bet` then `/win` then `/balance`, and `/rollback` to undo a debit — your wallet must dedup retries and roll back exactly.",
+      "item": [
+        {
+          "name": "POST {{walletApiUrl}}/bet",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok = pm.response.code === 200;",
+                  "pm.test('200 on a debit that applied (or 402/409/insufficient_funds when out of funds)', function () {",
+                  "  pm.expect([200, 402, 409]).to.include(pm.response.code);",
+                  "});",
+                  "if (ok) {",
+                  "  var b = pm.response.json();",
+                  "  pm.test('response has operatorTxId + balance', function () {",
+                  "    pm.expect(b).to.have.property('operatorTxId');",
+                  "    pm.expect(b).to.have.property('balance');",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{walletApiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": 100,\n  \"transactionId\": \"bet:{{roundId}}:{{userId}}:A:debit\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{walletApiUrl}}/bet",
+              "host": ["{{walletApiUrl}}"],
+              "path": ["bet"]
+            },
+            "description": "**Debit the stake** (spec §7.1). The RGS calls THIS on `place_bet`.\n\n**Body:** `playerId`, `currency`, `amount` (positive minor units), `transactionId` (`bet:{roundId}:{userId}:A:debit` — dedup on this), `roundId`, `betId`.\n\n**200:** `{ \"operatorTxId\": \"op-987\", \"balance\": 9900 }`. **Insufficient funds:** respond `402`/`409`, or `200/4xx` with `{ \"error\": \"insufficient_funds\" }` (a clean rejection, not retried). MUST be idempotent: a retry with the same `transactionId` returns the same result, never double-debits (spec §9)."
+          },
+          "response": []
+        },
+        {
+          "name": "POST {{walletApiUrl}}/win",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "var b = {};",
+                  "try { b = pm.response.json(); } catch (e) {}",
+                  "pm.test('response has operatorTxId + balance', function () {",
+                  "  pm.expect(b).to.have.property('operatorTxId');",
+                  "  pm.expect(b).to.have.property('balance');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{walletApiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": 200,\n  \"transactionId\": \"bet:{{betId}}:payout\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{walletApiUrl}}/win",
+              "host": ["{{walletApiUrl}}"],
+              "path": ["win"]
+            },
+            "description": "**Credit the payout** (spec §7.2). The RGS calls THIS on a winning cash-out. Same shape as `/bet`; `amount` is the positive payout (`floor(stake × cashOutMultiplier)`, capped).\n\n**Body:** `transactionId` = `bet:{betId}:payout`. **200:** `{ \"operatorTxId\": \"op-988\", \"balance\": 34155 }`.\n\nA win is **never** rolled back by the RGS; on an unconfirmed `/win` the RGS retries the **idempotent** `/win` (same `transactionId`) and otherwise marks the bet `payout_pending` for its reconciler. **Dedup correctly or you risk double-crediting** (spec §9)."
+          },
+          "response": []
+        },
+        {
+          "name": "POST {{walletApiUrl}}/rollback",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "var b = {};",
+                  "try { b = pm.response.json(); } catch (e) {}",
+                  "pm.test('response has operatorTxId + balance', function () {",
+                  "  pm.expect(b).to.have.property('operatorTxId');",
+                  "  pm.expect(b).to.have.property('balance');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{walletApiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"transactionId\": \"bet:{{roundId}}:{{userId}}:A:debit\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{walletApiUrl}}/rollback",
+              "host": ["{{walletApiUrl}}"],
+              "path": ["rollback"]
+            },
+            "description": "**Undo a named transaction** (spec §7.3). The RGS calls THIS to compensate an ambiguous (timed-out) debit and during stranded-reservation recovery.\n\n**Body:** `transactionId` = the **id of the bet/win being undone** (NOT a new id) — here the stake's `bet:{roundId}:{userId}:A:debit`. **200:** `{ \"operatorTxId\": \"op-989\", \"balance\": 10000 }`.\n\nMUST be **idempotent on its own effect**: if that transaction was applied, reverse it; if it was never applied (or already rolled back), no-op. Either way return the current authoritative balance. It is safe to receive a rollback for a `transactionId` you never saw (spec §9)."
+          },
+          "response": []
+        },
+        {
+          "name": "POST {{walletApiUrl}}/balance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "var b = {};",
+                  "try { b = pm.response.json(); } catch (e) {}",
+                  "pm.test('response has balance', function () {",
+                  "  pm.expect(b).to.have.property('balance');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{walletApiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{walletApiUrl}}/balance",
+              "host": ["{{walletApiUrl}}"],
+              "path": ["balance"]
+            },
+            "description": "**Read the authoritative balance** (spec §7.4). The RGS calls THIS to serve `GET /api/wallet/balance`.\n\n**Body:** `{ \"playerId\": \"{{playerId}}\", \"currency\": \"{{currency}}\" }`. **200:** `{ \"balance\": 10000 }` (minor units). Note: unlike the others, this response has **no** `operatorTxId`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. WebSocket (Socket.IO) — reference",
+      "description": "**Documentation-only.** The live game protocol is **Socket.IO** (spec §6), not HTTP. Postman's Socket.IO request is a GUI construct that is NOT part of the importable Collection v2.1 JSON schema, so it cannot be encoded here without producing a non-importable artifact. This folder is a reference stub; the full copy-pasteable Socket.IO setup is in `postman-collection-guide.md`.\n\n**Connect** (Socket.IO, NOT a raw WebSocket — Postman: New → Socket.IO):\n- URL: `{{wsUrl}}`\n- Handshake auth (Settings → Handshake → Auth, or Args): `{ \"token\": \"{{sessionToken}}\" }`\n- Guests may connect with NO token (read-only round events; money actions return `not_authenticated`).\n\n**Emit (client → server)** — every message gets a Socket.IO ack:\n- `subscribe_round` — (no payload) → `{ ok:true }` + re-emits `round_state`.\n- `time_sync` `{ \"t0\": 1750000000000 }` → `{ ok:true, t0, serverTime }`.\n- `place_bet` `{ \"panel\":\"A\", \"amount\":100, \"autoCashout\":2.0 }` → `BetResult`. `panel` ∈ A|B, `amount` finite positive minor units, `autoCashout` finite > 1 (optional).\n- `cancel_bet` `{ \"panel\":\"A\" }` → `BetResult`.\n- `cash_out` `{ \"panel\":\"A\" }` → `CashoutResult`.\n- `reality_check_ack` — (no payload) → `{ ok:true }` (unblocks bets in RG enforce mode).\n\n**Listen (server → client):** `round_state`, `multiplier_update`, `bet_accepted`, `bet_rejected`, `bet_cancelled`, `cashout_accepted`, `cashout_rejected`, `bet_busted`, `round_crashed`, `round_settled`, `balance_updated`, `reality_check`, `session_time_limit`.\n\nLimits: one active socket per user (a second drops the first); 15 msg/s per socket (`rate_limited`). See spec §6 and the collection guide.",
+      "item": [
+        {
+          "name": "Socket.IO connect + events (read the description / guide)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{wsUrl}}",
+              "host": ["{{wsUrl}}"]
+            },
+            "description": "**Not an HTTP request — do not Send.** This stub documents the Socket.IO connection; create the actual real-time session via Postman → New → **Socket.IO**, connect to `{{wsUrl}}` with handshake auth `{ token: {{sessionToken}} }`, then use the emit/listen events listed in this folder's description.\n\n**Emit examples:**\n- `place_bet` `{ \"panel\":\"A\", \"amount\":100, \"autoCashout\":2.0 }`\n- `cash_out` `{ \"panel\":\"A\" }`\n\n**Listen for:** `round_state`, `multiplier_update`, `bet_accepted`, `cashout_accepted`, `round_crashed`, `round_settled`, `balance_updated` (and `bet_rejected`, `bet_cancelled`, `cashout_rejected`, `bet_busted`, `reality_check`, `session_time_limit`).\n\nFull walkthrough: `postman-collection-guide.md`. Protocol reference: api-integration-spec.md §6."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

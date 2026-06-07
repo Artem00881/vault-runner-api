@@ -608,8 +608,8 @@ restart the Prometheus container, see §10).
 > **4.5c.2** seamless failover-resume) are **✅ DEPLOYED single-node on staging + PROD**
 > (2026-06-05); the **4.5c.3** multi-node SLA-drill harness is committed (dev-only, its
 > at-scale runs infra-gated). **Prod walked `e40cca1` → `6bfda18`** (= origin/main = local
-> main *at the 2026-06-05 deploy*; origin/main has since advanced to **`51f45ba`** (web HEAD
-> `aa660b0`), all docs/test/tooling-only — see the §16 trailer below), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
+> main *at the 2026-06-05 deploy*; origin/main has since advanced to **`99db480`** (web HEAD
+> `74bbd93`), all docs/test/tooling-only — see the §16 trailer below), staging-first, both via the normal `./op-compose[.staging].sh up -d --build`,
 > `deploy-verifier` = GO; both **single-node**. The deploy added **TWO additive migrations**
 > (`prisma migrate status` **10 → 12**, applied on boot) + dev-only tooling; **no new
 > env/secret**. **Single-node-safe, multi-node-safe for cash-out, AND seamless on failover** —
@@ -640,10 +640,10 @@ restart the Prometheus container, see §10).
 > **`bet_failed` backpressure fix** (PgBouncer tx pool) before a real betting 10k, and
 > `deploy-verifier` + sign-off. (They do not pinch today's single-node/internal/demo prod and are only
 > needed for real operator betting at 10k, itself gated on a real operator + GLI cert.) **api
-> `origin/main` is now `51f45ba` (web HEAD `aa660b0`); prod still runs `6bfda18`** — the post-deploy
-> `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` + `51f45ba` (this §16) + `163d459` (the Race-1
-> test/comment) + `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run tooling) are
-> **docs/test/tooling-only → NO prod redeploy needed**. The deploy facts are recorded below for
+> `origin/main` is now `99db480` (web HEAD `74bbd93`); prod still runs `6bfda18`** — the post-deploy
+> `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` + `51f45ba` + `99db480` (this §16 + the STOP-decision)
+> + `163d459` (the Race-1 test/comment) + `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run
+> tooling) are **docs/test/tooling-only → NO prod redeploy needed**. The deploy facts are recorded below for
 > reproducibility / rollback; the calibration + operator-mode numbers + harness-bug/tuning notes live
 > in `project_production_roadmap.md` "PHASE 4.5c.3 — OPERATOR-MODE SETTLEMENT-p99 RESULTS" + "…
 > CALIBRATION LOAD-TEST RESULTS" (internal planning doc).
@@ -904,6 +904,15 @@ Suite 610 → **612/3/0**, tsc clean.
 Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION" +
 "PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3" +
 "PHASE 4.5c.3 — STAGING SLA RUNS + CONCURRENT-LEADER-FLIP MONEY-PATH AUDIT".
+
+> **NEXT OPS TASK (Phase 6 B2B trust-package, planned 2026-06-07 — not yet built):** a
+> **hosted operator-mode sandbox** so a casino can try the integration. It will run
+> `WALLET_PROVIDER_TYPE=operator` + the `load/operator-wallet-stub.ts` on a SEPARATE,
+> reachable env (likely the staging box or a small dedicated box) — **do NOT flip
+> prod** (prod stays `internal`/operator-OFF) and **never point it at a real operator
+> wallet** (use the stub). `deploy-verifier` gates the sandbox deploy; a §17 runbook
+> will be written when it's built. Plan → `project_production_roadmap.md`
+> "PHASE 6 — B2B TRUST-PACKAGE PLAN".
 
 ---
 
