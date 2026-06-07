@@ -1069,6 +1069,31 @@ issuance on the next `up` — fine, but mind Let's Encrypt rate limits on repeat
 This touches ONLY the sandbox box — **prod (`6bfda18`, single-node, operator-OFF) and
 staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
 
+### 17.6 Demo data + the operator console (2026-06-08 — for the `/console` showcase)
+The greenfield **operator console** (web repo `vault-runner-main`, route `/console`) reads
+this sandbox's reporting API over the public TLS edge. Two sandbox-side facts support it:
+
+- **launchSecret ROTATED** — to mint launch links from the console's BFF, the
+  `sandbox-casino` launch secret was rotated so its value could be placed in the web repo's
+  **gitignored local `.env.local`** (`SANDBOX_LAUNCH_SECRET`). Rotate it on the box with:
+  ```bash
+  cd /opt/vaultrun-api
+  docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api \
+    bun scripts/operator-provision.ts --code sandbox-casino --rotate-secret
+  ```
+  This **invalidates outstanding launch tokens** (sandbox-only, harmless). The secret VALUE
+  goes ONLY into the gitignored `.env.local` — **never into any doc/repo/1Password entry here.**
+- **Demo bets SEEDED (~648)** — to give the console real KPIs/charts/tables, ≈648 settled
+  operator bets (≈248 cashed_out / ≈400 busted) across ≈100 players were seeded via a NEW
+  **`scripts/sandbox-seed.ts`** (api repo, **UNTRACKED** — the USER may commit it later). It is
+  a self-contained concurrent seeder that mints launch tokens locally and drives the **public**
+  sandbox over WSS; it runs **from a dev box**, NOT in-container (the read-only sandbox
+  container blocks in-container injection). After seeding, the console showed **674 bets / 99
+  players / ~1167 EUR turnover / observed RTP ~80%** — small-sample variance (the seed bots use
+  random auto-cashout up to 4.0x); the game's TRUE RTP is **96.998%** per the simulation report.
+
+The console itself is **NOT deployed** (web local only; see the roadmap "#9 IMPLEMENTATION LOG").
+
 Plan + the e2e detail → `project_production_roadmap.md` "PHASE 6 — B2B TRUST-PACKAGE PLAN"
 → "#3 HOSTED SANDBOX".
 
