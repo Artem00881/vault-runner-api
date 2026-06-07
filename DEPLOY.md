@@ -907,22 +907,27 @@ Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION"
 
 ---
 
-## 17. Hosted operator-mode SANDBOX (Phase 6 #3) — built 2026-06-07, ✅ DEPLOYED + e2e-VERIFIED on `167.233.54.64`
+## 17. Hosted operator-mode SANDBOX (Phase 6 #3) — built 2026-06-07, ✅ DONE — PUBLICLY LIVE at https://sandbox.vaultrun.app + externally e2e-VERIFIED
 
 A **self-contained operator-mode demo** so a casino/aggregator can drive the full
 integration — `launch → place_bet → cash_out → void → reconcile` — against the **real
 seamless-wallet contract**, with a **play-money STUB** standing in for the operator's
 wallet. It is a **SEPARATE env**: it does **NOT** touch prod or staging, runs
 `WALLET_PROVIDER_TYPE=operator`, and **never points at a real wallet** (the stub holds
-fake money only). No 1Password / Caddy / mTLS here — those are prod edge concerns.
+fake money only). **PUBLICLY LIVE at `https://sandbox.vaultrun.app`** (a Caddy + Let's
+Encrypt TLS edge — §17.4), **externally end-to-end verified over public HTTPS/WSS.**
+Unlike prod/staging there is **no 1Password and no mTLS** here (the stub is fake money);
+the only edge concern is the Caddy auto-TLS terminator added in §17.4.
 
 **Box (USER-provisioned, DISTINCT from prod `95.179.241.145` + staging `178.105.149.146`):**
 - `167.233.54.64`, ssh alias **`vaultrun-sandbox`** (`root` + `~/.ssh/vaultrun_ed25519`).
 - Hetzner fsn1, Ubuntu 24.04, 2 vCPU / 3.7 GB / 35 GB (a low-traffic demo, not a load target).
 
 **Files (in the api repo):** `docker-compose.sandbox.yml` (postgres + redis + api + the
-`stub`), `.env.sandbox.example` (copy → `.env.sandbox` on the box), `scripts/sandbox-verify.ts`
-(the e2e helper). The stub = `load/operator-wallet-stub.ts`; provisioning =
+`stub` + the **`caddy` edge under the `edge` profile** — §17.4), **`Caddyfile.sandbox`**
+(the public TLS reverse-proxy config), `.env.sandbox.example` (copy → `.env.sandbox` on the
+box), `scripts/sandbox-verify.ts` (the e2e helper). The stub = `load/operator-wallet-stub.ts`;
+provisioning =
 `scripts/operator-provision.ts`; launch tokens = `scripts/operator-launch-token.ts`;
 reconciliation = `scripts/operator-recon-check.ts`. The prod `Dockerfile` copies only
 `src/`, so the compose **bind-mounts `./scripts` + `./load`** into the api container and
@@ -997,30 +1002,70 @@ stub debit) → auto-cashout @1.2x payout `120` (stub credit) → **#5 void**
 `{reversed:true, refundedStake:100, reclaimedPayout:120}` (stub `/rollback` ×2) → idempotent
 re-void `{reversed:false}` → **#4** `{status:voided, debitState:reversed, refundState:applied,
 payoutState:none}` → **operator-recon-check O1–O5 PASS, 0 discrepancies** (book Σbet=100
-Σwin=120 Σrollback=-20 ⇒ netDrop=0). #4 + #5 confirmed LIVE on the sandbox.
+Σwin=120 Σrollback=-20 ⇒ netDrop=0). #4 + #5 confirmed LIVE on the sandbox. **Re-verified
+EXTERNALLY over the public TLS edge (§17.4)** — from off-box over `https://sandbox.vaultrun.app`
+(+ WSS): `/health` ok, launch → balance `100000000` → WSS `place_bet` → both a cashed_out
+AND a busted outcome → **#5 void of BOTH** (won: refundedStake 100 + reclaimedPayout 120;
+busted: refundedStake 100, reclaimedPayout 0; both `reversed:true`, idempotent re-void
+`reversed:false`) → **#4 transaction-status** by betId AND by the `bet:{id}:refund`
+transactionId (resolves `kind:"refund"`, `status:voided, debitState:reversed,
+refundState:applied, payoutState:none`). #4 + #5 confirmed LIVE over public HTTPS.
 > **GOTCHAS:** `operator-recon-check` needs the
 > `OPERATOR_CODE=sandbox-casino STUB_URL=http://stub:4001 STUB_KEY=<stub key>` overrides
 > (it defaults to the prod-shaped operator). The stub's `/debug/book` is **in-memory** —
 > reconcile **before** restarting the stub or the book resets.
 
-### 17.4 Public exposure (the ONE remaining piece — awaiting USER's subdomain decision)
-The api binds `127.0.0.1:3001` (loopback; verified on the box) — reachable on the box but
-not from the internet. To let a casino reach it, pick one:
-- **(recommended) subdomain + Caddy auto-TLS** — point DNS (e.g. `sandbox.vaultrun.app`)
-  → `167.233.54.64`, run Caddy reverse-proxying `:443` → `127.0.0.1:3001`. Keep `BIND_ADDR=127.0.0.1`.
-- **plain HTTP** — set `BIND_ADDR=0.0.0.0` in `.env.sandbox` + `up -d` → reachable at
-  `http://167.233.54.64:3001` (sandbox only; no TLS).
+### 17.4 Public TLS edge — ✅ LIVE at https://sandbox.vaultrun.app
+The sandbox is **publicly reachable over HTTPS** at **`https://sandbox.vaultrun.app`**, via
+a **Caddy edge** added to the stack under the compose **`edge` profile**. Caddy
+(`caddy:2-alpine`, container `vaultrun-sandbox-caddy`) terminates **:443** with an
+**automatic Let's Encrypt cert** (obtained successfully, CN=`sandbox.vaultrun.app`, valid →
+2026-09-05; **Caddy auto-renews it**) and reverse-proxies to the **api over the compose
+network** (`reverse_proxy api:3001` — WS/Socket.IO upgrades forwarded automatically). The
+api itself stays **loopback-published** on the host (`127.0.0.1:3001`, `BIND_ADDR=127.0.0.1`
+unchanged) — only Caddy faces the internet. Edge file: **`Caddyfile.sandbox`**
+(`{$SANDBOX_DOMAIN} { reverse_proxy api:3001 }`).
 
-**If exposed publicly, also set `METRICS_TOKEN`** (today unset ⇒ `/metrics` is open). The
-sandbox is play-money, but don't leave an open metrics endpoint on a public IP.
+**Prerequisites:**
+- **DNS:** a Cloudflare **A record `sandbox.vaultrun.app → 167.233.54.64`** set **DNS-only
+  (grey cloud)** — NOT proxied — so **Caddy can complete the ACME/Let's Encrypt HTTP-01
+  challenge and serve its OWN cert** (an orange-cloud proxy would intercept :443/:80 and
+  break issuance). This differs from prod/staging, which ARE Cloudflare-proxied (§8/§13).
+- **`.env.sandbox` (on the box, box-only):** add **`SANDBOX_DOMAIN=sandbox.vaultrun.app`**
+  and a generated **`METRICS_TOKEN`** (e.g. `openssl rand -hex 32`, no trailing newline).
+  Setting `METRICS_TOKEN` **locks `/metrics`** to bearer-only — verified: `/metrics`
+  returns **401** without the bearer. (Do not leave an open metrics endpoint on a public IP.)
+- **Firewall:** ports **80** (ACME challenge + redirect) and **443** (HTTPS) open to the
+  internet; the api's `3001` stays loopback-only (Caddy reaches it over the compose network,
+  not the host port).
+
+**Bring up the public edge** (every compose command needs `--env-file`; the `edge` profile
+starts Caddy alongside postgres/redis/api/stub):
+```bash
+cd /opt/vaultrun-api
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox --profile edge up -d
+```
+Compose adds the `caddy` service + the `caddydata` / `caddyconfig` volumes (the cert + ACME
+account persist across restarts — Caddy will NOT re-request a cert each boot). Verify from
+**off the box**: `curl -s https://sandbox.vaultrun.app/health` → `{"status":"ok"}`;
+`curl -si https://sandbox.vaultrun.app/metrics | head -1` → 401 (no bearer). The full
+external launch→bet→void→status round-trip is in §17.3.
+
+> **Without the `edge` profile** the sandbox is **loopback-only** (api on `127.0.0.1:3001`,
+> reachable on the box but not from the internet). The opt-in `BIND_ADDR=0.0.0.0` plain-HTTP
+> path (no TLS) still exists for a quick `http://167.233.54.64:3001` test, but the public
+> sandbox uses the Caddy TLS edge above.
 
 ### 17.5 Rollback / teardown (zero prod impact)
 ```bash
-# stop the stack (keep the data volumes):
-docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox down
-# wipe everything incl. the postgres/redis volumes:
-docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox down -v
+# stop the stack incl. the TLS edge (keep the data + cert volumes):
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox --profile edge down
+# wipe everything incl. the postgres/redis AND caddy cert/config volumes:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox --profile edge down -v
 ```
+(Include `--profile edge` so the `caddy` service is brought down too; omit it and Caddy
+keeps running. `down -v` also drops `caddydata`/`caddyconfig`, forcing a fresh Let's Encrypt
+issuance on the next `up` — fine, but mind Let's Encrypt rate limits on repeated wipes.)
 This touches ONLY the sandbox box — **prod (`6bfda18`, single-node, operator-OFF) and
 staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
 

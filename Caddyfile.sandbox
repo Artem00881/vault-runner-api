@@ -1,0 +1,7 @@
+# Vault Run — sandbox TLS edge (Phase 6 #3).
+# Caddy auto-provisions a Let's Encrypt cert for $SANDBOX_DOMAIN and reverse-proxies
+# to the api container (WebSocket/Socket.IO upgrades are forwarded automatically).
+# Used only with the compose `edge` profile. $SANDBOX_DOMAIN comes from the env.
+{$SANDBOX_DOMAIN} {
+	reverse_proxy api:3001
+}

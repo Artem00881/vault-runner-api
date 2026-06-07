@@ -90,6 +90,8 @@ services:
       # A single integrator hammers from one IP while testing — keep generous but bounded.
       THROTTLE_LIMIT: "${THROTTLE_LIMIT:-600}"
       THROTTLE_TTL_MS: "60000"
+      # /metrics bearer lock (H5): unset = open. Set in .env.sandbox once the box is public.
+      METRICS_TOKEN: "${METRICS_TOKEN:-}"
       NODE_ENV: "production"
     volumes:
       # The prod image copies only src/; the sandbox needs the stub + the ops scripts
@@ -108,6 +110,30 @@ services:
       stub:
         condition: service_started
 
+  # Public TLS edge (opt-in: `--profile edge`). Caddy terminates :443 with an
+  # automatic Let's Encrypt cert for ${SANDBOX_DOMAIN} and reverse-proxies to the
+  # api over the compose network (WebSocket upgrade handled automatically). The api
+  # itself stays loopback-published on the host. Without this profile the sandbox is
+  # loopback-only. Requires DNS (${SANDBOX_DOMAIN} -> the box, DNS-only) + ports 80/443.
+  caddy:
+    image: caddy:2-alpine
+    container_name: vaultrun-sandbox-caddy
+    restart: unless-stopped
+    profiles: ["edge"]
+    environment:
+      SANDBOX_DOMAIN: "${SANDBOX_DOMAIN:?set SANDBOX_DOMAIN in .env.sandbox for the edge profile}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.sandbox:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - api
+
 volumes:
   pgdata:
   redisdata:
+  caddydata:
+  caddyconfig:
