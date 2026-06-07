@@ -735,6 +735,7 @@ can exceed 2^53); demo bets are excluded unless `includeDemo=true`.
 | `GET /api/operator/reports/summary?from&to[&currency][&includeDemo]` | Per-currency totals: `betCount`, `wagered`, `won`, `ggr`, `uniquePlayers`, `rtp`, `decimals`. |
 | `GET /api/operator/reports/daily?from&to[&currency][&includeDemo]` | The same, bucketed per UTC day. |
 | `GET /api/operator/reports/bets?from&to[&currency][&includeDemo][&cursor][&limit]` | Paginated per-bet rows (id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo, timestamps) with `nextCursor`. |
+| `GET /api/operator/reports/transaction?transactionId=…` (or `?betId=…`) | Single-transaction status lookup (§13.2) — the disposition of one money-move when a wallet response was lost. |
 
 Example `summary` response:
 
@@ -754,7 +755,73 @@ Example `summary` response:
 }
 ```
 
-### 13.2 Player read-only endpoints (session-token auth)
+### 13.2 Transaction status (single-transaction lookup)
+
+Source of truth: `src/operator/reporting.controller.ts`, `src/operator/reporting.service.ts`.
+
+Resolve **one** money-move to its current disposition — for when a `/bet` or `/win`
+response was lost and you must learn the final outcome before deciding whether to
+retry, refund, or reconcile.
+
+`GET /api/operator/reports/transaction` (reporting-key auth, hard-scoped to your
+`operatorId`). Provide **exactly one** of:
+
+- `transactionId` — the idempotency key we sent on the wallet call (URL-encoded). One
+  of: `bet:{roundId}:{userId}:{panel}:debit`, `bet:{betId}:payout`,
+  `bet:{betId}:refund`, `bet:{betId}:restart_refund`.
+- `betId` — our bet UUID (sent on every wallet call).
+
+Success **200**:
+
+```json
+{
+  "operatorId": "11111111-1111-1111-1111-111111111111",
+  "betId": "f3a1…",
+  "roundId": "r-2026-0001",
+  "playerId": "player-42",
+  "currency": "EUR",
+  "decimals": 2,
+  "panel": "A",
+  "status": "cashed_out",
+  "stake": "100",
+  "payout": "200",
+  "cashoutMult": "2.00",
+  "debitState": "applied",
+  "refundState": "none",
+  "payoutState": "paid",
+  "debitTxId": "op-987",
+  "payoutTxId": "op-988",
+  "demo": false,
+  "createdAt": "2026-06-07T12:00:00.000Z",
+  "settledAt": "2026-06-07T12:00:07.000Z",
+  "query": { "transactionId": null, "betId": "f3a1…", "kind": "betId" }
+}
+```
+
+**Read the disposition by the `*State` fields — never infer it from a single boolean.**
+
+| Field | Value | Meaning |
+|---|---|---|
+| `debitState` | `pending` | The stake debit is **being reconciled** — it MAY already be applied on your wallet. Do **not** read this as "no charge"; the RGS will roll back any applied debit. (status `reserving`.) |
+|  | `applied` | The stake was debited (status `active`/`cashed_out`/`busted`/`payout_pending`/`cancelling`). |
+|  | `reversed` | The stake was debited and then fully **refunded** (status `cancelled`). |
+| `refundState` | `none` / `pending` / `applied` | Refund not applicable / in flight / completed. |
+| `payoutState` | `none` | No payout (lost, or no win). |
+|  | `pending` | A win is **owed**; our credit is unconfirmed and MAY already be applied on your wallet. We retry the idempotent `/win` until confirmed — do **not** credit it yourself; dedup on the `transactionId`. (status `payout_pending`.) |
+|  | `paid` | The payout was credited and confirmed (status `cashed_out`). |
+
+> **Critical reading rules (avoid a double-credit / missed refund):**
+> - `debitTxId` / `payoutTxId` are **best-effort references**. A `null` does **NOT** mean
+>   "not applied" — reconcile by the `*State` fields and your own dedup on the
+>   `transactionId`, never by the presence of our tx id.
+> - A **`pending`** state means *unknown / being reconciled*, not *did not happen*.
+> - **404** (`transaction_not_found`) means we hold no transaction in **your** operator
+>   scope — it is **NOT** proof the money move didn't occur on your wallet. If your
+>   wallet shows the charge/credit, trust your wallet and reconcile; never re-apply on a
+>   404. (404 is returned identically for not-found, another operator's transaction, and
+>   internal/guest play — no cross-tenant existence signal.)
+
+### 13.3 Player read-only endpoints (session-token auth)
 
 Source of truth: `src/wallet/wallet.controller.ts`.
 
@@ -763,13 +830,13 @@ Source of truth: `src/wallet/wallet.controller.ts`.
 | `GET /api/wallet/balance` | Returns `{ currency, balance }`. In operator mode this is **your authoritative balance** (via `/balance`), not our journal. |
 | `GET /api/wallet/transactions` | Returns our **local journal** (last 50 ledger rows). In operator mode this is a reconciliation aid, **not** the player's authoritative statement (that lives at the operator). |
 
-### 13.3 Round history (public)
+### 13.4 Round history (public)
 
 `GET /api/rounds/history` (source: `src/game/rounds.controller.ts`) — the last 30
 finished rounds: `[{ id, crashMult, endedAt }]`. `GET /api/round/current` returns the
 current public round snapshot (no crash leak).
 
-### 13.4 Provably-fair
+### 13.5 Provably-fair
 
 Crash points are verifiable with zero trust in our server. Public endpoints:
 `GET /api/fairness/current` (active chain commitment), `GET /api/fairness/round/:id`

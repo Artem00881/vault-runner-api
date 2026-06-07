@@ -1,7 +1,7 @@
 import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import { CurrentOperatorId, OperatorAuthGuard } from "./operator-auth.guard";
 import { ReportingService } from "./reporting.service";
-import { parseBetsQuery, parseDailyQuery, parseReportQuery } from "./reporting-query";
+import { parseBetsQuery, parseDailyQuery, parseReportQuery, parseTransactionQuery } from "./reporting-query";
 
 /**
  * Operator REPORTING (B2B) surface (Phase 3.5). Every route is authenticated by the
@@ -11,6 +11,7 @@ import { parseBetsQuery, parseDailyQuery, parseReportQuery } from "./reporting-q
  *   GET /api/operator/reports/summary?from&to[&currency][&includeDemo]
  *   GET /api/operator/reports/daily  ?from&to[&currency][&includeDemo]
  *   GET /api/operator/reports/bets   ?from&to[&currency][&includeDemo][&cursor][&limit]
+ *   GET /api/operator/reports/transaction?transactionId=…  | ?betId=…   (single-tx status, Phase 6)
  */
 @Controller("api/operator/reports")
 @UseGuards(OperatorAuthGuard)
@@ -30,5 +31,12 @@ export class ReportingController {
   @Get("bets")
   async bets(@CurrentOperatorId() operatorId: string, @Query() query: unknown) {
     return this.reporting.bets(operatorId, parseBetsQuery(query));
+  }
+
+  // Single-transaction status lookup (Phase 6) — by our betId or the transactionId we
+  // sent on a wallet call. Tenant-scoped; a tx that isn't this operator's → 404.
+  @Get("transaction")
+  async transaction(@CurrentOperatorId() operatorId: string, @Query() query: unknown) {
+    return this.reporting.transactionStatus(operatorId, parseTransactionQuery(query));
   }
 }

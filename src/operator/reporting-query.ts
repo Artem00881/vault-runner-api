@@ -92,3 +92,51 @@ export function parseBetsQuery(query: unknown): BetsQuery {
   }
   return { ...b, cursor, limit };
 }
+
+/**
+ * Transaction-status lookup (Phase 6) — resolve ONE money-move to its bet. The
+ * operator queries by EITHER our `betId` (a uuid we send on every wallet call) OR
+ * the `transactionId` (idempotency key) we sent — useful when a `/bet` or `/win`
+ * response was lost and the operator must learn the final disposition. The
+ * transactionId formats are the RGS idempotency keys (see api-integration-spec §9):
+ *   bet:{roundId}:{userId}:{panel}:debit   (a stake debit)
+ *   bet:{betId}:payout                      (a payout credit)
+ *   bet:{betId}:refund                      (a cancel/refund credit)
+ *   bet:{betId}:restart_refund             (a recovery/failover refund credit)
+ * Reads ONLY known keys (prototype-pollution safe); the operatorId is NEVER read
+ * here (it comes only from OperatorAuthGuard). Exactly one of the two is required.
+ */
+export type TransactionQuery =
+  | { kind: "betId"; betId: string; transactionId?: undefined }
+  | { kind: "debit"; roundId: string; userId: string; panel: "A" | "B"; transactionId: string }
+  | { kind: "payout" | "refund"; betId: string; transactionId: string };
+
+export function parseTransactionQuery(query: unknown): TransactionQuery {
+  const q = (query ?? {}) as Record<string, unknown>;
+  const transactionId = asString(q.transactionId)?.trim() || undefined;
+  const betId = asString(q.betId)?.trim() || undefined;
+  if (transactionId && betId) throw new BadRequestException("provide exactly one of transactionId or betId");
+  if (!transactionId && !betId) throw new BadRequestException("missing transactionId or betId");
+
+  if (betId) {
+    if (!UUID_RE.test(betId)) throw new BadRequestException("invalid betId");
+    return { kind: "betId", betId };
+  }
+
+  const parts = transactionId!.split(":");
+  if (parts[0] !== "bet") throw new BadRequestException("unrecognized transactionId");
+  // bet:{betId}:payout | bet:{betId}:refund | bet:{betId}:restart_refund
+  // (refund + restart_refund are both refund-class credits resolving to the same betId.)
+  if (parts.length === 3 && (parts[2] === "payout" || parts[2] === "refund" || parts[2] === "restart_refund")) {
+    if (!UUID_RE.test(parts[1])) throw new BadRequestException("unrecognized transactionId");
+    return { kind: parts[2] === "payout" ? "payout" : "refund", betId: parts[1], transactionId: transactionId! };
+  }
+  // bet:{roundId}:{userId}:{panel}:debit
+  if (parts.length === 5 && parts[4] === "debit") {
+    const [, roundId, userId, panel] = parts;
+    if (!UUID_RE.test(roundId) || !UUID_RE.test(userId) || (panel !== "A" && panel !== "B"))
+      throw new BadRequestException("unrecognized transactionId");
+    return { kind: "debit", roundId, userId, panel, transactionId: transactionId! };
+  }
+  throw new BadRequestException("unrecognized transactionId");
+}
