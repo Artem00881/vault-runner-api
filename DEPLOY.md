@@ -905,14 +905,127 @@ Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION"
 "PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3" +
 "PHASE 4.5c.3 — STAGING SLA RUNS + CONCURRENT-LEADER-FLIP MONEY-PATH AUDIT".
 
-> **NEXT OPS TASK (Phase 6 B2B trust-package, planned 2026-06-07 — not yet built):** a
-> **hosted operator-mode sandbox** so a casino can try the integration. It will run
-> `WALLET_PROVIDER_TYPE=operator` + the `load/operator-wallet-stub.ts` on a SEPARATE,
-> reachable env (likely the staging box or a small dedicated box) — **do NOT flip
-> prod** (prod stays `internal`/operator-OFF) and **never point it at a real operator
-> wallet** (use the stub). `deploy-verifier` gates the sandbox deploy; a §17 runbook
-> will be written when it's built. Plan → `project_production_roadmap.md`
-> "PHASE 6 — B2B TRUST-PACKAGE PLAN".
+---
+
+## 17. Hosted operator-mode SANDBOX (Phase 6 #3) — built 2026-06-07, ✅ DEPLOYED + e2e-VERIFIED on `167.233.54.64`
+
+A **self-contained operator-mode demo** so a casino/aggregator can drive the full
+integration — `launch → place_bet → cash_out → void → reconcile` — against the **real
+seamless-wallet contract**, with a **play-money STUB** standing in for the operator's
+wallet. It is a **SEPARATE env**: it does **NOT** touch prod or staging, runs
+`WALLET_PROVIDER_TYPE=operator`, and **never points at a real wallet** (the stub holds
+fake money only). No 1Password / Caddy / mTLS here — those are prod edge concerns.
+
+**Box (USER-provisioned, DISTINCT from prod `95.179.241.145` + staging `178.105.149.146`):**
+- `167.233.54.64`, ssh alias **`vaultrun-sandbox`** (`root` + `~/.ssh/vaultrun_ed25519`).
+- Hetzner fsn1, Ubuntu 24.04, 2 vCPU / 3.7 GB / 35 GB (a low-traffic demo, not a load target).
+
+**Files (in the api repo):** `docker-compose.sandbox.yml` (postgres + redis + api + the
+`stub`), `.env.sandbox.example` (copy → `.env.sandbox` on the box), `scripts/sandbox-verify.ts`
+(the e2e helper). The stub = `load/operator-wallet-stub.ts`; provisioning =
+`scripts/operator-provision.ts`; launch tokens = `scripts/operator-launch-token.ts`;
+reconciliation = `scripts/operator-recon-check.ts`. The prod `Dockerfile` copies only
+`src/`, so the compose **bind-mounts `./scripts` + `./load`** into the api container and
+runs the stub straight from `oven/bun:1` with `load/operator-wallet-stub.ts` mounted.
+
+### 17.1 Deploy (on the box, from scratch)
+```bash
+ssh vaultrun-sandbox
+# 1) Docker (once)
+curl -fsSL https://get.docker.com | sh
+# 2) Get the code (rsync from your laptop, excluding node_modules/.git/.env):
+#    rsync -az --exclude node_modules --exclude .git --exclude '.env*' \
+#      ./ vaultrun-sandbox:/opt/vaultrun-api/
+cd /opt/vaultrun-api
+# 3) Secrets — sandbox-only, NOT 1Password (the stub is fake money). Generate ON the box:
+cp .env.sandbox.example .env.sandbox
+#   set JWT_SECRET=$(openssl rand -hex 32) and STUB_WALLET_KEY=$(openssl rand -hex 16) in it
+# 4) Bring the stack up (postgres + redis + api[operator] + stub). prisma migrate runs on boot.
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox up -d --build
+```
+> **GOTCHA — every compose command needs `--env-file .env.sandbox`.** The compose has
+> `${STUB_WALLET_KEY:?…}` / `${JWT_SECRET:?…}` guards that **throw** if the env file is
+> not passed (a bare `docker compose -f docker-compose.sandbox.yml …` fails). This is
+> deliberate — it stops the sandbox booting without its secrets.
+
+Containers are named `vaultrun-sandbox-{postgres,redis,stub,api}`. `deploy-verifier`
+gated the first deploy (= **GO, no must-fix**). Healthy boot logs: all routes mapped
+(incl. `GET /api/operator/reports/transaction` (#4) + `POST /api/operator/bets/:betId/void`
+(#5)), `acquired leadership`, `Game engine started`; `curl -s localhost:3001/health` ok.
+
+### 17.2 Provision the demo operator (once, after the api is healthy)
+```bash
+cd /opt/vaultrun-api
+source .env.sandbox   # to expose $STUB_WALLET_KEY
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api \
+  bun scripts/operator-provision.ts --code sandbox-casino --name "Sandbox Casino" \
+    --currencies EUR --wallet-url http://stub:4001 --wallet-key "$STUB_WALLET_KEY" \
+    --demo-enabled --rotate-reporting-key
+```
+`--rotate-reporting-key` prints the **reporting API key ONCE** (only its hash is stored
+in `Operator.reportingApiKeyHash`). On the box it was saved to
+`/opt/vaultrun-api/.sandbox-reporting-key` (chmod 600) — **never commit it / never put it
+in any doc.** Re-run with `--rotate-reporting-key` if lost. Operator on the box:
+`sandbox-casino` (id `eaf6b8ce-3e3e-41db-9de4-8628617c9bbf`, currencies EUR,
+`walletApiUrl=http://stub:4001`, demoEnabled).
+
+### 17.3 End-to-end verify (proves the full money round-trip + #4 + #5)
+```bash
+cd /opt/vaultrun-api
+# 1) mint a launch token for a test player:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api \
+  bun scripts/operator-launch-token.ts --code sandbox-casino --player demo-player --currency EUR
+# 2) drive launch → balance → WS place_bet → auto-cashout, capture the betId:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec -T api \
+  sh -c 'SMOKE_BASE=http://localhost:3001 bun scripts/sandbox-verify.ts <LAUNCH_TOKEN>'
+#   → prints RESULT_BETID=<id> (stub /balance + /bet + /win all hit end-to-end)
+# 3) #5 VOID the settled bet (operator reporting key), then re-void to prove idempotency:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api sh -c \
+  'curl -s -X POST localhost:3001/api/operator/bets/<BETID>/void \
+     -H "authorization: Bearer <REPORTING_KEY>" -H "content-type: application/json" -d "{}"'
+# 4) #4 transaction-status of that bet:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api sh -c \
+  'curl -s "localhost:3001/api/operator/reports/transaction?betId=<BETID>" \
+     -H "authorization: Bearer <REPORTING_KEY>"'
+# 5) reconcile the operator book (NOTE the required overrides — the stub is a custom code/url/key):
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox exec api sh -c \
+  'OPERATOR_CODE=sandbox-casino STUB_URL=http://stub:4001 STUB_KEY=<STUB_WALLET_KEY> \
+     bun scripts/operator-recon-check.ts'
+```
+**Verified result (2026-06-07):** launch → balance `100000000` → bet (betId `cccaaf19…`,
+stub debit) → auto-cashout @1.2x payout `120` (stub credit) → **#5 void**
+`{reversed:true, refundedStake:100, reclaimedPayout:120}` (stub `/rollback` ×2) → idempotent
+re-void `{reversed:false}` → **#4** `{status:voided, debitState:reversed, refundState:applied,
+payoutState:none}` → **operator-recon-check O1–O5 PASS, 0 discrepancies** (book Σbet=100
+Σwin=120 Σrollback=-20 ⇒ netDrop=0). #4 + #5 confirmed LIVE on the sandbox.
+> **GOTCHAS:** `operator-recon-check` needs the
+> `OPERATOR_CODE=sandbox-casino STUB_URL=http://stub:4001 STUB_KEY=<stub key>` overrides
+> (it defaults to the prod-shaped operator). The stub's `/debug/book` is **in-memory** —
+> reconcile **before** restarting the stub or the book resets.
+
+### 17.4 Public exposure (the ONE remaining piece — awaiting USER's subdomain decision)
+The api binds `127.0.0.1:3001` (loopback; verified on the box) — reachable on the box but
+not from the internet. To let a casino reach it, pick one:
+- **(recommended) subdomain + Caddy auto-TLS** — point DNS (e.g. `sandbox.vaultrun.app`)
+  → `167.233.54.64`, run Caddy reverse-proxying `:443` → `127.0.0.1:3001`. Keep `BIND_ADDR=127.0.0.1`.
+- **plain HTTP** — set `BIND_ADDR=0.0.0.0` in `.env.sandbox` + `up -d` → reachable at
+  `http://167.233.54.64:3001` (sandbox only; no TLS).
+
+**If exposed publicly, also set `METRICS_TOKEN`** (today unset ⇒ `/metrics` is open). The
+sandbox is play-money, but don't leave an open metrics endpoint on a public IP.
+
+### 17.5 Rollback / teardown (zero prod impact)
+```bash
+# stop the stack (keep the data volumes):
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox down
+# wipe everything incl. the postgres/redis volumes:
+docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox down -v
+```
+This touches ONLY the sandbox box — **prod (`6bfda18`, single-node, operator-OFF) and
+staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
+
+Plan + the e2e detail → `project_production_roadmap.md` "PHASE 6 — B2B TRUST-PACKAGE PLAN"
+→ "#3 HOSTED SANDBOX".
 
 ---
 

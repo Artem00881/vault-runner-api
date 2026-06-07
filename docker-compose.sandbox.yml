@@ -1,0 +1,113 @@
+# Vault Run — HOSTED OPERATOR-MODE SANDBOX (Phase 6 #3).
+#
+# A SELF-CONTAINED operator-mode demo so a casino/aggregator can try the full
+# integration — launch -> bet -> cash_out -> void -> reconcile — against the REAL
+# seamless-wallet contract, WITHOUT a real wallet and WITHOUT touching prod/staging:
+#   api (WALLET_PROVIDER_TYPE=operator) + postgres + redis + a STUB operator wallet
+#   (load/operator-wallet-stub.ts). The stub is the operator on the other end of the
+#   /bet /win /rollback /balance wire — it holds play money only.
+#
+# NO 1Password / Caddy / mTLS here (those are prod edge concerns). The only secrets are
+# a sandbox JWT_SECRET + the stub key, generated on the box into .env.sandbox (NOT real
+# operator secrets — the stub is fake money). load/ + scripts/ are bind-mounted because
+# the prod Dockerfile copies only src/ (the stub + the provision/recon scripts live in
+# load/ + scripts/).
+#
+# Deploy on the sandbox box (see DEPLOY.md "SANDBOX"):
+#   docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox up -d --build
+# Provision the demo operator once the api is healthy:
+#   docker compose -f docker-compose.sandbox.yml exec api \
+#     bun scripts/operator-provision.ts --code sandbox-casino --name "Sandbox Casino" \
+#     --currencies EUR --wallet-url http://stub:4001 --wallet-key "$STUB_WALLET_KEY" --demo-enabled
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vaultrun-sandbox-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-vault}"
+      POSTGRES_DB: vaultrun
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vaultrun"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: vaultrun-sandbox-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+
+  # The operator wallet STUB (play money) — speaks the exact seamless contract the
+  # SeamlessOperatorWallet calls. Run straight from the bun image with the single
+  # self-contained file bind-mounted (it imports nothing but Bun globals).
+  stub:
+    image: oven/bun:1
+    container_name: vaultrun-sandbox-stub
+    restart: unless-stopped
+    volumes:
+      - ./load/operator-wallet-stub.ts:/stub.ts:ro
+    environment:
+      PORT: "4001"
+      WALLET_KEY: "${STUB_WALLET_KEY:?set STUB_WALLET_KEY in .env.sandbox}"
+      START_BALANCE: "${STUB_START_BALANCE:-100000000}"
+    command: ["bun", "/stub.ts"]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vaultrun-sandbox-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://vault:${POSTGRES_PASSWORD:-vault}@postgres:5432/vaultrun?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      PORT: "3001"
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env.sandbox}"
+      # The whole point of the sandbox: real seamless-wallet path against the stub.
+      WALLET_PROVIDER_TYPE: "operator"
+      GAME_CURRENCY: "${GAME_CURRENCY:-DEMO}"
+      # A sandbox an external integrator hits from anywhere; reflect any origin (no edge here).
+      CORS_ORIGIN: "${CORS_ORIGIN:-*}"
+      # operator-mode boot guard (assertRiskConfigForMode) FAILS CLOSED without real RISK_*
+      # ceilings — EUR-reference examples (game-math-spec §12); fine for a play-money sandbox.
+      RISK_MAX_BET: "${RISK_MAX_BET:-10000}"
+      RISK_MAX_WIN_PER_BET: "${RISK_MAX_WIN_PER_BET:-1000000}"
+      RISK_MAX_MULTIPLIER: "${RISK_MAX_MULTIPLIER:-10000}"
+      RISK_MAX_ROUND_EXPOSURE: "${RISK_MAX_ROUND_EXPOSURE:-10000000}"
+      OPERATOR_WALLET_TIMEOUT_MS: "3000"
+      # Random salt is correct for a play-money sandbox (NOT real money → no eth-block /
+      # FAIRNESS_REQUIRE_BLOCK_SALT, which would stall without an oracle).
+      SALT_PROVIDER_TYPE: "random"
+      FAIRNESS_CHAIN_LENGTH: "10000"
+      SESSION_TOKEN_TTL_SEC: "14400"
+      # A single integrator hammers from one IP while testing — keep generous but bounded.
+      THROTTLE_LIMIT: "${THROTTLE_LIMIT:-600}"
+      THROTTLE_TTL_MS: "60000"
+      NODE_ENV: "production"
+    volumes:
+      # The prod image copies only src/; the sandbox needs the stub + the ops scripts
+      # (provision / launch-token / recon) available in the container.
+      - ./scripts:/app/scripts:ro
+      - ./load:/app/load:ro
+    # Default loopback-only: bring up + verify on the box, then expose publicly via an
+    # edge (Caddy + TLS on a subdomain) or set BIND_ADDR=0.0.0.0 for plain-HTTP access.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      stub:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:
