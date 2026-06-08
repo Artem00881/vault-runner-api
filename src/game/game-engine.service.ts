@@ -7,6 +7,7 @@ import { FairnessService } from "../fairness/fairness.service";
 import { WALLET_PROVIDER, type WalletProvider } from "../wallet/wallet-provider";
 import { MetricsService } from "../metrics/metrics.service";
 import { ElectionService } from "../ha/election.service";
+import { captureException } from "../observability/sentry";
 import { PublicRoundCache, ROUND_CHANNEL, ROUND_SNAPSHOT_KEY, type PublishedRoundState } from "./public-round-cache";
 import { GROWTH, PHASE_MS, type Phase, type PublicRoundState } from "./round-types";
 
@@ -53,6 +54,42 @@ const OPEN_PHASES: Phase[] = ["waiting", "betting", "running", "crashed", "settl
  */
 const RESUME_MAX_STALENESS_MS = 30_000;
 
+function numEnv(name: string, dflt: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+
+/**
+ * Audit H5 / F-048a — PER-PHASE await deadline (ms). Each phase transition's awaited work is
+ * raced against this; if it never settles (a HUNG await — e.g. a wedged DB connection, the
+ * silent-stall root cause) the race REJECTS, safe()'s catch fires, and the loop reschedules a
+ * fresh enterWaiting() instead of stalling forever. Phases are normally sub-second; the worst
+ * legitimate case is a resume honor-then-crash settling many bets. The 10s default is
+ * comfortably above any real phase yet far below the multi-minute stall window, and ABOVE the
+ * 8s DB statement_timeout (F-048b) so a wedged query rejects on its own first — this deadline
+ * is the backstop for a hang with no query to time out. Changes NO fairness logic: re-entering
+ * enterWaiting allocates a fresh seed idempotently. Read at USE time (not frozen at module
+ * load) so fault-injection tests can set ENGINE_PHASE_DEADLINE_MS per-run without import-order
+ * fragility; production reads it once-effectively (the env is fixed for the process lifetime).
+ */
+const phaseDeadlineMs = () => numEnv("ENGINE_PHASE_DEADLINE_MS", 10_000);
+
+/**
+ * Audit H5 / F-048c — round-liveness DEADMAN window (ms). If we are the leader and no round
+ * has COMPLETED within this long, the loop is wedged in a way the per-phase deadline did not
+ * self-heal (e.g. reschedule itself keeps failing). The deadman then logs loudly, records the
+ * stall metric, and VOLUNTARILY steps down so a healthy follower takes over via the proven
+ * failover-resume. Kept WELL ABOVE the per-phase deadline (#1 self-heals first; this is the
+ * backstop) and far below the 15-min EngineStalled alert window. A full round is ~11.6s + run
+ * time, so 60s spans several rounds — a true stall, never a slow one. Read at use time; override
+ * via ENGINE_DEADMAN_MS (tests).
+ */
+const deadmanMs = () => numEnv("ENGINE_DEADMAN_MS", 60_000);
+/** How often the deadman checks liveness (ms). Sub-deadline so it reacts within a check tick. */
+const deadmanCheckMs = () => numEnv("ENGINE_DEADMAN_CHECK_MS", 10_000);
+
 @Injectable()
 export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(GameEngineService.name);
@@ -62,6 +99,18 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private state: EngineState | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+
+  /**
+   * F-048c — wall-clock ms of the last COMPLETED round (the liveness anchor the deadman + the
+   * /health/live probe read). Seeded to construction time so a freshly-started leader gets a
+   * full DEADMAN_MS grace before the first round completes (boot/resume legitimately takes a
+   * few seconds). Stamped in enterCompleted(), the single point a round truly finishes.
+   */
+  private lastRoundAt = Date.now();
+  /** F-048c deadman timer (leader-only; armed in start(), cleared in stop()). */
+  private deadmanTimer: ReturnType<typeof setInterval> | null = null;
+  /** Re-entrancy guard so an in-flight voluntary step-down can't be triggered twice. */
+  private steppingDown = false;
 
   /**
    * Phase 4.5c.2 — optional auto-cashout driver, registered by the gateway (which owns
@@ -98,12 +147,17 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     // Net single-node behavior is identical: one node wins the lock on boot → start().
     this.election.events.on("leader-acquired", () => {
       this.log.log("became engine leader → starting the round loop");
+      this.metrics.setEngineLeader(this.election.nodeId, true); // F-050 leader gauge + flap counter
       this.start().catch((e) => this.log.error(`start failed: ${e?.message}`));
     });
     this.election.events.on("leader-lost", () => {
       this.log.warn("lost engine leadership → stopping the round loop");
+      this.metrics.setEngineLeader(this.election.nodeId, false); // F-050 follower gauge + flap counter
       this.stop();
     });
+    // F-050: publish an initial leader/follower reading at boot (before any flip) so the gauge
+    // exists from the first scrape, not only after the first transition.
+    this.metrics.setEngineLeader(this.election.nodeId, this.election.isLeader());
     if (this.election.isLeader()) {
       this.start().catch((e) => this.log.error(`start failed: ${e?.message}`));
     }
@@ -116,6 +170,11 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   async start() {
     if (this.running) return;
     this.running = true;
+    // F-048c: a fresh leader gets a full grace window before the deadman can trip (boot/resume
+    // legitimately takes a few seconds to complete the first round), then arm the deadman.
+    this.lastRoundAt = Date.now();
+    this.steppingDown = false;
+    this.armDeadman();
     await this.fairness.ensureChain();
     // Phase 4.5c.2: RESUME the in-flight round (seamless failover) instead of always
     // close+refunding it. resumeOrRecover() either re-attaches the loop to the persisted
@@ -310,7 +369,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     switch (phase) {
       case "waiting":
         // No bets exist yet (placeBet gates on 'betting'). Just continue the countdown.
-        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterBetting()));
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterBetting(), "betting"));
         return;
 
       case "betting":
@@ -318,7 +377,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
         // the betting window; if it already elapsed during the gap, enterRunning() fires
         // immediately (schedule clamps to >=0) and the round starts — deterministic, no money
         // moved yet (cash-outs only open once running).
-        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterRunning()));
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterRunning(), "running"));
         return;
 
       case "running": {
@@ -328,7 +387,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
           // SEAMLESS CLIMB: the round is still mid-flight. this.state.phase is already
           // 'running', so onTick resumes ticking + honoring autos and manual cash-outs work
           // (4.5c.1 re-reads the authoritative Round). Just re-arm the crash at its real time.
-          this.schedule(crashTime - now, () => this.safe(() => this.enterCrashed()));
+          this.schedule(crashTime - now, () => this.safe(() => this.enterCrashed(), "crashed"));
           return;
         }
         // CRASH ELAPSED DURING THE GAP. We must HONOR the deterministic outcome — pay every
@@ -372,7 +431,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
         });
         await this.mirror();
         this.events.emit("crash", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
-        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterSettling()));
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterSettling(), "settling"));
         return;
 
       case "settling": {
@@ -389,7 +448,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
         // (status='completed') somehow raced ahead, settleRound busts by {roundId,status:active}
         // REGARDLESS of round status, so the ordering race is benign either way.
         this.events.emit("settle", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
-        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterCompleted()));
+        this.schedule(Math.max(0, phaseEndsAt - now), () => this.safe(() => this.enterCompleted(), "completed"));
         return;
       }
 
@@ -491,6 +550,63 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   stop() {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
+    this.clearDeadman(); // F-048c: a follower (or a stopped node) must not run the leader deadman
+  }
+
+  // ---- F-048c round-liveness deadman (the backstop if the per-phase self-heal itself wedges) ----
+  private armDeadman() {
+    this.clearDeadman();
+    this.deadmanTimer = setInterval(() => void this.deadmanCheck(), deadmanCheckMs());
+    this.deadmanTimer.unref?.(); // never keep the event loop alive solely for this (clean exit)
+  }
+  private clearDeadman() {
+    if (this.deadmanTimer) {
+      clearInterval(this.deadmanTimer);
+      this.deadmanTimer = null;
+    }
+  }
+
+  /** True iff this node is the engine leader (consumed by /health/live, F-051). */
+  isEngineLeader(): boolean {
+    return this.election.isLeader();
+  }
+  /** ms since the last COMPLETED round (consumed by /health/live + the deadman). */
+  msSinceLastRound(): number {
+    return Date.now() - this.lastRoundAt;
+  }
+
+  /**
+   * F-048c — periodic round-liveness check. If we are the LEADER and no round has completed
+   * within DEADMAN_MS, the loop is wedged in a way the per-phase deadline (F-048a) did not
+   * self-heal. We make it LOUD (error log + the engine_stall error metric + Sentry) and then
+   * VOLUNTARILY step down — NOT a new settlement/teardown path, just a clean advisory-lock
+   * release via election.stepDown(), so a healthy follower acquires and takes over through the
+   * PROVEN, money-safe failover-resume (resumeOrRecover, commit 163d459). The follower's
+   * resumeRound() owns the in-flight round; every money write there is idempotent + fence-
+   * guarded, so a takeover cannot double-settle. On a SINGLE node the stepped-down node simply
+   * re-acquires the now-free lock on its next poll and start()s fresh — self-healing either way.
+   * Re-entrancy + leadership guarded so it fires once per stall.
+   */
+  private async deadmanCheck() {
+    if (this.steppingDown || !this.election.isLeader()) return;
+    const deadline = deadmanMs();
+    const stalledMs = this.msSinceLastRound();
+    if (stalledMs <= deadline) return;
+    this.steppingDown = true;
+    const msg = `engine STALL: no round completed in ${stalledMs}ms (> ${deadline}ms deadman) — self-demoting for failover`;
+    this.log.error(msg);
+    this.metrics.recordError("engine_stall"); // makes ErrorSpike + a dedicated alert fire
+    captureException(new Error(msg), { where: "engine_stall", stalledMs, phase: this.state?.phase ?? null });
+    try {
+      // Clean lock-release via the SAME demotion path a dead heartbeat uses (fires leader-lost
+      // → our stop()). A follower then resumes; if we are single-node we re-acquire next poll.
+      await this.election.stepDown("engine-stall-deadman");
+    } catch (e: any) {
+      // stepDown is best-effort; if it somehow throws, fall back to a local stop+restart so a
+      // single node still recovers (re-acquire on next poll re-runs start()).
+      this.log.error(`deadman step-down failed (${e?.message}) — local stop fallback`);
+      this.stop();
+    }
   }
 
   // ---- public reads (no secret leakage) ----
@@ -587,7 +703,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
       // resolve (audit M6). Never open a round on a grindable random salt; retry shortly
       // (the maintain() above arms the block epoch once its block finalizes). Not an error.
       this.log.warn("fairness: awaiting committed block salt before opening a round (FAIRNESS_REQUIRE_BLOCK_SALT)");
-      this.schedule(1500, () => this.safe(() => this.enterWaiting()));
+      this.schedule(1500, () => this.safe(() => this.enterWaiting(), "waiting"));
       return;
     }
     const crashPoint = this.fairness.crashForSeed(seed);
@@ -626,7 +742,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     };
     await this.mirror();
     this.emitPhase("waiting");
-    this.schedule(PHASE_MS.waiting, () => this.safe(() => this.enterBetting()));
+    this.schedule(PHASE_MS.waiting, () => this.safe(() => this.enterBetting(), "betting"));
   }
 
   private async enterBetting() {
@@ -640,7 +756,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     });
     await this.mirror();
     this.emitPhase("betting");
-    this.schedule(PHASE_MS.betting, () => this.safe(() => this.enterRunning()));
+    this.schedule(PHASE_MS.betting, () => this.safe(() => this.enterRunning(), "running"));
   }
 
   private async enterRunning() {
@@ -659,7 +775,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
 
     // Time until the precomputed crash multiplier is reached.
     const crashDelay = Math.max(0, Math.log(this.state.crashPoint) / GROWTH);
-    this.schedule(crashDelay, () => this.safe(() => this.enterCrashed()));
+    this.schedule(crashDelay, () => this.safe(() => this.enterCrashed(), "crashed"));
   }
 
   private async enterCrashed() {
@@ -675,7 +791,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     await this.mirror();
     this.events.emit("crash", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
     this.emitPhase("crashed");
-    this.schedule(PHASE_MS.crashed, () => this.safe(() => this.enterSettling()));
+    this.schedule(PHASE_MS.crashed, () => this.safe(() => this.enterSettling(), "settling"));
   }
 
   private async enterSettling() {
@@ -691,7 +807,7 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     // M6 will settle bets here (engine ↔ ledger). For M4 this is a no-op hook.
     this.events.emit("settle", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
     this.emitPhase("settling");
-    this.schedule(PHASE_MS.settling, () => this.safe(() => this.enterCompleted()));
+    this.schedule(PHASE_MS.settling, () => this.safe(() => this.enterCompleted(), "completed"));
   }
 
   private async enterCompleted() {
@@ -704,18 +820,47 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
       data: { status: "completed", settledAt: new Date(), phaseEndsAt: new Date(this.state.phaseEndsAt) },
     });
     await this.mirror();
-    this.metrics.recordRound(); // metrics-only: vaultrun_rounds_total (Phase 4.4)
+    this.lastRoundAt = Date.now(); // F-048c: a round just COMPLETED → the loop is alive
+    this.metrics.recordRound(); // vaultrun_rounds_total + the F-050 last-round timestamp gauge
     this.events.emit("settled", { roundId: this.state.roundId });
     this.emitPhase("completed");
-    this.schedule(PHASE_MS.completed, () => this.safe(() => this.enterWaiting()));
+    this.schedule(PHASE_MS.completed, () => this.safe(() => this.enterWaiting(), "waiting"));
   }
 
-  /** Run a phase transition, logging + retrying on failure so the loop survives. */
-  private safe(fn: () => Promise<void>) {
-    fn().catch((e) => {
-      this.log.error(`phase transition failed: ${e?.message}`);
-      // back off briefly then try to recover by starting a fresh round
-      this.schedule(1500, () => this.safe(() => this.enterWaiting()));
+  /**
+   * Run a phase transition, logging + retrying on failure so the loop survives.
+   *
+   * F-048a: the awaited phase work is RACED against a per-phase deadline that REJECTS. A
+   * HUNG transition (a never-settling await — the silent-stall root cause) therefore rejects
+   * into the catch below and the loop reschedules a fresh enterWaiting() instead of stalling
+   * forever. The reject does not abandon the slow fn() — it keeps running and a late
+   * resolve/reject is harmlessly consumed (no unhandled rejection); the timer is always cleared.
+   *
+   * F-049: on ANY failure we now also record the `phase_transition` error metric + capture to
+   * Sentry (labelled by phase), so a crash-/hang-looping engine actually trips ErrorSpike +
+   * surfaces in Sentry — previously the catch only log.error'd and was invisible to alerting.
+   */
+  private safe(fn: () => Promise<void>, phase: Phase | "unknown" = "unknown") {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadlineMs = phaseDeadlineMs();
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`phase '${phase}' exceeded ${deadlineMs}ms deadline (hung transition)`)),
+        deadlineMs,
+      );
     });
+    Promise.race([fn(), deadline])
+      .catch((e) => {
+        this.log.error(`phase transition '${phase}' failed: ${e?.message}`);
+        this.metrics.recordError("phase_transition"); // F-049: surfaces to ErrorSpike
+        captureException(e, { where: "phase_transition", phase }); // F-049
+        // back off briefly then try to recover by starting a fresh round. enterWaiting()
+        // re-fences via stillLeader() (a stale leader self-demotes) and allocates a FRESH seed
+        // idempotently — no fairness deviation.
+        this.schedule(1500, () => this.safe(() => this.enterWaiting(), "waiting"));
+      })
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+      });
   }
 }

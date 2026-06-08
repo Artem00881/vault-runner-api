@@ -89,4 +89,41 @@ export class HealthController {
     if (healthy) return { status: "ok", ...detail };
     throw new HttpException({ status: "degraded", ...detail }, HttpStatus.SERVICE_UNAVAILABLE);
   }
+
+  /**
+   * F-051 — engine LIVENESS probe (multi-node profile). Distinct from GET /health on purpose:
+   *
+   *  - GET /health is the LB/WS-rotation probe and stays ENGINE-AGNOSTIC: a node whose engine
+   *    is merely off (follower / GAME_AUTOSTART=false) is still perfectly able to serve WS, so
+   *    it must NOT be pulled from rotation. /health only fails on a dep (DB/Redis) outage.
+   *
+   *  - GET /health/live is for an ORCHESTRATOR (Docker/K8s) restart decision: it FAILS (503)
+   *    only when THIS node is the engine LEADER and the round loop has stalled (no round
+   *    completed within LIVE_STALL_MS). A stalled leader SHOULD fail over — failing this probe
+   *    tells the orchestrator to restart the container, which drops the advisory lock and lets
+   *    a follower take over. A follower / non-leader always passes (it owns no loop to stall).
+   *
+   * Gated behind a leader-stall so it is a no-op on a healthy leader and on every follower.
+   * The deadman (F-048c) self-heals first via voluntary step-down; this probe is the
+   * orchestration-level backstop. SINGLE-NODE PROD IS UNCHANGED: the Docker healthcheck that
+   * targets this is shipped commented / multi-node-only (docker-compose.prod.yml), so today
+   * nothing acts on it — it is a read-only endpoint until the multi-node cutover wires it.
+   */
+  @Get("live")
+  live() {
+    const LIVE_STALL_MS = Number(process.env.ENGINE_LIVE_STALL_MS ?? 120_000); // 2 min default
+    let leader = false;
+    let sinceLastRoundMs: number | null = null;
+    try {
+      leader = this.engine.isEngineLeader();
+      sinceLastRoundMs = this.engine.msSinceLastRound();
+    } catch {
+      // Engine not introspectable → treat as not-a-leader (don't fail liveness on that).
+      leader = false;
+    }
+    const stalled = leader && sinceLastRoundMs !== null && sinceLastRoundMs > LIVE_STALL_MS;
+    const body = { status: stalled ? "stalled" : "ok", leader, sinceLastRoundMs };
+    if (stalled) throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
+    return body;
+  }
 }

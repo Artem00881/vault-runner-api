@@ -175,3 +175,63 @@ test("H5: 503 path WITH correct bearer still exposes per-dep detail", async () =
     expect(body.deps.db.up).toBe(true);
   }
 });
+
+// ── F-051: GET /health/live — engine-LIVENESS probe (multi-node orchestration) ───────────────
+// Distinct from /health: it FAILS (503) only when THIS node is the engine LEADER and the loop
+// has stalled (no round within ENGINE_LIVE_STALL_MS). A follower / non-leader always passes, so
+// it never pulls a healthy WS node from rotation. (The Docker healthcheck targeting it is
+// shipped commented / multi-node-only, so single-node prod is unaffected.)
+const SAVED_LIVE_STALL = process.env.ENGINE_LIVE_STALL_MS;
+afterEach(() => {
+  if (SAVED_LIVE_STALL === undefined) delete process.env.ENGINE_LIVE_STALL_MS;
+  else process.env.ENGINE_LIVE_STALL_MS = SAVED_LIVE_STALL;
+});
+
+function liveController(engine: { isEngineLeader: () => boolean; msSinceLastRound: () => number }) {
+  const prisma: any = { $queryRaw: async () => [{ "?column?": 1 }] };
+  const redis: any = { client: { ping: async () => "PONG" } };
+  return new HealthController(prisma, redis, engine as any);
+}
+
+test("F-051 /health/live: a healthy leader (fresh round) → 200 ok", () => {
+  process.env.ENGINE_LIVE_STALL_MS = "120000";
+  const c = liveController({ isEngineLeader: () => true, msSinceLastRound: () => 5_000 });
+  const r: any = c.live();
+  expect(r.status).toBe("ok");
+  expect(r.leader).toBe(true);
+});
+
+test("F-051 /health/live: a STALLED leader → 503 (orchestrator should restart → failover)", () => {
+  process.env.ENGINE_LIVE_STALL_MS = "120000";
+  const c = liveController({ isEngineLeader: () => true, msSinceLastRound: () => 300_000 });
+  try {
+    c.live();
+    throw new Error("should have thrown");
+  } catch (e) {
+    expect(e).toBeInstanceOf(HttpException);
+    const ex = e as HttpException;
+    expect(ex.getStatus()).toBe(503);
+    expect((ex.getResponse() as any).status).toBe("stalled");
+  }
+});
+
+test("F-051 /health/live: a FOLLOWER never fails, even with a stale lastRound", () => {
+  process.env.ENGINE_LIVE_STALL_MS = "120000";
+  const c = liveController({ isEngineLeader: () => false, msSinceLastRound: () => 999_999 });
+  const r: any = c.live(); // follower owns no loop → liveness is always ok
+  expect(r.status).toBe("ok");
+  expect(r.leader).toBe(false);
+});
+
+test("F-051 /health/live: engine not introspectable → treated as not-leader → 200", () => {
+  // engine throws on the calls (e.g. mid-boot) — must NOT fail liveness on that.
+  const c = liveController({
+    isEngineLeader: () => {
+      throw new Error("not ready");
+    },
+    msSinceLastRound: () => 0,
+  });
+  const r: any = c.live();
+  expect(r.status).toBe("ok");
+  expect(r.leader).toBe(false);
+});

@@ -30,14 +30,55 @@ groups:
           summary: "VaultRun API is down"
           description: "Prometheus cannot scrape the API /metrics for 2 minutes."
 
-      # Engine stalled = no rounds completing (e.g. fairness chain exhausted).
+      # Engine stalled = no rounds completing (e.g. fairness chain exhausted). RAISED to
+      # CRITICAL + window shortened 15m→5m (audit H5 / F-050): a stalled shared engine stops
+      # the whole game for every player, so it must page fast, not after 15 quiet minutes. The
+      # rate-based form stays as a coarse backstop; EngineStallTimestamp below is the precise,
+      # restart-robust primary (it survives a container bounce, which resets a rate window).
       - alert: EngineStalled
-        expr: rate(vaultrun_rounds_total[15m]) == 0
-        for: 15m
-        labels: { severity: warning }
+        expr: rate(vaultrun_rounds_total[5m]) == 0
+        for: 5m
+        labels: { severity: critical }
         annotations:
           summary: "Game engine not producing rounds"
-          description: "No rounds completed in 15 minutes — engine may be stuck (e.g. fairness chain exhausted)."
+          description: "No rounds completed in 5 minutes — the shared engine may be stalled (e.g. fairness chain exhausted, a hung phase, or a wedged DB). The whole game is stopped for all players."
+
+      # PRIMARY leader-loop-liveness (F-050): seconds since the LAST completed round, measured
+      # off a wall-clock TIMESTAMP gauge — restart-robust (a container bounce does NOT reset it,
+      # unlike a rate() window). Fires when no round has completed in >60s while a node is up.
+      # The gauge is seeded to BOOT time (so it never reads as a 55-year stall before the first
+      # round). This is the tight SLO; it trips well before EngineStalled and is the signal the
+      # on-call should trust first.
+      - alert: EngineStallTimestamp
+        expr: (time() - vaultrun_engine_last_round_timestamp_seconds) > 60
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "No completed round in over 60s (engine loop liveness)"
+          description: "time()-vaultrun_engine_last_round_timestamp_seconds > 60s: the leader's round loop has not completed a round in over a minute. The F-048c deadman self-demotes for failover at 60s; if this persists, the loop (and failover) are wedged."
+
+      # Leadership FLAP (F-050): the engine should hold leadership steadily. A burst of
+      # acquire/loss transitions = a node repeatedly winning then losing the lock (split-brain
+      # risk, a flapping DB connection, or two nodes fighting). Sum across nodes/events.
+      - alert: EngineLeadershipFlapping
+        expr: sum(rate(vaultrun_engine_leadership_changes_total[5m])) * 60 > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Engine leadership flapping"
+          description: "More than 3 engine leadership transitions/min over 5m — a node is repeatedly acquiring/losing the leader lock (flapping DB connection or contention). Failover should be rare and clean."
+
+      # No engine leader at all (F-050): in a running deployment exactly one node should report
+      # vaultrun_engine_leader == 1. If the max across nodes is 0 for a sustained window, NO node
+      # holds the loop (every node demoted / none could acquire the lock) → the game is stopped.
+      # NB: this is meaningful once HA is wired multi-node; on a healthy single node it is 1.
+      - alert: EngineNoLeader
+        expr: max(vaultrun_engine_leader) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "No engine leader elected"
+          description: "No node reports vaultrun_engine_leader==1 for 2 minutes — the shared round loop has no owner (all nodes demoted, or none could acquire the Postgres advisory lock). The game is stopped for all players."
 
       # Operator-mode owed payouts (H2): a won cash-out whose operator credit we
       # couldn't confirm sits in payout_pending until the reconciler clears it.
@@ -105,6 +146,30 @@ groups:
         annotations:
           summary: "Audit-log writes are failing (significant-event trail has gaps)"
           description: "{{ $value }} significant-event audit-log write(s) failed in 5m (F-058). The action still proceeded (best-effort), but the append-only audit trail is dropping events — check the DB/app."
+
+      # Salt-oracle STALL (audit H5 / F-050; reuses the H3 fallback counter). mode="strict" =
+      # a REAL-MONEY node could not serve a committed block-hash salt, so the engine is STALLING
+      # on the oracle (never grinds a random salt in strict mode) — rounds stop until the block
+      # finalizes. ANY strict firing is page-worthy. (mode="fallback" = demo/play-money
+      # substituted a transparent random salt — NOT alerted here; that is expected in DEMO.)
+      - alert: FairnessOracleStalled
+        expr: increase(vaultrun_fairness_salt_fallback_total{mode="strict"}[10m]) > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: "Fairness salt-oracle stalled (real-money)"
+          description: "{{ $value }} strict-mode salt-oracle failure(s) in 10m (F-050): a real-money node could not serve a committed block-hash salt and is stalling the engine until the block finalizes. Check ETH_RPC_URLS / the oracle quorum."
+
+      # RG-block RATE (F-050): a steady trickle of responsible-gambling blocks is normal; a SPIKE
+      # can mean a misconfigured limit, a stuck reality-check loop, or an abusive client — worth a
+      # look. Warning-only (these are correct behaviour, just unusually frequent). By reason.
+      - alert: RgBlockSpike
+        expr: sum(rate(vaultrun_rg_blocks_total[5m])) by (reason) * 60 > 30
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Responsible-gambling block rate elevated"
+          description: "RG blocks for reason={{ $labels.reason }} exceed 30/min over 5m for 10m. Usually correct enforcement, but a spike can mean a misconfigured limit or a stuck reality-check — review."
 
       - alert: HostDiskLow
         expr: min(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) < 0.15

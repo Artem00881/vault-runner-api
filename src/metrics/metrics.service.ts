@@ -42,6 +42,18 @@ export class MetricsService {
 
   readonly wsConnections: Gauge;
   readonly realizedRtp: Gauge;
+  // ---- HA / engine-stall observability (audit H5 / F-050) ----
+  // Is THIS node the engine leader right now (1) or a follower (0). Labelled by node so a
+  // multi-node scrape shows exactly one leader; the leadership-flap alert watches the change
+  // counter below, this gauge is the at-a-glance "who leads".
+  readonly engineLeader: Gauge;
+  // Unix TIMESTAMP (seconds) of the last COMPLETED round. A timestamp (not a since-restart
+  // counter) is restart-robust: `time() - this` is the true seconds-since-last-round even
+  // across a container restart, so the leader-loop-liveness alert can't be reset by a bounce.
+  readonly engineLastRoundTimestampSeconds: Gauge;
+  // Leadership transitions on this node (acquire + loss). A non-trivial rate = leadership
+  // FLAPPING (a node repeatedly winning/losing the lock) — the leadership-flap alert.
+  readonly engineLeadershipChangesTotal: Counter;
   // Operator-mode payout backlog (H2): a won cash-out whose operator credit we
   // couldn't confirm sits in status payout_pending until the reconciler clears
   // it. We never abandon it, so a stuck one must be loud + alertable.
@@ -80,6 +92,10 @@ export class MetricsService {
 
     this.wsConnections = new Gauge({ name: "vaultrun_ws_connections", help: "Active WS connections", registers: reg });
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
+    // HA / engine-stall observability (F-050).
+    this.engineLeader = new Gauge({ name: "vaultrun_engine_leader", help: "1 if this node is the engine leader, 0 if a follower", labelNames: ["node"], registers: reg });
+    this.engineLastRoundTimestampSeconds = new Gauge({ name: "vaultrun_engine_last_round_timestamp_seconds", help: "Unix timestamp (s) of the last completed round; restart-robust — alert on time()-this", registers: reg });
+    this.engineLeadershipChangesTotal = new Counter({ name: "vaultrun_engine_leadership_changes_total", help: "Engine leadership transitions on this node (acquire/loss); a rate>0 = leadership flapping", labelNames: ["node", "event"], registers: reg });
     this.pendingPayouts = new Gauge({ name: "vaultrun_pending_payouts", help: "Bets in status payout_pending (operator-mode owed payouts not yet confirmed)", registers: reg });
     this.pendingPayoutOldestSeconds = new Gauge({ name: "vaultrun_pending_payout_oldest_seconds", help: "Age (seconds) of the oldest pending payout by settledAt; 0 if none", registers: reg });
     this.reservingSlots = new Gauge({ name: "vaultrun_reserving_slots", help: "Bets in a transient reservation state (reserving|cancelling); a stuck age = an owed refund the sweep hasn't cleared", registers: reg });
@@ -102,6 +118,12 @@ export class MetricsService {
       registers: reg,
     });
     this.buildInfo.set({ commit: BUILD_COMMIT(), version: BUILD_VERSION }, 1);
+
+    // F-050: seed the last-round timestamp to BOOT time so `time() - this` is small at boot
+    // (the engine legitimately takes a few seconds to complete its first round) — a 0 default
+    // would read as "stalled for ~55 years" and false-trip EngineStallTimestamp before the
+    // first round. enterCompleted() then stamps the real completion time each round.
+    this.engineLastRoundTimestampSeconds.set(Date.now() / 1000);
   }
 
   /** Record a placed bet + its stake (updates realized-RTP denominator). */
@@ -129,8 +151,19 @@ export class MetricsService {
   /** A responsible-gambling block (reality-check pending / time / loss / wager). Fired
    *  ALONGSIDE recordRejected (kept for back-compat) to give a clean RG-only signal. */
   recordRgBlock(reason: string) { this.rgBlocks.inc({ reason }); }
-  recordRound() { this.roundsTotal.inc(); }
+  recordRound() {
+    this.roundsTotal.inc();
+    // F-050: stamp the wall-clock time of this completed round so the leader-loop-liveness
+    // alert measures `time() - vaultrun_engine_last_round_timestamp_seconds` (restart-robust).
+    this.engineLastRoundTimestampSeconds.set(Date.now() / 1000);
+  }
   recordError(where: string) { this.errorsTotal.inc({ where }); }
+  /** Reflect this node's engine leadership (F-050): 1 leader / 0 follower, and count the
+   *  transition so the leadership-flap alert can watch a rate. event = acquired | lost. */
+  setEngineLeader(node: string, leader: boolean) {
+    this.engineLeader.set({ node }, leader ? 1 : 0);
+    this.engineLeadershipChangesTotal.inc({ node, event: leader ? "acquired" : "lost" });
+  }
   setWsConnections(n: number) { this.wsConnections.set(n); }
   observeSettlementLatency(ms: number) { this.settlementLatency.observe(ms); }
 

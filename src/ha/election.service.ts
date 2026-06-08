@@ -166,6 +166,36 @@ export class ElectionService implements OnApplicationBootstrap, OnModuleDestroy 
     }
   }
 
+  /**
+   * VOLUNTARY step-down (audit H5 / F-048c engine-stall deadman). A leader that detects it
+   * is no longer making progress (the round-liveness deadman in GameEngineService) calls this
+   * to relinquish leadership so a healthy follower can take over via the PROVEN, money-safe
+   * failover-resume path (resumeOrRecover, validated in commit 163d459) — exactly as on a
+   * real leader death, but initiated by us instead of by a dead connection.
+   *
+   * It reuses the SAME demotion machinery as a dead-heartbeat demote(): it first EXPLICITLY
+   * releases the Postgres advisory lock + clears the Redis lease (so a follower's next poll
+   * acquires within the ~2s cadence rather than waiting on TCP teardown), then runs demote()
+   * which flips leader=false, clears the fence, fires `leader-lost` (→ engine.stop()), tears
+   * down the dedicated connection, and resumes acquire-polling. It invents NO settlement or
+   * teardown of its own — it is a clean lock-release + the existing demote; the follower's
+   * resumeRound() owns the in-flight round, and every money write there is idempotent + fence-
+   * guarded, so a follower resuming mid-round cannot double-settle. No-op if not leader.
+   */
+  async stepDown(reason: string): Promise<void> {
+    if (!this.leader) return;
+    this.log.error(`voluntary step-down (${reason}) — releasing leadership for failover`);
+    // Explicit advisory-unlock first so the lock frees promptly (demote()'s close() would also
+    // release it server-side, but unlock makes a follower's next poll win without waiting on
+    // the TCP teardown). Best-effort: release() already swallows a dead-connection error.
+    try {
+      await this.lock.release();
+    } catch (e: any) {
+      this.log.warn(`step-down release failed (continuing to demote): ${e?.message}`);
+    }
+    this.demote();
+  }
+
   private demote() {
     if (!this.leader) return;
     this.leader = false;

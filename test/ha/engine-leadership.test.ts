@@ -20,6 +20,8 @@ const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const redisStub: any = { client: { set: async () => {}, publish: async () => {} } };
 const noopCache: any = { getPublicState: () => null, currentMultiplier: () => 1.0 };
+// Metrics stub — the engine records leader state (F-050) on wiring + rounds/errors elsewhere.
+const metricsStub: any = { setEngineLeader: () => {}, recordRound: () => {}, recordError: () => {} };
 
 /** Controllable election: a real EventEmitter so we can fire acquire/lost, plus a
  *  flippable `leader` flag that backs both isLeader() and assertStillLeader(). */
@@ -75,7 +77,7 @@ afterAll(async () => {
 
 test("engine starts on `leader-acquired` and stops on `leader-lost`", async () => {
   const election = makeElection(false);
-  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, {} as any, election as any, noopCache);
+  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, metricsStub, election as any, noopCache);
 
   // Observe start/stop without touching the DB loop: replace them with trackers.
   let starts = 0;
@@ -101,7 +103,7 @@ test("engine starts on `leader-acquired` and stops on `leader-lost`", async () =
 
 test("engine started ALREADY-leader in onModuleInit (DI ordering belt)", () => {
   const election = makeElection(true); // election won the lock before the engine wired up
-  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, {} as any, election as any, noopCache);
+  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, metricsStub, election as any, noopCache);
   let starts = 0;
   (engine as any).start = async () => {
     starts++;
@@ -120,7 +122,7 @@ test("a fence-gated phase transition ABORTS (no DB write) when assertStillLeader
   createdRoundIds.push(round.id);
 
   const election = makeElection(true);
-  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, {} as any, election as any, noopCache);
+  const engine = new GameEngineService(prisma, redisStub, {} as any, ledger, metricsStub, election as any, noopCache);
   // Seed in-memory state as if we authored this round, then make the loop "running".
   (engine as any).state = {
     roundId: round.id,
@@ -166,7 +168,7 @@ test("P2002 on round.create (Belt A) → stop, and does NOT retry into safe()", 
     allocateSeed: async () => ({ id: seed.id, chainIndex: 1 }),
     crashForSeed: () => 2.0,
   };
-  const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, {} as any, election as any, noopCache);
+  const engine = new GameEngineService(prisma, redisStub, fairnessStub, ledger, metricsStub, election as any, noopCache);
 
   let stops = 0;
   (engine as any).stop = () => {

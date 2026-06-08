@@ -91,6 +91,21 @@ services:
       # Cloudflare/loopback-only); set via 1Password (op.prod.env) to lock it.
       # Prometheus sends the matching bearer (monitoring/prometheus/prometheus.yml).
       METRICS_TOKEN: "${METRICS_TOKEN:-}"
+    # --- F-051 engine-liveness healthcheck — MULTI-NODE ONLY, intentionally COMMENTED ---
+    # GET /health/live FAILS (503) only when THIS node is the engine LEADER and the round
+    # loop has stalled (no round completed within ENGINE_LIVE_STALL_MS), so an orchestrator
+    # restarts a stalled leader → it drops the advisory lock → a follower fails over. A
+    # follower/non-leader always passes. DO NOT enable on SINGLE-NODE prod: there is no
+    # follower to take over, so a `restart: unless-stopped` + a failing healthcheck would just
+    # bounce the only node (the F-048c deadman + EngineStalled alert already cover single-node,
+    # and a bounce is exactly the manual recovery we saw — but we keep it operator-driven, not
+    # automatic, until the multi-node cutover). UNCOMMENT at the >=2-node cutover (DEPLOY.md §16).
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health/live || exit 1"]
+    #   interval: 15s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 60s   # >= the engine deadman grace so boot/resume never trips it
     # Bind to loopback only — the app is NOT exposed to the public internet.
     # A host-level Caddy reverse proxy (TLS + Cloudflare Authenticated Origin
     # Pulls) terminates :443 and forwards to 127.0.0.1:3001. See DEPLOY.md
