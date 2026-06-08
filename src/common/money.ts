@@ -25,3 +25,23 @@ export function rtpRatioString(won: bigint, wagered: bigint): string {
   const frac = (scaled % 10000n).toString().padStart(4, "0");
   return `${intPart}.${frac}`;
 }
+
+/**
+ * Exact integer floor of `stake × mult`, where `stakeMinor` is BigInt minor units and
+ * `mult` is a 2-decimal-place multiplier. Pure + float-free on the stake (F-001).
+ *
+ * The old `BigInt(Math.floor(Number(stake) * mult))` round-tripped the BigInt stake
+ * through an IEEE-754 double and (a) CREATED money for stakes ≥ 2^53 minor units (any
+ * high-decimal currency — 2^53 wei ≈ 0.009 ETH), and (b) even for small 2-dp stakes
+ * shorted the player by 1 unit on ~1% of multipliers (e.g. `100 × 1.14` floats to
+ * `113.999…` → floors to 113 instead of the true 114). `Math.round(mult*100)` absorbs
+ * that representation error (1.14→114); the BigInt divide by 100n does the floor
+ * (truncation toward zero == floor for non-negative operands, which both always are).
+ *
+ * CONTRACT: `mult` MUST be ≤ 2 dp (the live `crashPoint` / `cashoutMult` / `autoCashout`
+ * are all `Decimal(10,2)`). A >2-dp `mult` is silently re-quantized to 2 dp by the round.
+ */
+export function floorPayout(stakeMinor: bigint, mult: number): bigint {
+  const multCents = BigInt(Math.round(mult * 100));
+  return (stakeMinor * multCents) / 100n;
+}

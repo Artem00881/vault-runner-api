@@ -8,6 +8,7 @@ import { RiskService, type PerBetLimits } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
 import type { EffectiveRg } from "../operator/rg-config";
 import { isWageredStatus, isWonStatus } from "../common/bet-status";
+import { floorPayout } from "../common/money";
 
 export type Panel = "A" | "B";
 
@@ -402,7 +403,13 @@ export class BetsService {
     // per-currency cap stamped at placeBet (Phase 3), or the global house cap when
     // null. Reading it off the bet keeps the cash-out cap identical to the bet's,
     // and covers server-driven auto-cashout (which has no socket to carry limits).
-    const rawPayout = BigInt(Math.floor(Number(bet.amount) * mult));
+    // F-001 (money-MOVING, USER-signed-off 2026-06-08): payout = exact integer floor of
+    // stake × mult in PURE BigInt — see floorPayout(). The old float
+    // `BigInt(Math.floor(Number(bet.amount) * mult))` CREATED money for stakes ≥ 2^53
+    // minor units (high-decimal currencies) AND shorted small 2-dp payouts by 1 unit
+    // toward the house (e.g. 100 × 1.14 → 113 instead of 114). `mult` is 2-dp (the
+    // floored live multiplier or the auto-cashout target).
+    const rawPayout = floorPayout(bet.amount, mult);
     const payout = this.risk.capPayout(rawPayout, bet.maxWinPerBet ?? undefined);
 
     // Atomically CLAIM the bet (active → cashed_out). A manual+auto race (or two
@@ -442,11 +449,11 @@ export class BetsService {
     // update leaderboard stats (loot += payout, biggest = max)
     await this.prisma.$executeRawUnsafe(
       `UPDATE profiles
-         SET total_loot = total_loot + $1,
+         SET total_loot = total_loot + $1::bigint,
              biggest_multiplier = GREATEST(biggest_multiplier, $2),
              updated_at = now()
        WHERE user_id = $3::uuid`,
-      Number(payout),
+      payout.toString(), // F-022: bind BigInt as a string + ::bigint cast (Number() truncated >2^53 into the BIGINT column)
       mult,
       userId,
     );
@@ -668,11 +675,11 @@ export class BetsService {
         if (done.count === 0) continue;
         await this.prisma.$executeRawUnsafe(
           `UPDATE profiles
-             SET total_loot = total_loot + $1,
+             SET total_loot = total_loot + $1::bigint,
                  biggest_multiplier = GREATEST(biggest_multiplier, $2),
                  updated_at = now()
            WHERE user_id = $3::uuid`,
-          Number(bet.payout),
+          bet.payout.toString(), // F-022: BigInt as string + ::bigint cast (was lossy Number())
           Number(bet.cashoutMult ?? 1),
           bet.userId,
         );
