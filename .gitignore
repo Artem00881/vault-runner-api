@@ -1,6 +1,11 @@
 node_modules
 dist
+# F-013: ignore ALL real env files (.env, .env.local/.sandbox/.production, …) but KEEP the
+# tracked *.example templates AND the op.*.env 1Password-reference files (op.*.env doesn't match .env.*).
 .env
+.env.*
+!.env.example
+!.env.*.example
 *.log
 .DS_Store
 prisma/migrations/dev.db

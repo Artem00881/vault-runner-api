@@ -1008,20 +1008,21 @@ example: `provably-fair-guide.md`.
 
 ## 14. Environments
 
-Use these placeholder base URLs; the **wire contract is real and stable** even
-though the public sandbox URL is being finalized.
+The hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app`; the
+`*.vaultrun.example` hostnames below are placeholders for request examples — the
+**wire contract is real and stable**.
 
 | Environment | REST base | WS base | Status |
 |---|---|---|---|
-| Sandbox | `https://sandbox.vaultrun.example` | `wss://sandbox.vaultrun.example` | **Hosted operator-mode sandbox is forthcoming** (Phase 6 deliverable). URL **TBD**. |
-| Production | `https://api.vaultrun.example` | `wss://api.vaultrun.example` | Live, but currently running **operator-mode OFF** (internal play-money demo). |
+| Sandbox | `https://sandbox.vaultrun.app` | `wss://sandbox.vaultrun.app` | **Live** — hosted operator-mode sandbox (operator-wallet stub) for integration testing. **Not** under the production SLA (`commercial/sla.md` §9). |
+| Production | `https://api.vaultrun.example` | `wss://api.vaultrun.example` | Live, but currently running **operator-mode OFF** (internal play-money demo). Hostname is a placeholder. |
 
 > Important: production today runs with `WALLET_PROVIDER_TYPE=internal` (play-money,
 > the public demo) — the operator seamless-wallet path is built, tested, and dormant.
-> A hosted sandbox that exercises the **real** operator wallet contract end-to-end
-> (against an operator-wallet stub) is the next deliverable; this spec's request and
-> response shapes will not change when it ships. Do not hardcode any hostname from
-> this document.
+> The hosted sandbox at `https://sandbox.vaultrun.app` exercises the **real** operator
+> wallet contract end-to-end (against an operator-wallet stub); this spec's request and
+> response shapes are stable and will not change. Do not hardcode the production
+> hostname from this document.
 
 ---
 
@@ -1155,9 +1156,16 @@ a win).
 > protocol, seamless-wallet endpoints, money & idempotency semantics, error codes)
 > is **implemented and stable** in the current code and validated by load + operator
 > reconciliation soaks. Production currently runs **operator-mode OFF** (internal
-> play-money demo); a **hosted operator-mode sandbox** is the next Phase 6
-> deliverable, and the sandbox base URL is **TBD** — but the request/response shapes
-> here will not change when it ships.
+> play-money demo); a **hosted operator-mode sandbox is live** at
+> `https://sandbox.vaultrun.app` (operator-mode stub; integration-testing only — not
+> under the production SLA), and the request/response shapes here will not change.
+>
+> **Scope note on latency.** The published **settlement p99 < 200 ms**
+> (`commercial/sla.md` §3) measures **RGS-internal** settlement processing and
+> **excludes the operator's wallet round-trip**; it was measured single-node (the
+> ceiling was an application-level lock, not CPU) against a zero-latency wallet stub.
+> An end-to-end SLO including the operator wallet RTT is defined against an agreed
+> measurement point in a signed SLA.
 
 **Operator integration checklist:**
 
@@ -1178,4 +1186,4 @@ a win).
 - [ ] Expose provably-fair verification to players (link `provably-fair-guide.md` /
       `/api/fairness/*`).
 - [ ] Test end-to-end against the reference wallet (`load/operator-wallet-stub.ts`)
-      and the hosted sandbox when available.
+      and the live hosted sandbox (`https://sandbox.vaultrun.app`).

@@ -139,10 +139,10 @@ _Speaker notes: RG is table stakes for regulated operators. The defensible detai
 
 - **NestJS / Node.js** (Bun runtime), **PostgreSQL**, **Redis**, **Socket.IO** realtime.
 - Server-authoritative engine; deterministic, append-only money moves; no negative balances.
-- Documented, stable wire contract; **Postman collection** available; **hosted operator sandbox forthcoming**.
+- Documented, stable wire contract; **Postman collection** available; **hosted operator sandbox live** (`https://sandbox.vaultrun.app`).
 - Clean tenant model: each operator has its own secret, wallet endpoint, currency allow-list, limits, RG config, and reporting key.
 
-_Speaker notes: Keep this credible and brief. The stack is mainstream and operations-friendly. The two practical takeaways for an integrating team: the wire contract is documented and stable, and a Postman collection exists now with a hosted sandbox coming. Multi-tenancy is real, not bolted on._
+_Speaker notes: Keep this credible and brief. The stack is mainstream and operations-friendly. The two practical takeaways for an integrating team: the wire contract is documented and stable, and a Postman collection plus a live hosted sandbox (`https://sandbox.vaultrun.app`) are available now. Multi-tenancy is real, not bolted on._
 
 ---
 
@@ -170,8 +170,8 @@ _Speaker notes: Label this clearly as a DRAFT SLA, negotiable per contract. The 
 
 ## Slide 15 — Compliance posture (be precise)
 
-- **Ready now:** game-math spec, 1e9 simulation report, provably-fair guide, API integration spec + Postman, seamless wallet + reconciliation, responsible gambling, security hardening, HA/scale validation.
-- **Forthcoming:** hosted operator-mode sandbox.
+- **Ready now:** game-math spec, 1e9 simulation report, provably-fair guide, API integration spec + Postman, **hosted operator-mode sandbox (live, `https://sandbox.vaultrun.app`)**, seamless wallet + reconciliation, responsible gambling, security hardening, HA/scale validation.
+- **Forthcoming:** — none currently.
 - **Planned (status only, not started):** pre-certification readiness review; **GLI-19 / iTech Labs RNG certification**; **ISO 27001**.
 - **Licensing:** options under evaluation — Curaçao (post-LOK B2B) / MGA B2B "Critical Gaming Supply" / entry via a licensed aggregator. **No path chosen yet; we do not hold a gambling license today.**
 
@@ -193,8 +193,8 @@ _Speaker notes: The closer. Four pillars: differentiated game, provable fairness
 ## Slide 17 — Next steps & contact
 
 - **Play it now:** vaultrun.app (live play-money demo).
-- **Read the integration:** API Integration Spec + Postman collection (hosted sandbox forthcoming).
+- **Read the integration:** API Integration Spec + Postman collection (live hosted sandbox at `https://sandbox.vaultrun.app`).
 - **Talk commercials:** rev-share, SLA, and compliance-roadmap documents available on request.
 - **Contact:** `partnerships@vaultrun.example` · `https://vaultrun.example`
 
-_Speaker notes: Give them three concrete actions: try the demo, review the docs, book a commercial call. Leave the contact placeholders to be replaced with the real partnership email and site before sending. Offer to walk a technical team through the sandbox once it's live._
+_Speaker notes: Give them three concrete actions: try the demo, review the docs, book a commercial call. Leave the contact placeholders to be replaced with the real partnership email and site before sending. Offer to walk a technical team through the live sandbox (`https://sandbox.vaultrun.app`)._

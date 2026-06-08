@@ -48,7 +48,7 @@
 - **Launch:** signed launch token (HMAC-SHA256, 120 s TTL, one-time use) → `POST /api/operator/launch`.
 - **Realtime:** Socket.IO (`place_bet` / `cash_out`, live `multiplier_update`, settlement events).
 - **Reporting & reconciliation:** per-operator reporting API (summary / daily / per-bet) + reconciliation invariants; book keyed by `betId`.
-- **Tooling:** Postman collection available; **hosted operator-mode sandbox forthcoming**; runnable reference operator-wallet stub provided.
+- **Tooling:** Postman collection available; **hosted operator-mode sandbox live (`https://sandbox.vaultrun.app`)** (integration testing only — not under the production SLA); runnable reference operator-wallet stub provided.
 - **Stack:** NestJS / Node.js (Bun runtime), PostgreSQL, Redis, Socket.IO; Cloudflare + Caddy mTLS edge.
 
 ## Currencies
@@ -69,8 +69,8 @@
 
 > Be precise — status only; nothing below is obtained.
 
-- **Ready:** game-math spec · 1e9 simulation report · provably-fair guide · API integration spec + Postman · seamless wallet + reconciliation · responsible gambling · security hardening · HA/scale (single-node validated; multi-node designed, not yet load-run).
-- **Forthcoming:** hosted operator-mode sandbox.
+- **Ready:** game-math spec · 1e9 simulation report · provably-fair guide · API integration spec + Postman · **hosted operator-mode sandbox (live, `https://sandbox.vaultrun.app`)** · seamless wallet + reconciliation · responsible gambling · security hardening · HA/scale (single-node validated; multi-node designed, not yet load-run).
+- **Forthcoming:** — none currently.
 - **Planned (not started):** pre-certification readiness review; **GLI-19 / iTech Labs RNG certification**; **ISO 27001**.
 - **Licensing:** options under evaluation (Curaçao post-LOK B2B / MGA B2B "Critical Gaming Supply" / entry via a licensed aggregator). **No license held; no path committed.**
 

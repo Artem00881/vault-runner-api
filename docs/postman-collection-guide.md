@@ -44,7 +44,7 @@ rest have working defaults.
 
 | Variable | Set to | Notes |
 |---|---|---|
-| `baseUrl` | Your sandbox REST base | URL is TBD — we issue it. No trailing slash. |
+| `baseUrl` | Your sandbox REST base | Hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app` (we confirm your access). No trailing slash. |
 | `wsUrl` | Your sandbox WS base | `wss://…`. Used for the Socket.IO handshake. |
 | `operatorId` | Your operator UUID | Goes into the launch-token `operatorId` claim. |
 | `launchSecret` | Your 32-byte hex HMAC secret | **Secret.** The pre-request script signs the launch JWT with this. |
@@ -103,7 +103,11 @@ a re-send. If you prefer, mint the JWT in your own backend and paste it into
 2. **Folder 2 (player)** and **folder 1 `session/close`** — use `{{sessionToken}}`
    as `Authorization: Bearer`. Run after launch.
 3. **Folder 3 (reporting)** — independent; uses `{{reportingKey}}`. Set a sensible
-   `from`/`to` (ISO instant or `YYYY-MM-DD`).
+   `from`/`to` (ISO instant or `YYYY-MM-DD`). Also includes the single-transaction
+   status lookup (`GET /api/operator/reports/transaction?betId=…`, spec §13.2) and the
+   bet **void/refund** (`POST /api/operator/bets/:betId/void`, spec §13.3) — the latter
+   is a **money-write** that is **activation-gated** per operator (rate-limit + key-scope
+   prereqs), so it is documented and ready but only enabled for an authorized operator.
 4. **Folder 4 (public)** — no auth; runnable any time. Grab a `fairnessRoundId`
    from `GET /api/rounds/history` for the fairness round/verify requests.
 5. **Folder 5 (your wallet)** — points at `{{walletApiUrl}}`, not the RGS (see §5).
@@ -241,6 +245,12 @@ rejections arrive in the ack `reason` (and `bet_rejected`/`cashout_rejected`):
 `session_loss_limit`, `session_wager_limit`, `no_active_bet`, `too_late`. Full
 catalog: `api-integration-spec.md` §12.
 
+The two reporting-key money/lookup routes in folder 3 return: **transaction status**
+(§13.2) → **404** `transaction_not_found` (a 404 is **not** proof the move didn't
+occur — reconcile by your own dedup); **bet void** (§13.3) → **400** `invalid betId`,
+**404** `bet_not_found`, **409** `bet_not_settled` / `bet_transient` /
+`bet_state_changed`, and **200** with `reversed:true|false`.
+
 ---
 
 ## 8. Notes
@@ -249,5 +259,7 @@ catalog: `api-integration-spec.md` §12.
   commit real `launchSecret` / `walletApiKey` / `reportingKey` values into the
   environment; use Postman's secret vars and your own secret manager.
 - The wire contract is stable; production currently runs operator-mode OFF (internal
-  play-money demo) and the hosted operator-mode sandbox URL is TBD. Do not hardcode
-  any hostname from these files (spec §14).
+  play-money demo). The hosted operator-mode sandbox is **live** at
+  `https://sandbox.vaultrun.app` (integration testing only — not under the production
+  SLA). Point `baseUrl`/`wsUrl` at it; do not hardcode any production hostname from
+  these files (spec §14).

@@ -20,6 +20,7 @@ import { validateBetLimits } from "../src/operator/bet-limits";
 import { validateRgConfig, type RgConfig } from "../src/operator/rg-config";
 import { generateReportingKey } from "../src/operator/reporting-key";
 import { isKnownCurrency } from "../src/common/currency";
+import { readFileSync } from "node:fs";
 
 /** Uppercase every top-level key of a record (currency-code canonicalisation).
  *  Throws on a case-collision (e.g. {"eur","EUR"}) so a malformed config fails loudly
@@ -192,14 +193,14 @@ async function main() {
   let betLimits: unknown;
   const bl = str(args["bet-limits"]);
   if (bl) {
-    const raw = bl.startsWith("@") ? await Bun.file(bl.slice(1)).text() : bl;
+    const raw = bl.startsWith("@") ? readFileSync(bl.slice(1), "utf8") : bl;
     betLimits = JSON.parse(raw);
   }
 
   let rgConfig: unknown;
   const rgc = str(args["rg-config"]);
   if (rgc) {
-    const raw = rgc.startsWith("@") ? await Bun.file(rgc.slice(1)).text() : rgc;
+    const raw = rgc.startsWith("@") ? readFileSync(rgc.slice(1), "utf8") : rgc;
     rgConfig = JSON.parse(raw);
   }
 

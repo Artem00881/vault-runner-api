@@ -82,6 +82,9 @@ jobs:
       - name: Typecheck
         run: bunx tsc --noEmit
 
+      - name: Typecheck scripts & load (F-055 — money/reconcile/provision tooling + the load harness)
+        run: bunx tsc -p tsconfig.scripts.json --noEmit
+
       - name: Tests
         run: bun test
 

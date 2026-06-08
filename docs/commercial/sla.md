@@ -80,7 +80,7 @@ benchmark:
 
 | Metric | Target | Basis |
 |---|---|---|
-| **Settlement p99** (cash-out / payout processing) | **< 200 ms** | Held under single-node load up to the connection knee below (the box stayed ~90% idle — the ceiling was an application-level lock, not CPU). |
+| **Settlement p99** (cash-out / payout processing) | **< 200 ms** | Held under single-node load up to the connection knee below (the box stayed ~90% idle — the ceiling was an application-level lock, not CPU). Measures **RGS-internal** settlement processing and **excludes** the operator's wallet round-trip (see the scope note below). |
 | **Concurrent connections per node — internal (play-money) mode** | ≈ **4,400** (single-node) | Vault Run internal load tests, 2026-06 (Hetzner, single-node). |
 | **Concurrent connections per node — operator (seamless-wallet) mode** | ≈ **3,800–4,000** (single-node, conservative lower bound) | Same tests; the operator figure is a **lower bound** — the load generator was saturated during that run. |
 
@@ -96,6 +96,13 @@ benchmark:
   a signed SLA.
 - No public crash-game tick-latency SLA number exists; the settlement-p99 figure is
   **our own measured value**, which is the correct basis for a real-time game.
+- **Scope of the settlement p99.** The settlement p99 < 200 ms measures
+  **RGS-internal** settlement processing (the cash-out/payout path inside our engine
+  and ledger) and **excludes the operator's wallet round-trip** (your `/win` /
+  `/rollback` latency). It was measured single-node against a zero-latency wallet
+  stub, so it isolates our own processing time. An **end-to-end** SLO that includes
+  the operator wallet RTT would be defined against an agreed measurement point in a
+  signed SLA.
 
 ---
 
@@ -234,9 +241,9 @@ This SLA covers the Vault Run RGS as defined in §1. Availability and credits do
   implement idempotency/rollback correctly, exceeding agreed rate limits
   (`../api-integration-spec.md` §6: per-socket 15 msg/s; per-operator limits), or
   unauthorized modifications.
-- **Beta / sandbox environments.** The hosted operator-mode sandbox
-  (`compliance-roadmap.md`, forthcoming) is provided for integration testing and is
-  **not** covered by production SLA targets.
+- **Beta / sandbox environments.** The hosted operator-mode sandbox — **live** at
+  `https://sandbox.vaultrun.app` (`compliance-roadmap.md`) — is provided for
+  integration testing and is **not** covered by production SLA targets.
 
 ---
 

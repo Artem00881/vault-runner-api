@@ -3,7 +3,7 @@
     "_postman_id": "vaultrun-rgs-b2b-collection-0001",
     "name": "Vault Run — RGS B2B Integration",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Runnable Postman collection for integrating the **Vault Run** crash-game Remote Game Server (RGS) into an online-casino platform via the **seamless-wallet** model.\n\nAuthoritative source: `docs/api-integration-spec.md` (v1.0). Every route, header, body, and field here is derived from that spec and the production controllers (`src/operator/`, `src/wallet/`, `src/game/`, `src/fairness/`, `src/common/`). All money values on the wire are **integer minor units** (spec §8): `100` = €1.00 for EUR.\n\n**Convention (spec §0):**\n- Routes prefixed `/api/...` are **exposed by the RGS** — you call them (folders 1–4).\n- Routes with no `/api` prefix (`/bet`, `/win`, `/rollback`, `/balance`) are **exposed by YOU, the operator** — the RGS calls them. Folder 5 lets you fire example requests at your own wallet to confirm it speaks our protocol.\n\n**Setup:**\n1. Import this collection AND `vaultrun-sandbox.postman_environment.json`, then select the environment (top-right).\n2. Fill the secret-ish variables: `launchSecret`, `reportingKey`, `walletApiUrl`, `walletApiKey` (placeholders are present; replace with the values we issue you).\n3. Run **1. Operator — launch & session → POST /api/operator/launch** first: its pre-request script mints a signed launch JWT into `{{launchToken}}`, and its test script saves the returned session token into `{{sessionToken}}` for every other authenticated request.\n\n**WebSocket:** the live game protocol is Socket.IO (spec §6). Postman's Socket.IO request type is a GUI/app construct that is not part of the importable Collection v2.1 JSON schema, so folder 6 is a **documentation-only stub**; the full, copy-pasteable Socket.IO usage (handshake auth, emits, listeners) is in `postman-collection-guide.md`.\n\n**Status:** the wire contract is implemented and stable; production currently runs operator-mode OFF (internal play-money demo) and the hosted operator-mode sandbox URL is TBD — do not hardcode any hostname (spec §14).",
+    "description": "Runnable Postman collection for integrating the **Vault Run** crash-game Remote Game Server (RGS) into an online-casino platform via the **seamless-wallet** model.\n\nAuthoritative source: `docs/api-integration-spec.md` (v1.0). Every route, header, body, and field here is derived from that spec and the production controllers (`src/operator/`, `src/wallet/`, `src/game/`, `src/fairness/`, `src/common/`). All money values on the wire are **integer minor units** (spec §8): `100` = €1.00 for EUR.\n\n**Convention (spec §0):**\n- Routes prefixed `/api/...` are **exposed by the RGS** — you call them (folders 1–4).\n- Routes with no `/api` prefix (`/bet`, `/win`, `/rollback`, `/balance`) are **exposed by YOU, the operator** — the RGS calls them. Folder 5 lets you fire example requests at your own wallet to confirm it speaks our protocol.\n\n**Setup:**\n1. Import this collection AND `vaultrun-sandbox.postman_environment.json`, then select the environment (top-right).\n2. Fill the secret-ish variables: `launchSecret`, `reportingKey`, `walletApiUrl`, `walletApiKey` (placeholders are present; replace with the values we issue you).\n3. Run **1. Operator — launch & session → POST /api/operator/launch** first: its pre-request script mints a signed launch JWT into `{{launchToken}}`, and its test script saves the returned session token into `{{sessionToken}}` for every other authenticated request.\n\n**WebSocket:** the live game protocol is Socket.IO (spec §6). Postman's Socket.IO request type is a GUI/app construct that is not part of the importable Collection v2.1 JSON schema, so folder 6 is a **documentation-only stub**; the full, copy-pasteable Socket.IO usage (handshake auth, emits, listeners) is in `postman-collection-guide.md`.\n\n**Status:** the wire contract is implemented and stable; production currently runs operator-mode OFF (internal play-money demo). The hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app` (integration testing only — not under the production SLA); point `baseUrl`/`wsUrl` at it. Keep the `*.vaultrun.example` placeholders in request examples and do not hardcode any production hostname (spec §14).",
     "version": "1.0.0"
   },
   "item": [
@@ -242,6 +242,48 @@
               ]
             },
             "description": "Paginated per-bet rows: `id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo`, timestamps, plus `nextCursor`. Page with `cursor` (a bet UUID) + `limit` (max 200). Key your reconciliation book by `betId` = `id` (spec §10). See spec §13.1."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /api/operator/reports/transaction",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{reportingKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/reports/transaction?betId={{betId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "reports", "transaction"],
+              "query": [
+                { "key": "betId", "value": "{{betId}}", "description": "Our bet UUID (sent on every wallet call). Provide EXACTLY ONE of betId or transactionId." },
+                { "key": "transactionId", "value": "bet:{{roundId}}:{{userId}}:A:debit", "description": "Alternative: the idempotency key we sent on a wallet call (URL-encoded) — bet:{roundId}:{userId}:{panel}:debit | bet:{betId}:payout | bet:{betId}:refund | bet:{betId}:restart_refund.", "disabled": true }
+              ]
+            },
+            "description": "Single-transaction status lookup (spec §13.2) — resolve ONE money-move to its disposition when a `/bet` or `/win` response was lost. Reporting-key auth, hard-scoped to your `operatorId`. Provide **exactly one** of `betId` or `transactionId`.\n\n**200** returns the bet's `status` plus `debitState` / `refundState` / `payoutState` (`pending`/`applied`/`reversed` · `none`/`pending`/`applied` · `none`/`pending`/`paid`), `stake`/`payout`/`cashoutMult` (decimal strings), and best-effort `debitTxId`/`payoutTxId`. **Read the disposition from the `*State` fields, never from a single boolean.** A **404** `transaction_not_found` (also returned for another operator's tx and internal/guest play) is **NOT** proof the move didn't occur on your wallet — reconcile by your own dedup, never re-apply on a 404. See spec §13.2."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /api/operator/bets/:betId/void",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{reportingKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"audit/dispute\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/operator/bets/{{betId}}/void",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "operator", "bets", "{{betId}}", "void"]
+            },
+            "description": "**Money-WRITE; activation-gated** (per-operator rate-limit + key-scope prereqs before an operator is enabled for void). Fully reverse a **settled** bet so it is as if it never happened — refund the stake, and for a **won** bet also reclaim the payout first (spec §13.3).\n\nAuth: the **reporting API key** (`Authorization: Bearer {{reportingKey}}`, `vrk_<operatorId>.<secret>`); hard-scoped to your `operatorId` and re-checked against `bet.operatorId` — a bet that is not yours → **404** `bet_not_found` (no cross-tenant existence oracle). Path `betId` = our bet UUID (non-UUID → **400** `invalid betId`). **Body:** `{ \"reason\"?: string }` — optional, logged for audit only (≤500 chars, control chars stripped); the body may be `{}`.\n\n**Status → result:** `busted`/`cashed_out` → **200** `status:\"voided\"`, `reversed:true`; already `voided` → **200** `reversed:false` (idempotent no-op); `cancelled` → **200** `status:\"cancelled\"`, `reversed:false`; `active` → **409** `bet_not_settled`; `reserving`/`cancelling`/`payout_pending` → **409** `bet_transient`; lost CAS race → **409** `bet_state_changed`. Idempotent on the bet and resumable. See spec §13.3."
           },
           "response": []
         }

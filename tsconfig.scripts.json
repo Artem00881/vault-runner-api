@@ -1,0 +1,23 @@
+{
+  "//": "F-055: typecheck the Bun ops/reconcile/provision tooling + the load harness that tsconfig.json (src/**, commonjs) excludes. These run under Bun (ESM + bun globals) BUT import the NestJS src/ (decorators), so this config carries BOTH the Bun module bits AND the decorator flags. Run in CI: bunx tsc -p tsconfig.scripts.json --noEmit",
+  "compilerOptions": {
+    "module": "esnext",
+    "target": "es2022",
+    "lib": ["ES2022", "DOM"],
+    "moduleResolution": "bundler",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "useDefineForClassFields": false,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "types": ["node", "bun-types"]
+  },
+  "include": ["scripts/**/*.ts", "load/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

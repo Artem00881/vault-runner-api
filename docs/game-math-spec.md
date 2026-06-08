@@ -1,6 +1,6 @@
 # Vault Run — Game Math Specification
 
-**Version:** 1.0  ·  **Date:** 2026-06-01  ·  **Status:** draft (pre-certification)
+**Version:** 1.1  ·  **Date:** 2026-06-08  ·  **Status:** draft (pre-certification)
 **Game type:** Crash · **Theme:** bank heist · **RTP:** 97% · **House edge:** 3%
 
 Companion documents: `simulation-report.md` (empirical validation),
@@ -78,8 +78,8 @@ Enforced uniqueness: one bet per `(roundId, userId, panel)`.
 - Distribution: `P(crash ≥ x) = 0.97 / x` for `x ≥ 1.00`.
 - For any auto-cashout target `t > 1`, expected return `= t · P(crash ≥ t) = 0.97`
   — RTP is constant across strategies (hallmark of a fair crash curve).
-- Empirically validated to 97.0% ± 0.1% over 1e8 rounds — see
-  `simulation-report.md`.
+- Empirically validated to **97.0% ± 0.02%** over **1e9** rounds (observed
+  96.99–97.00% across all cash-out targets) — see `simulation-report.md` v1.1.
 
 ---
 
@@ -87,8 +87,9 @@ Enforced uniqueness: one bet per `(roundId, userId, panel)`.
 
 `P(crash ≥ x) = 0.97 / x`. Consequences:
 
-- `P(crash = 1.00x)` (instant bust) `= 1 − 0.97/1.01 = 3.96%` (everything below
-  1.01x floors to 1.00x). **This is 3.96%, not 3%** — the 3% is the house edge.
+- `P(crash = 1.00x)` (instant bust) `= 1 − 0.97/1.01 = 3.96%` (closed form
+  **3.9604%**; observed **3.9603%** at 1e9 — `simulation-report.md` §2). Everything
+  below 1.01x floors to 1.00x. **This is 3.96%, not 3%** — the 3% is the house edge.
 - `P(crash ≥ 2x) = 48.5%`, `≥ 10x = 9.70%`, `≥ 100x = 0.97%`,
   `≥ 1000x = 0.097%`, `≥ 10000x = 0.0097%`.
 - Full probability table: `simulation-report.md` §4.
@@ -108,6 +109,13 @@ cents   = clamp(cents, 100, MAX_CENTS)                // 1.00x .. cap
 crash   = cents / 100                                 // 2 decimals
 ```
 
+- **HMAC input encoding (authoritative, `crash.ts:33`):** the HMAC **key** is the
+  32-byte seed, **hex-decoded** (`Buffer.from(seedHex, "hex")`); the HMAC **message**
+  is the salt as a **UTF-8 string** — the literal characters, **NOT** hex-decoded
+  (`.update(salt)`). For the block-salt epoch the salt is the `0x…` block-hash
+  string exactly as published. An offline re-implementer must use this exact encoding
+  (see the worked example in `provably-fair-guide.md` §6: hex-decoding the salt yields
+  the wrong crash).
 - All arithmetic is **BigInt** until the final `/100` — no float rounding bias.
 - `h+1` and `E+1` avoid division-by-zero and keep the support exact.
 - `MAX_CENTS = 100,000,000` (1,000,000.00x) in the **demo**; **10,000.00x** in
@@ -243,18 +251,23 @@ rows are set per FX/operator policy and stored in minor units. Indicative values
 
 ## 15. Simulation results
 
-Summary (full report: `simulation-report.md`):
+Summary (full report: `simulation-report.md` v1.1):
 
-- 1e8 rounds through the **exact production formula**.
-- Nominal RTP **96.99–97.04%** across all cash-out targets; house edge 3.00%.
-- Instant-bust **3.956%** (matches `1 − 0.97/1.01`).
-- `P(crash ≥ x)` matches `0.97/x` to 3–4 significant figures from 1.01x to 10,000x.
-- Reproduce: `bun scripts/simulate-rtp.ts 100000000`.
+- **1e9** (1,000,000,000) rounds through the **exact production formula**.
+- Nominal RTP **96.99–97.00%** across all cash-out targets; house edge 3.00%.
+- Instant-bust **3.96%** (observed 3.9603% at 1e9; closed form
+  `1 − 0.97/1.01 = 3.9604%`).
+- `P(crash ≥ x)` matches `0.97/x` to **4–5** significant figures from 1.01x to 10,000x.
+- Reproduce: `bun scripts/simulate-rtp.ts 1000000000`.
 
 ---
 
 ## 16. Versioning
 
+- **v1.1** (2026-06-08) — aligned the simulation figures (§5, §6, §15) to the **1e9**
+  validation run in `simulation-report.md` v1.1 (RTP 96.99–97.00%, instant-bust
+  3.96% / closed form 3.9604%, ±0.02%, 4–5 significant figures). No change to the
+  math, caps, rounding, or phase timing — documentation alignment only.
 - **v1.0** (2026-06-01) — initial spec; demo cap 1,000,000x, real-money config
   10,000x / €10,000 max-win-per-bet (EUR reference). Multi-currency from day one:
   currency-agnostic math + per-currency bet-level tables. Math source:

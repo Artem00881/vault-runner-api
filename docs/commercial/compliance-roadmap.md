@@ -29,7 +29,7 @@ trust-relevant capability, where Vault Run stands today using four statuses:
 | 2 | **1e9-round simulation report** | **Ready** | 1,000,000,000 rounds through the **exact production** crash function; measured RTP **96.998%**, instant-bust **3.96%**, `P(crash ≥ x) = 0.97/x` matched to 4–5 significant figures. `../simulation-report.md`. |
 | 3 | **Provably-fair (incl. block-salt)** | **Ready** | SHA-256 seed chain + HMAC crash derivation; **Ethereum block-hash salt implemented and validated against mainnet** (grind-proof). Demo defaults to a random salt; block-salt is one env flip away. Player-verifiable in-browser, via API, or offline. `../provably-fair-guide.md`. |
 | 4 | **API integration spec + Postman** | **Ready** | Full seamless-wallet / RGS integration spec (`../api-integration-spec.md`) plus a Postman collection and environment file (variables) (`../postman-collection-guide.md`, `../vaultrun-api.postman_collection.json`). |
-| 5 | **Hosted operator-mode sandbox** | **Forthcoming** | A hosted environment exercising the real operator-wallet contract end-to-end (against an operator-wallet stub). Wire shapes are stable and will not change when it ships; production currently runs operator-mode **OFF** (internal play-money demo). `../api-integration-spec.md` §14. |
+| 5 | **Hosted operator-mode sandbox** | **Ready** | **Live at `https://sandbox.vaultrun.app`** — a hosted environment exercising the real operator-wallet contract end-to-end (against an operator-wallet stub). Wire shapes are stable; production currently runs operator-mode **OFF** (internal play-money demo). The sandbox is for integration testing and is **not** under the production SLA (`sla.md` §9). `../api-integration-spec.md` §14. |
 | 6 | **Seamless wallet + reconciliation** | **Ready** | `/bet` `/win` `/rollback` `/balance`, **idempotent on `transactionId`**, ambiguous-timeout → rollback, never-claw-back + reconcile on a win. Reconciliation invariants + automated money-conservation check. **No player-funds custody.** `../api-integration-spec.md` §7/§9/§10. |
 | 7 | **Responsible gambling** | **Ready** | Built-in reality checks and session **time / loss / wager** limits, per-operator, carried on the signed session token (cannot be stripped client-side); cash-out/cancel never RG-blocked. `../api-integration-spec.md` §11. |
 | 8 | **Security hardening** | **Ready** | Cloudflare + Caddy mTLS edge; bearer-locked metrics; per-socket (15 msg/s) + per-operator rate limits; signed short-lived launch tokens (120 s, single-use) and revocable session tokens. **Internal adversarial security audit + remediation on record; money path reviewed by automated audit tooling. No third-party penetration test has been commissioned yet** (pairs with ISO/IEC 27001 = Planned, row 12). `../api-integration-spec.md`. |
@@ -45,8 +45,8 @@ trust-relevant capability, where Vault Run stands today using four statuses:
 
 | Status | Capabilities |
 |---|---|
-| **Ready** | Game-math spec · 1e9 simulation report · provably-fair (incl. block-salt) · API spec + Postman · seamless wallet + reconciliation · responsible gambling · security hardening · HA/scale validation. |
-| **Forthcoming** | Hosted operator-mode sandbox. |
+| **Ready** | Game-math spec · 1e9 simulation report · provably-fair (incl. block-salt) · API spec + Postman · **hosted operator-mode sandbox (live, `https://sandbox.vaultrun.app`)** · seamless wallet + reconciliation · responsible gambling · security hardening · HA/scale validation. |
+| **Forthcoming** | — none currently. |
 | **Planned (not started)** | Pre-certification review · GLI-19 / iTech RNG certification (status only) · ISO/IEC 27001. |
 | **Options (no path chosen)** | B2B supplier license — Curaçao (post-LOK) / MGA B2B / via licensed aggregator. |
 
