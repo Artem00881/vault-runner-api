@@ -270,6 +270,14 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     this.rgSweeping = true;
     const now = Date.now();
     try {
+      // F-068 — re-check liveness for THIS node's CONNECTED operator sockets and drop any whose
+      // session is now revoked (so a force-revoke severs an already-connected socket, not just
+      // future reconnects). Runs on EVERY node (each node owns its own sockets — a non-leader
+      // still holds operator sockets), NOT leader-gated. BATCHED: one query for all connected
+      // operator session ids (no N+1 per socket). place_bet also re-checks revoke, so the next
+      // bet is rejected even before this sweep disconnects the socket (defense-in-depth).
+      await this.disconnectRevokedSockets();
+
       for (const [userId, socketId] of this.userSockets) {
         const sock = this.server.sockets.sockets.get(socketId);
         const rg = sock?.data?.rg as EffectiveRg | undefined;
@@ -312,12 +320,57 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
             currency: (sock.data.currency as string) ?? "DEMO",
             enforce: rg.enforceRealityCheck,
           });
+          // F-067 — PERSIST the fired check on the GameSession so the hard-pause + the advanced
+          // due clock survive a reconnect. In enforce mode `nextPending` is true → persist
+          // realityCheckPendingAt (a reconnect re-arms rgPending until ack). In notify mode there's
+          // no pause, but we still persist the advanced due time so the reconnect resumes the same
+          // schedule. Best-effort (the in-memory rgPending already gates this socket); a failure
+          // is logged, never thrown — it must not break the sweep for other sockets.
+          const sessionId = sock.data.sessionId as string | undefined;
+          if (sessionId) {
+            try {
+              if (decision.nextPending) {
+                await this.sessions.markRealityCheckPending(sessionId, decision.nextDueAt);
+              } else {
+                // notify mode (no pause) — just advance the persisted due clock (ack semantics).
+                await this.sessions.ackRealityCheck(sessionId, decision.nextDueAt);
+              }
+            } catch (e: any) {
+              this.log.warn(`RG reality-check persist failed for session ${sessionId}: ${e?.message}`);
+            }
+          }
         }
       }
     } catch (e: any) {
       this.log.warn(`RG sweep failed: ${e?.message}`);
     } finally {
       this.rgSweeping = false;
+    }
+  }
+
+  /** F-068 — drop THIS node's connected operator sockets whose session is now revoked (an
+   *  operator force-revoke, or a player logout). Iterates the node's own connected sockets,
+   *  collects their session ids, BATCH-checks which are no-longer-live in ONE query (no N+1),
+   *  and disconnect(true)s the dead ones. Guests (no sessionId) are skipped. A connected
+   *  socket whose session vanished/was-revoked is severed mid-session — future reconnects are
+   *  already refused by the connect-time isLive() check. */
+  private async disconnectRevokedSockets() {
+    // Map session id → the socket ids carrying it (normally 1; defensive for duplicates).
+    const bySession = new Map<string, string[]>();
+    for (const socketId of this.userSockets.values()) {
+      const sock = this.server.sockets.sockets.get(socketId);
+      const sessionId = sock?.data?.sessionId as string | undefined;
+      if (!sock || !sessionId) continue;
+      const list = bySession.get(sessionId);
+      if (list) list.push(socketId);
+      else bySession.set(sessionId, [socketId]);
+    }
+    if (bySession.size === 0) return;
+    const notLive = await this.sessions.findNotLive([...bySession.keys()]);
+    for (const sessionId of notLive) {
+      for (const socketId of bySession.get(sessionId) ?? []) {
+        this.server.sockets.sockets.get(socketId)?.disconnect(true);
+      }
     }
   }
 
@@ -366,11 +419,30 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         if (rg && Number.isFinite(rgStartedAt)) {
           client.data.sessionStartedAt = rgStartedAt;
           client.data.rg = rg;
-          client.data.rgPending = false;
           client.data.rgTimeLimitNotified = false;
-          client.data.rgRealityDueAt = rg.realityCheckIntervalSec
-            ? rgStartedAt + rg.realityCheckIntervalSec * 1000
-            : undefined;
+          // F-067 — RELOAD the reality-check state from the persisted GameSession row instead of
+          // blindly clearing the hard-pause + resetting the clock. A pending check (set when it
+          // fired) SURVIVES this reconnect (rgPending stays true → place_bet stays blocked until
+          // ack); the due clock resumes from the persisted value (a reconnect does NOT reset it to
+          // a fresh full interval). Brand-new session (no persisted due) → fall back to the
+          // token-derived due. The pause is cleared ONLY by reality_check_ack, never on connect.
+          // The session TIME limit is unaffected — it's computed from the immutable rgStartedAt.
+          let restored: { pending: boolean; dueAt?: number } = { pending: false };
+          if (rg.realityCheckIntervalSec && payload.sessionId) {
+            try {
+              restored = await this.sessions.loadRealityCheckState(payload.sessionId as string);
+            } catch (e: any) {
+              // A DB hiccup at connect must FAIL CLOSED on the pause (assume pending) so a
+              // reconnect can never silently dodge an in-flight reality check; the due time
+              // then falls back to the token-derived value. Loud so it's not silent.
+              this.log.warn(`RG reality-check reload failed for session ${payload.sessionId}; assuming pending: ${e?.message}`);
+              restored = { pending: true };
+            }
+          }
+          client.data.rgPending = restored.pending;
+          client.data.rgRealityDueAt =
+            restored.dueAt ??
+            (rg.realityCheckIntervalSec ? rgStartedAt + rg.realityCheckIntervalSec * 1000 : undefined);
         } else if (rg) {
           // A signed token carried RG but no usable sessionStartedAt — impossible via the
           // real mint path (both are set together), so log it so a future regression that
@@ -488,6 +560,17 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const parsed = placeSchema.safeParse(body);
     if (!parsed.success) return { ok: false, reason: "invalid_payload" };
     const { panel, amount, autoCashout } = parsed.data;
+    // F-068 defense-in-depth: an operator session token is re-validated against a LIVE
+    // GameSession on EVERY new bet (not just at connect), so a bet placed on an already-
+    // connected socket AFTER an operator force-revoke is rejected immediately — before the
+    // RG sweep gets around to disconnecting the socket. Guests carry no sessionId → skipped
+    // (no operator session to revoke). cash_out/cancel are intentionally NOT gated here so
+    // an at-risk player can always get money out of an in-flight bet.
+    const sessionId = client.data.sessionId as string | undefined;
+    if (sessionId) {
+      const live = await this.sessions.isLive(sessionId).catch(() => true); // DB blip → don't fail-closed-block a legit bet; the connect gate + sweep still hold
+      if (!live) return { ok: false, reason: "session_revoked", panel };
+    }
     const walletId = client.data.walletId as string | undefined;
     const limits = client.data.limits as PerBetLimits | undefined;
     const demo = client.data.demo as boolean | undefined;
@@ -540,15 +623,27 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   /** Phase 3 RG: the player acknowledged a reality check → unblock new bets and reset
-   *  the interval from now (the next check fires `interval` seconds after this ack). */
+   *  the interval from now (the next check fires `interval` seconds after this ack). F-067:
+   *  the cleared pause + advanced clock are ALSO persisted on the GameSession so a reconnect
+   *  doesn't resurrect a stale pending (the pause is lifted ONLY here, never on connect). */
   @SubscribeMessage("reality_check_ack")
-  onRealityCheckAck(@ConnectedSocket() client: Socket) {
+  async onRealityCheckAck(@ConnectedSocket() client: Socket) {
     if (!this.allow(client)) return { ok: false, reason: "rate_limited" };
     const rg = client.data.rg as EffectiveRg | undefined;
     if (!client.data.userId || !rg) return { ok: false, reason: "not_authenticated" };
     client.data.rgPending = false;
-    if (rg.realityCheckIntervalSec) {
-      client.data.rgRealityDueAt = Date.now() + rg.realityCheckIntervalSec * 1000;
+    const nextDueAt = rg.realityCheckIntervalSec ? Date.now() + rg.realityCheckIntervalSec * 1000 : undefined;
+    if (nextDueAt !== undefined) client.data.rgRealityDueAt = nextDueAt;
+    // Persist the ack (clear pending + stamp ack + advance due) so the reconnect path reloads a
+    // NON-pending state. Best-effort: the in-memory clear already unblocks this live socket; a DB
+    // failure here is logged, not surfaced — the next sweep/reconnect reconciles.
+    const sessionId = client.data.sessionId as string | undefined;
+    if (sessionId) {
+      try {
+        await this.sessions.ackRealityCheck(sessionId, nextDueAt);
+      } catch (e: any) {
+        this.log.warn(`RG reality-check ack persist failed for session ${sessionId}: ${e?.message}`);
+      }
     }
     return { ok: true };
   }

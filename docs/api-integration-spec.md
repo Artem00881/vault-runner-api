@@ -276,6 +276,37 @@ Response **200**:
 { "ok": true, "revoked": 1 }
 ```
 
+### `POST /api/operator/sessions/revoke`
+
+**Operator-authed "terminate active session".** Authenticated by your **reporting
+API key** (`Authorization: Bearer vrk_<operatorId>.<secret>` — the same key as the
+reporting / void / audit-event routes), **not** a player session token. Lets your
+platform force-end a player's live game session(s) out-of-band — e.g. your own RG /
+self-exclusion system cuts a player off, or fraud/abuse. **Tenant-scoped**: the
+player is resolved under your authenticated `operatorId`, so you can revoke only your
+**own** players (`playerId` in the body can never reach another operator's player).
+
+Soft-revokes every live `GameSession` for that player (optionally a single
+`currency`), exactly like `session/close`: the token can no longer reconnect or bet,
+in-flight settlements still resolve, and any currently-connected socket is dropped by
+the server within a few seconds. A new bet on an already-connected socket is rejected
+immediately (`session_revoked`). Idempotent (a re-revoke returns `revoked:0`).
+
+Request:
+
+```json
+{ "playerId": "your-player-id", "currency": "EUR" }
+```
+
+`currency` is optional — omit it to revoke the player's sessions across all
+currencies.
+
+Response **200**:
+
+```json
+{ "ok": true, "revoked": 1, "wallets": 1 }
+```
+
 ---
 
 ## 6. WebSocket game protocol
@@ -675,6 +706,12 @@ token, so it cannot be stripped client-side. Supported controls:
 their money; RG only gates *new* bets. The client should render reality-check and
 time-limit prompts and call `reality_check_ack` when the player acknowledges.
 
+**Reality checks survive a reconnect.** A pending (enforce-mode) reality check and its
+schedule are persisted on the session — reconnecting does **not** clear the pause or
+reset the clock to a fresh full interval. The player must `reality_check_ack`; the pause
+is lifted only on ack. (A client that reconnects mid-check will still see new bets blocked
+with `reality_check_pending` until it acknowledges.)
+
 ---
 
 ## 12. Error-code catalog
@@ -713,6 +750,7 @@ All strings below are emitted verbatim by the code (no paraphrase).
 | `session_wager_limit` | bets | RG: session wager cap would be exceeded. |
 | `no_active_bet` | bets | Cancel/cash-out with no active bet for that panel (or lost a claim race). |
 | `too_late` | bets | Cash-out outside `running`, or at/after the (authoritative) crash. |
+| `session_revoked` | gateway | The operator session was revoked (logout or operator `sessions/revoke`); a new bet on a still-connected socket is rejected. The socket is then dropped. |
 
 > `bet_failed` is intentionally generic to the client (no internal-state leak);
 > internally distinct causes (`wallet_owner_mismatch`, exposure-lock contention,

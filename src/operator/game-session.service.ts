@@ -196,6 +196,125 @@ export class GameSessionService {
   }
 
   /**
+   * F-068 — BATCH liveness check for the RG sweep: of the given session ids, return the set
+   * that are NO LONGER live (revoked OR removed). One query for all connected operator
+   * sockets (NOT one-per-socket) so the sweep can disconnect dead sessions without an N+1.
+   * A session id that has no row at all is treated as not-live (the row was deleted out from
+   * under the socket — also a reason to drop it). Empty input → empty set (no query).
+   */
+  async findNotLive(sessionIds: string[]): Promise<Set<string>> {
+    if (sessionIds.length === 0) return new Set();
+    const live = await this.prisma.gameSession.findMany({
+      where: { id: { in: sessionIds }, revokedAt: null },
+      select: { id: true },
+    });
+    const liveSet = new Set(live.map((s) => s.id));
+    return new Set(sessionIds.filter((id) => !liveSet.has(id)));
+  }
+
+  /**
+   * F-067 — a reality check just FIRED for this session (became "awaiting ack"): persist the
+   * pending marker + the advanced due time so the hard-pause SURVIVES a reconnect (the gateway
+   * sweep computes the next due-from-now; we record it). Best-effort — the in-memory rgPending
+   * is the live gate, this persistence is what a reconnect reloads. `null` due is tolerated
+   * (a configless edge) but normally always set. Failure is logged by the caller, never thrown.
+   */
+  async markRealityCheckPending(sessionId: string, nextDueAt: number | undefined): Promise<void> {
+    await this.prisma.gameSession.updateMany({
+      where: { id: sessionId, revokedAt: null },
+      data: {
+        realityCheckPendingAt: new Date(),
+        ...(nextDueAt !== undefined ? { realityCheckDueAt: new Date(nextDueAt) } : {}),
+      },
+    });
+  }
+
+  /**
+   * F-067 — the player ACKNOWLEDGED a reality check: clear the pending marker (lifts the
+   * hard-pause), stamp the ack time, and advance the persisted due time to now + interval so a
+   * reconnect resumes the SAME schedule rather than resetting to a fresh full interval. The
+   * pause is cleared ONLY here (never on connect) so a reconnect can't dodge a pending check.
+   */
+  async ackRealityCheck(sessionId: string, nextDueAt: number | undefined): Promise<void> {
+    await this.prisma.gameSession.updateMany({
+      where: { id: sessionId, revokedAt: null },
+      data: {
+        realityCheckPendingAt: null,
+        realityCheckLastAckAt: new Date(),
+        ...(nextDueAt !== undefined ? { realityCheckDueAt: new Date(nextDueAt) } : {}),
+      },
+    });
+  }
+
+  /**
+   * F-067 — reload the persisted reality-check state at (re)connect so the hard-pause and the
+   * due-clock survive a reconnect. Returns:
+   *   - pending: realityCheckPendingAt != null → the gateway re-arms rgPending (place_bet stays
+   *     blocked until ack — the pause is NOT cleared on connect, only by ack);
+   *   - dueAt: the persisted next-check epoch (ms), or undefined for a brand-new session with no
+   *     persisted due time (the gateway then falls back to the token-derived due time).
+   * A guest / missing row → { pending:false } (no RG state to restore).
+   */
+  async loadRealityCheckState(sessionId: string): Promise<{ pending: boolean; dueAt?: number }> {
+    const s = await this.prisma.gameSession.findUnique({
+      where: { id: sessionId },
+      select: { realityCheckPendingAt: true, realityCheckDueAt: true },
+    });
+    if (!s) return { pending: false };
+    return {
+      pending: s.realityCheckPendingAt != null,
+      dueAt: s.realityCheckDueAt != null ? s.realityCheckDueAt.getTime() : undefined,
+    };
+  }
+
+  /**
+   * F-068 — OPERATOR-AUTHED "terminate active session(s)" for one of the operator's OWN
+   * players. Resolves the operator's local journal wallet(s) for that player by the immutable
+   * username TAG (`op:{operatorId}:{playerId}:` — the same key openFromToken mints, also used by
+   * the H4 anonymize resolver) and soft-revokes via the EXISTING revokeForWallet (which sets
+   * revokedAt + writes the H2 `session.revoke` audit row). TENANT-SCOPED by construction: the
+   * tag is prefixed with the AUTHENTICATED operatorId (from OperatorAuthGuard, never the body),
+   * so an operator can revoke ONLY its own players — a wallet under another operator's prefix is
+   * never matched. Optional `currency` narrows to one currency's wallet(s) (real + demo); absent
+   * → all of the player's wallets for this operator. Returns sessions revoked + wallets touched.
+   */
+  async revokeForOperatorPlayer(
+    operatorId: string,
+    playerId: string,
+    currency?: string,
+  ): Promise<{ revoked: number; wallets: number }> {
+    // The tag openFromToken builds is `op:{operatorId}:{playerId}:{currency}` (real) or
+    // `op:{operatorId}:{playerId}:{currency}:demo` (demo). Without a currency, match the
+    // operator+player prefix (trailing colon prevents `player-1` matching `player-12`) so
+    // BOTH the real and demo wallets across all of this player's currencies are covered.
+    // WITH a currency, match EXACTLY the real tag and the demo tag for that currency — NOT a
+    // loose `…:EUR` prefix, which would also match a different currency `…:EURX` (over-revoke).
+    const base = `op:${operatorId}:${playerId}:`;
+    const where = currency
+      ? { user: { username: { in: [`${base}${currency.toUpperCase()}`, `${base}${currency.toUpperCase()}:demo`] } } }
+      : { user: { username: { startsWith: base } } };
+    const candidates = await this.prisma.wallet.findMany({
+      where,
+      select: { id: true, user: { select: { username: true } } },
+    });
+    // Guard the no-currency `startsWith` branch against a colon-bearing `playerId` over-matching a
+    // SIBLING player of the SAME operator (e.g. playerId "alice" prefix-matching "alice:x:bob",
+    // username `op:{op}:alice:x:bob:EUR`) — the same over-match class fixed in the H4 anonymize
+    // resolver. `playerId` is operator-supplied + not charset-validated, so keep ONLY wallets whose
+    // tag suffix (after the `op:{op}:{player}:` prefix) is a bare currency (optionally `:demo`) with
+    // no further ':'. The currency branch is an exact `in` match, so this filter is a no-op there.
+    const SUFFIX_RE = /^[^:]+(:demo)?$/;
+    const wallets = candidates.filter((w) =>
+      SUFFIX_RE.test((w.user?.username ?? "").slice(base.length)),
+    );
+    let revoked = 0;
+    for (const w of wallets) {
+      revoked += await this.revokeForWallet(w.id);
+    }
+    return { revoked, wallets: wallets.length };
+  }
+
+  /**
    * Soft-revoke every live session bound to this wallet — the L-C2.2 revocation TRIGGER
    * (e.g. a player logout). Sets `revokedAt` so `isLive()` rejects the session at WS
    * connect; the rows are KEPT so the operator-wallet resolver still serves any in-flight

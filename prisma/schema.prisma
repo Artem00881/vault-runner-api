@@ -52,6 +52,13 @@ model GameSession {
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   lastSeenAt DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
   revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
+  // F-067 (M3) — reality-check state PERSISTED on the session so the hard-pause survives a
+  // socket reconnect (a player can't dodge a pending reality check by reconnecting). The
+  // session TIME limit stays derived from the immutable signed-token sessionStartedAt — NOT
+  // from these columns. All nullable/additive (no backfill); null = not pending / never set.
+  realityCheckDueAt     DateTime? @map("reality_check_due_at") @db.Timestamptz(6) // epoch of the next reality check (persisted so reconnect doesn't reset the clock to a fresh full interval)
+  realityCheckPendingAt DateTime? @map("reality_check_pending_at") @db.Timestamptz(6) // set when a check becomes "awaiting ack" (hard-pause); null = not pending
+  realityCheckLastAckAt DateTime? @map("reality_check_last_ack_at") @db.Timestamptz(6) // last time the player acknowledged a reality check
 
   operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
 
