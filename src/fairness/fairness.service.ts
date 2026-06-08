@@ -1,7 +1,8 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuditEventService } from "../audit/audit-event.service";
+import { MetricsService } from "../metrics/metrics.service";
 import { SALT_PROVIDER, DailySaltProvider, type SaltProvider, type SaltCommitment } from "./salt.provider";
 import { generateSeedChain, verifyChainLink } from "./seed-chain";
 import { computeCrash, sha256Hex } from "./crash";
@@ -44,6 +45,9 @@ export class FairnessService {
     private readonly prisma: PrismaService,
     @Inject(SALT_PROVIDER) private readonly saltProvider: SaltProvider,
     @Inject(AuditEventService) private readonly audit: AuditEventService,
+    // Optional so existing 3-arg `new FairnessService(...)` test constructions keep
+    // compiling; every call site guards with `?.`. When wired by Nest DI it's present.
+    @Optional() @Inject(MetricsService) private readonly metrics?: MetricsService,
   ) {}
 
   /** Ensure an active epoch exists. Returns the public commitment. */
@@ -122,9 +126,11 @@ export class FairnessService {
       // Real-money: don't mint a grindable random epoch — stall until the oracle is back.
       if (strict) {
         this.log.warn(`epoch ${epoch}: salt commit failed and FAIRNESS_REQUIRE_BLOCK_SALT set — refusing random fallback (${String(e)})`);
+        this.metrics?.recordSaltFallback("commit_failed", "strict");
         return null;
       }
       this.log.warn(`epoch ${epoch}: salt commit failed (${String(e)}) → random fallback`);
+      this.metrics?.recordSaltFallback("commit_failed", "fallback");
       fallback = { reason: "commit_failed", from: this.saltProvider.constructor.name };
       c = await this.fallback.commit();
     }
@@ -134,9 +140,11 @@ export class FairnessService {
       // caller stalls and retries until the block finalizes (audit M6).
       if (strict) {
         this.log.warn(`epoch ${epoch}: ${c.source} salt not ready and FAIRNESS_REQUIRE_BLOCK_SALT set — stalling, no random fallback`);
+        this.metrics?.recordSaltFallback("salt_not_ready", "strict");
         return null;
       }
       this.log.warn(`epoch ${epoch}: ${c.source} salt not ready → random fallback so play continues`);
+      this.metrics?.recordSaltFallback("salt_not_ready", "fallback");
       fallback = { reason: "salt_not_ready", from: c.source };
       c = await this.fallback.commit();
     }

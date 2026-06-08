@@ -30,6 +30,11 @@ export class MetricsService {
   // (it must never break a money/operator action), so a failure increments this instead
   // of throwing — a non-zero rate means the immutable audit trail is dropping events.
   readonly auditEventWriteFailures: Counter;
+  // Salt-oracle could not serve a committed block-hash salt (audit H3). reason =
+  // commit_failed | salt_not_ready; mode = strict (real-money: the engine STALLS) |
+  // fallback (demo/play-money: a transparent random salt was substituted). A non-zero
+  // strict rate means a real-money node is stalling on the oracle.
+  readonly fairnessSaltFallback: Counter;
 
   readonly wsConnections: Gauge;
   readonly realizedRtp: Gauge;
@@ -66,6 +71,7 @@ export class MetricsService {
     this.roundsTotal = new Counter({ name: "vaultrun_rounds_total", help: "Rounds completed", registers: reg });
     this.errorsTotal = new Counter({ name: "vaultrun_errors_total", help: "Handled errors", labelNames: ["where"], registers: reg });
     this.auditEventWriteFailures = new Counter({ name: "vaultrun_audit_event_write_failures_total", help: "Significant-event audit-log writes that failed (best-effort; the action still proceeded)", registers: reg });
+    this.fairnessSaltFallback = new Counter({ name: "vaultrun_fairness_salt_fallback_total", help: "Salt-oracle could not serve a committed block-hash salt (random fallback or strict stall)", labelNames: ["reason", "mode"], registers: reg });
 
     this.wsConnections = new Gauge({ name: "vaultrun_ws_connections", help: "Active WS connections", registers: reg });
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
@@ -109,6 +115,9 @@ export class MetricsService {
     this.updateRtp();
   }
 
+  /** A salt-oracle fallback/stall (audit H3). mode=strict → real-money node stalled;
+   *  mode=fallback → demo/play-money substituted a random salt. */
+  recordSaltFallback(reason: "commit_failed" | "salt_not_ready", mode: "strict" | "fallback") { this.fairnessSaltFallback.inc({ reason, mode }); }
   recordRejected(reason: string) { this.betsRejected.inc({ reason }); }
   /** A responsible-gambling block (reality-check pending / time / loss / wager). Fired
    *  ALONGSIDE recordRejected (kept for back-compat) to give a clean RG-only signal. */

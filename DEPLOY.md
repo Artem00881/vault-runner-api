@@ -561,14 +561,23 @@ epoch — the old ~2-day "chain exhausted" stall is gone; **no manual reset need
 **Salt source — `SALT_PROVIDER_TYPE`:**
 - `random` (default; staging) — operator-published random salt.
 - `eth-block` (**prod**, persisted in `op.prod.env`) — **grind-proof**: each epoch's
-  salt is the hash of a *future finalized Ethereum block*, committed before the block
-  exists. The engine pre-commits + arms the next epoch in the background
-  (`maintain()` each round); the public commitment (target block) is visible at
-  `GET /api/fairness/current` → `nextEpoch`. If the oracle is unavailable it falls
-  back to a random salt so the game never stalls.
-  - Oracle: `src/fairness/eth-block.ts`, reads the **finalized** chain (reorg-safe),
-    cross-checks across several public RPCs (`ETH_RPC_URLS`, default
-    publicnode/drpc/blastapi/nodies; `ETH_SALT_LEAD_BLOCKS` default 10).
+  salt is the hash of a *future Ethereum block*, committed before the block exists.
+  The target is anchored on the current **UNFINALIZED head** (`latest`) **+
+  `ETH_SALT_LEAD_BLOCKS` (floor 128, ~4 epochs)** so it provably does not exist at
+  commit; the epoch then ARMS only from the **finalized** hash (reorg-safe). The engine
+  pre-commits + arms the next epoch in the background (`maintain()` each round); the
+  public commitment (target block) is visible at `GET /api/fairness/current` →
+  `nextEpoch`. In demo/play-money mode an unavailable oracle falls back to a random
+  salt so the game never stalls; in real-money mode (`FAIRNESS_REQUIRE_BLOCK_SALT=true`)
+  there is NO fallback — the engine stalls until the block finalizes.
+  - Oracle: `src/fairness/eth-block.ts`, reads the **finalized** chain (reorg-safe) for
+    the salt and `latest` only to set the (higher) commit target, cross-checks across
+    several public RPCs (`ETH_RPC_URLS`, default publicnode/drpc/blastapi/nodies;
+    `ETH_SALT_LEAD_BLOCKS` floor 128).
+  - **Cold real-money start:** the first block-salt epoch's target is ~128 blocks past
+    the head, so it takes **~128 blocks (~26 min)** to finalize before the first salt
+    arms. With `FAIRNESS_REQUIRE_BLOCK_SALT=true` the engine stalls (no rounds) until
+    then; without it the node serves a transparent random-salt epoch in the meantime.
 
 **Flip prod random ↔ eth-block:** edit the `SALT_PROVIDER_TYPE` line in `op.prod.env`
 → commit → `./op-compose.sh up -d --force-recreate`. (`op run` passes plain

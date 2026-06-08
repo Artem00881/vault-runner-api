@@ -175,8 +175,10 @@ salt. When an epoch runs out the engine rolls over to the next one — no stall.
 **How a block-salt epoch is committed and revealed:**
 
 1. **Commit (before the block exists):** a new epoch publishes (a) its chain head
-   `seed[0]` and (b) a **target Ethereum block height** = current finalized head +
-   `ETH_SALT_LEAD_BLOCKS` (default 10). Both are visible in advance at
+   `seed[0]` and (b) a **target Ethereum block height** = current **UNFINALIZED head**
+   (`latest`) + `ETH_SALT_LEAD_BLOCKS` (floor **128**, ≈4 epochs past the head), so the
+   target block **provably does not exist at commit**; the epoch still ARMS only from
+   the **finalized** hash (reorg-safe). Both are visible in advance at
    `GET /api/fairness/current` → `nextEpoch` (status `pending`).
 2. **Arm (after the block finalizes):** once that block is **finalized**, its hash
    becomes the epoch's salt (status `armed`). Finalized blocks are reorg-safe — the
@@ -194,6 +196,11 @@ the operator nor a player could have ground the seeds against the salt.
 or an oracle outage), the engine falls back to a **random** salt for that epoch
 (transparently — `saltSource: "random"`) so the game never stalls, and resumes
 block-salt epochs as soon as the oracle recovers.
+
+On a **real-money node** (`FAIRNESS_REQUIRE_BLOCK_SALT=true`) there is **NO random
+fallback** — the engine **stalls** (emitting `vaultrun_fairness_salt_fallback_total{mode="strict"}`)
+until the committed block finalizes. The random fallback is a **demo/play-money
+behavior only**.
 
 **Verify a block-salt round:** take the round's revealed `seed` + the epoch's
 `salt`, confirm `salt` equals the published Ethereum block's hash (e.g. on a block

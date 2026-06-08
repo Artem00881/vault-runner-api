@@ -78,9 +78,15 @@ async function purgeSynthetic() {
 const ENV_KEY = "FAIRNESS_REQUIRE_BLOCK_SALT";
 const ENV_LEN = "FAIRNESS_CHAIN_LENGTH";
 const ENV_PROVIDER = "SALT_PROVIDER_TYPE"; // mutated by the H1 makeSaltProvider() cases
+const ENV_RPC_MIN = "ETH_RPC_MIN"; // H3 strict boot trio
+const ENV_RPC_URLS = "ETH_RPC_URLS"; // H3 strict boot trio
+const ENV_LEAD = "ETH_SALT_LEAD_BLOCKS"; // H3 strict boot trio (lead floor)
 const savedEnv = process.env[ENV_KEY];
 const savedLen = process.env[ENV_LEN];
 const savedProvider = process.env[ENV_PROVIDER];
+const savedRpcMin = process.env[ENV_RPC_MIN];
+const savedRpcUrls = process.env[ENV_RPC_URLS];
+const savedLead = process.env[ENV_LEAD];
 
 /** Set or delete an env var (undefined => delete). */
 function setEnv(key: string, val: string | undefined) {
@@ -164,6 +170,9 @@ beforeAll(async () => {
 afterEach(() => {
   setEnv(ENV_KEY, savedEnv);
   setEnv(ENV_PROVIDER, savedProvider);
+  setEnv(ENV_RPC_MIN, savedRpcMin);
+  setEnv(ENV_RPC_URLS, savedRpcUrls);
+  setEnv(ENV_LEAD, savedLead);
 });
 
 afterAll(async () => {
@@ -183,6 +192,9 @@ afterAll(async () => {
     setEnv(ENV_KEY, savedEnv);
     setEnv(ENV_LEN, savedLen);
     setEnv(ENV_PROVIDER, savedProvider);
+    setEnv(ENV_RPC_MIN, savedRpcMin);
+    setEnv(ENV_RPC_URLS, savedRpcUrls);
+    setEnv(ENV_LEAD, savedLead);
   }
   await prisma.$disconnect();
 });
@@ -349,63 +361,120 @@ test("DEFAULT (flag unset) + block salt not ready -> random fallback active epoc
 });
 
 // ===========================================================================
-// H1 — fail CLOSED at boot. makeSaltProvider() (pure) must THROW when strict is
-// on but the configured provider is not eth-block (a random PRIMARY salt is just
-// as grindable as the fallback, so the strict guard would be silently inert).
-// No DB needed. Env is restored by afterEach (ENV_KEY + ENV_PROVIDER).
+// H1 + H3 — fail CLOSED at boot. makeSaltProvider()/assertFairnessBootConfig() (pure)
+// must THROW when strict is on but ANY grind-proof precondition is missing:
+//   H1: SALT_PROVIDER_TYPE must be eth-block (a random PRIMARY salt is grindable).
+//   H3: ETH_RPC_MIN>=3, >=3 configured ETH_RPC_URLS (and >= ETH_RPC_MIN), and (if set)
+//       ETH_SALT_LEAD_BLOCKS>=128 — else the quorum can be met by a minority / the
+//       target wouldn't clear the unfinalized head, so the guard would be inert.
+// No DB needed. Env is restored by afterEach (ENV_KEY + ENV_PROVIDER + the H3 trio).
 // ===========================================================================
+const THREE_URLS = "https://a.rpc,https://b.rpc,https://c.rpc";
+
 type ProviderCase = {
   name: string;
   strict: string | undefined; // FAIRNESS_REQUIRE_BLOCK_SALT
   providerType: string | undefined; // SALT_PROVIDER_TYPE
-  throws: boolean;
+  rpcMin?: string | undefined; // ETH_RPC_MIN
+  rpcUrls?: string | undefined; // ETH_RPC_URLS
+  lead?: string | undefined; // ETH_SALT_LEAD_BLOCKS
+  throwsMatch?: RegExp; // present => expect throw matching this; absent => expect OK
   instanceOf?: unknown;
 };
 
+// A valid strict trio (provider + ETH_RPC_MIN>=3 + >=3 URLs), reused by the OK + the
+// lead-only cases so each case overrides only the field under test.
+const VALID_TRIO = { strict: "true", providerType: "eth-block", rpcMin: "3", rpcUrls: THREE_URLS } as const;
+
 const providerCases: ProviderCase[] = [
+  // --- H1: provider type ---
   {
     name: "strict + provider=random -> THROWS (guard would be inert on a grindable primary)",
     strict: "true",
     providerType: "random",
-    throws: true,
+    throwsMatch: /requires SALT_PROVIDER_TYPE=eth-block/,
   },
   {
     name: "strict + provider unset -> THROWS (default DailySaltProvider is grindable)",
     strict: "true",
     providerType: undefined,
-    throws: true,
+    throwsMatch: /requires SALT_PROVIDER_TYPE=eth-block/,
   },
+  // --- H3: the strict boot trio (provider OK from here on, vary RPC config) ---
   {
-    name: "strict + provider=eth-block -> OK, returns EthBlockSaltProvider",
-    strict: "true",
-    providerType: "eth-block",
-    throws: false,
+    name: "strict + eth-block + ETH_RPC_MIN=3 + 3 URLs -> OK, returns EthBlockSaltProvider (UPDATED: now needs the trio)",
+    ...VALID_TRIO,
     instanceOf: EthBlockSaltProvider,
   },
   {
-    name: "default (strict unset) + provider=random -> OK, returns DailySaltProvider",
+    name: "strict + eth-block + ETH_RPC_MIN=2 -> THROWS (a minority could meet the quorum)",
+    strict: "true",
+    providerType: "eth-block",
+    rpcMin: "2",
+    rpcUrls: THREE_URLS,
+    throwsMatch: /ETH_RPC_MIN>=3/,
+  },
+  {
+    name: "strict + eth-block + 3 URLs but ETH_RPC_MIN unset (default 1) -> THROWS (min<3)",
+    strict: "true",
+    providerType: "eth-block",
+    rpcMin: undefined,
+    rpcUrls: THREE_URLS,
+    throwsMatch: /ETH_RPC_MIN>=3/,
+  },
+  {
+    name: "strict + eth-block + ETH_RPC_MIN=3 but only 2 URLs -> THROWS (fewer than 3 configured)",
+    strict: "true",
+    providerType: "eth-block",
+    rpcMin: "3",
+    rpcUrls: "https://a.rpc,https://b.rpc",
+    throwsMatch: />=3 configured ETH_RPC_URLS/,
+  },
+  {
+    name: "strict + valid trio + ETH_SALT_LEAD_BLOCKS=10 -> THROWS (below the 128 grind-proof floor)",
+    ...VALID_TRIO,
+    lead: "10",
+    throwsMatch: /ETH_SALT_LEAD_BLOCKS>=128/,
+  },
+  {
+    name: "strict + valid trio + ETH_SALT_LEAD_BLOCKS=256 -> OK (above the floor)",
+    ...VALID_TRIO,
+    lead: "256",
+    instanceOf: EthBlockSaltProvider,
+  },
+  // --- not strict: the trio must NOT run (demo default preserved) ---
+  {
+    name: "non-strict + provider=random + no RPC env -> OK, returns DailySaltProvider (trio inert when not strict)",
     strict: undefined,
     providerType: "random",
-    throws: false,
     instanceOf: DailySaltProvider,
   },
   {
     name: "default (strict unset) + provider unset -> OK, returns DailySaltProvider",
     strict: undefined,
     providerType: undefined,
-    throws: false,
     instanceOf: DailySaltProvider,
+  },
+  {
+    name: "non-strict + eth-block + ETH_RPC_MIN=1 -> OK, returns EthBlockSaltProvider (single-RPC demo allowed)",
+    strict: undefined,
+    providerType: "eth-block",
+    rpcMin: "1",
+    instanceOf: EthBlockSaltProvider,
   },
 ];
 
 for (const tc of providerCases) {
-  test(`H1 makeSaltProvider: ${tc.name}`, () => {
+  test(`H1/H3 makeSaltProvider: ${tc.name}`, () => {
     setEnv(ENV_KEY, tc.strict);
     setEnv(ENV_PROVIDER, tc.providerType);
+    setEnv(ENV_RPC_MIN, tc.rpcMin);
+    setEnv(ENV_RPC_URLS, tc.rpcUrls);
+    setEnv(ENV_LEAD, tc.lead);
 
-    if (tc.throws) {
-      // Fail-closed: a strict-but-random config must not boot.
-      expect(() => makeSaltProvider()).toThrow(/requires SALT_PROVIDER_TYPE=eth-block/);
+    if (tc.throwsMatch) {
+      // Fail-closed: a misconfigured strict config must not boot.
+      expect(() => makeSaltProvider()).toThrow(tc.throwsMatch);
     } else {
       const provider = makeSaltProvider();
       expect(provider).toBeInstanceOf(tc.instanceOf as never);

@@ -15,7 +15,9 @@ const DEFAULT_RPCS = [
   "https://eth-pokt.nodies.app",
 ];
 
-function rpcUrls(): string[] {
+// Exported so the boot assertion (fairness.module.ts) reuses the EXACT same env
+// parsing — no drift between what the oracle trusts and what the strict guard checks.
+export function rpcUrls(): string[] {
   const env = process.env.ETH_RPC_URLS?.trim();
   return env ? env.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_RPCS;
 }
@@ -24,8 +26,10 @@ function rpcUrls(): string[] {
  * Minimum number of CONFIGURED RPCs the oracle will trust. Default 1 (dev/demo can
  * run a small fleet); a REAL-MONEY deploy MUST set ETH_RPC_MIN >= 3 so the majority
  * quorum (floor(N/2)+1) can't be met by just one or two endpoints (audit M5).
+ *
+ * Exported so the boot assertion reuses the same parsing (see rpcUrls).
  */
-function minRpcs(): number {
+export function minRpcs(): number {
   const n = Number(process.env.ETH_RPC_MIN);
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
 }
@@ -72,6 +76,30 @@ export async function finalizedBlockNumber(): Promise<number> {
     }
   }
   throw new Error(`eth oracle: no RPC returned a finalized block (${String(lastErr)})`);
+}
+
+/**
+ * Latest (UNFINALIZED) head block number, from the first RPC that answers — NOT a
+ * quorum. First-RPC-wins is correct HERE because `latest` is used ONLY to push the
+ * commit target HIGHER (target = latest + lead); the salt is NEVER taken from it.
+ *
+ * Asymmetry by design: a lying-low `latest` only SHRINKS the safety margin (commits
+ * a smaller lead), it can never inject a hash — the salt comes solely from the
+ * quorum-checked `finalized` chain in finalizedBlockHash(). So a single dishonest
+ * `latest` endpoint cannot grind a salt; at worst it nudges the lead, which the
+ * MIN_LEAD_BLOCKS floor (salt.provider.ts) still keeps far past the head.
+ */
+export async function latestBlockNumber(): Promise<number> {
+  let lastErr: unknown;
+  for (const url of rpcUrls()) {
+    try {
+      const b = await getBlock(url, "latest");
+      if (b) return b.number;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(`eth oracle: no RPC returned a latest block (${String(lastErr)})`);
 }
 
 /**

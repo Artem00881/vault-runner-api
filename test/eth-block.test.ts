@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { finalizedBlockNumber, finalizedBlockHash } from "../src/fairness/eth-block";
+import { finalizedBlockNumber, latestBlockNumber, finalizedBlockHash } from "../src/fairness/eth-block";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -22,6 +22,13 @@ test("finalizedBlockNumber reads the finalized tag", async () => {
   process.env.ETH_RPC_URLS = "https://rpc.example";
   mock((_u, tag) => (tag === "finalized" ? blk(1000, "0xabc") : null));
   expect(await finalizedBlockNumber()).toBe(1000);
+});
+
+test("latestBlockNumber reads the latest tag", async () => {
+  process.env.ETH_RPC_URLS = "https://rpc.example";
+  // latest head is AHEAD of finalized — latestBlockNumber must read the "latest" tag.
+  mock((_u, tag) => (tag === "latest" ? blk(1066, "0xhead") : tag === "finalized" ? blk(1000, "0xfin") : null));
+  expect(await latestBlockNumber()).toBe(1066);
 });
 
 test("finalizedBlockHash is null when the target block is not finalized yet", async () => {

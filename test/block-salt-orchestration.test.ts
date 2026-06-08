@@ -3,6 +3,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { FairnessService } from "../src/fairness/fairness.service";
 import type { SaltProvider, SaltCommitment } from "../src/fairness/salt.provider";
 import { computeCrash } from "../src/fairness/crash";
+import { MetricsService } from "../src/metrics/metrics.service";
 import { makeAudit } from "./helpers/audit";
 
 const prisma = new PrismaService();
@@ -26,6 +27,12 @@ class FakeBlockProvider implements SaltProvider {
 const BLOCK_HASH = "0x" + "ab".repeat(32);
 const fake = new FakeBlockProvider();
 const fairness = new FairnessService(prisma, fake, makeAudit(prisma));
+
+// H3 metric assertion: a SECOND FairnessService wired to a scrapeable MetricsService
+// (4th constructor arg). makeAudit reuses the SAME metrics so render() sees everything.
+const metrics = new MetricsService();
+const meteredFake = new FakeBlockProvider();
+const meteredFairness = new FairnessService(prisma, meteredFake, makeAudit(prisma, metrics), metrics);
 
 const createdChainIds: string[] = [];
 const createdRoundIds: string[] = [];
@@ -97,4 +104,46 @@ test("block-salt: cold-start random fallback, then pre-commit → arm → promot
   expect(active!.id).toBe(armed!.id);
   expect(active!.saltSource).toBe("eth-block");
   expect(fairness.crashForSeed(seed)).toBe(computeCrash(seed.seed!, BLOCK_HASH));
+});
+
+// ---------------------------------------------------------------------------
+// H3 metric: a NON-STRICT salt-not-ready random fallback bumps
+// vaultrun_fairness_salt_fallback_total{reason="salt_not_ready",mode="fallback"}.
+// ---------------------------------------------------------------------------
+test("metric: non-strict salt-not-ready random fallback increments vaultrun_fairness_salt_fallback_total{salt_not_ready,fallback}", async () => {
+  delete process.env.FAIRNESS_REQUIRE_BLOCK_SALT; // demo / play-money: random fallback ON
+  process.env.FAIRNESS_CHAIN_LENGTH = "3";
+  meteredFake.ready = false; // committed block salt NOT resolvable → must fall back to random
+
+  // Park every servable chain (remembering each one's exact original status) so
+  // ensureActiveChain() reaches createEpoch(true) and hits the commit()-returns-pending →
+  // salt-not-ready branch (FakeBlockProvider.commit() yields salt:null, so activate && !c.salt
+  // is true → non-strict random fallback). Restored exactly at the end.
+  const servable = await prisma.fairnessChain.findMany({ where: { status: { in: ["active", "armed", "pending"] } } });
+  const parkedH3: { id: string; status: string }[] = servable.map((c) => ({ id: c.id, status: c.status }));
+  for (const c of parkedH3) await prisma.fairnessChain.update({ where: { id: c.id }, data: { status: "test_parked_h3" } });
+
+  // Scrape a labelled counter value out of the prom-client registry text.
+  const read = async (): Promise<number> => {
+    const text = await metrics.render();
+    const m = text.match(
+      /^vaultrun_fairness_salt_fallback_total\{[^}]*reason="salt_not_ready"[^}]*mode="fallback"[^}]*\}\s+(\d+)/m,
+    );
+    return m ? Number(m[1]) : 0;
+  };
+  const before = await read();
+
+  const commit = await meteredFairness.ensureChain();
+  expect(commit!.saltSource).toBe("random"); // transparent random fallback served
+  const created = await prisma.fairnessChain.findFirst({ where: { epoch: commit!.epoch } });
+  createdChainIds.push(created!.id); // FK-safe teardown by the existing afterAll
+
+  // The metric (reason=salt_not_ready, mode=fallback) advanced by exactly one fallback event.
+  expect(await read()).toBe(before + 1);
+
+  // Restore the parked chains to their EXACT original status so other suites see the
+  // original live state (don't blanket-set to active — there may be armed/pending too).
+  for (const p of parkedH3) {
+    await prisma.fairnessChain.update({ where: { id: p.id }, data: { status: p.status } }).catch(() => {});
+  }
 });

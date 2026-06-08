@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { finalizedBlockNumber, finalizedBlockHash } from "./eth-block";
+import { latestBlockNumber, finalizedBlockHash } from "./eth-block";
 
 /**
  * Source of the chain-wide salt mixed into every crash computation. Swapping the
@@ -53,16 +53,30 @@ export class DailySaltProvider implements SaltProvider {
 export class EthBlockSaltProvider implements SaltProvider {
   readonly source = "eth-block";
 
+  // The committed target must clear the unfinalized head by >4 epochs so the block
+  // provably does NOT exist at commit time (grind-proof). 128 = 4 epochs; it exceeds
+  // the 2-epoch (64-block) normal finality and equals the inactivity-leak threshold.
+  static readonly MIN_LEAD_BLOCKS = 128;
+
+  // ETH_SALT_LEAD_BLOCKS is a FLOOR-RAISE only: any value below MIN_LEAD_BLOCKS clamps
+  // UP to 128 (a smaller lead would let the target already exist → grindable).
   private lead(): number {
     const n = Number(process.env.ETH_SALT_LEAD_BLOCKS);
-    return Number.isFinite(n) && n >= 1 ? n : 10;
+    return Number.isFinite(n) && n >= EthBlockSaltProvider.MIN_LEAD_BLOCKS
+      ? Math.floor(n)
+      : EthBlockSaltProvider.MIN_LEAD_BLOCKS;
   }
 
+  // Anchor on the UNFINALIZED head: targetBlock = latest + lead >= latest + 128 > latest,
+  // so the target block does NOT exist at commit (ungrindable — its hash is unknowable).
+  // The epoch ARMS only once targetBlock <= finalized (resolve(), below).
   async commit(): Promise<SaltCommitment> {
-    const head = await finalizedBlockNumber();
+    const head = await latestBlockNumber();
     return { source: "eth-block", salt: null, targetChain: "ethereum", targetBlock: head + this.lead() };
   }
 
+  // UNCHANGED: still finalized-only (reorg-safe). Returns null until the target block is
+  // finalized; a reorg can never change a finalized hash, so the served salt is immutable.
   async resolve(commitment: SaltCommitment): Promise<string | null> {
     if (commitment.salt) return commitment.salt;
     if (!commitment.targetBlock) return null;

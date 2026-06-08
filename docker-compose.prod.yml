@@ -82,7 +82,7 @@ services:
       SALT_PROVIDER_TYPE: "${SALT_PROVIDER_TYPE:-random}"
       FAIRNESS_REQUIRE_BLOCK_SALT: "${FAIRNESS_REQUIRE_BLOCK_SALT:-false}"
       ETH_RPC_URLS: "${ETH_RPC_URLS:-}"
-      ETH_SALT_LEAD_BLOCKS: "${ETH_SALT_LEAD_BLOCKS:-10}"
+      ETH_SALT_LEAD_BLOCKS: "${ETH_SALT_LEAD_BLOCKS:-128}"
       ETH_RPC_TIMEOUT_MS: "${ETH_RPC_TIMEOUT_MS:-5000}"
       # Min CONFIGURED eth RPCs the oracle will trust (audit M5). Default 2 so prod never
       # trusts a single RPC; a REAL-MONEY eth-block deploy should raise this to >=3.
