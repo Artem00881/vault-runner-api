@@ -571,14 +571,15 @@ describe("V.6 operator-mode void routes to operator rollback (no new turnover)",
     const roundId = await makeRound();
     const betId = randomUUID();
     // Original stake debit at the operator under the deterministic debit key.
+    // F-001b: amount is a BigInt-safe decimal string on the wire.
     await operatorApi.bet(opts.operatorId, {
-      playerId: opts.playerId, currency: opts.currency, amount: opts.stake,
+      playerId: opts.playerId, currency: opts.currency, amount: opts.stake.toString(),
       transactionId: debitKey(roundId, opts.userId, "A"), roundId, betId,
     });
     let payoutTxId: string | null = null;
     if (opts.status === "cashed_out" && (opts.payout ?? 0) > 0) {
       const w = await operatorApi.win(opts.operatorId, {
-        playerId: opts.playerId, currency: opts.currency, amount: opts.payout!,
+        playerId: opts.playerId, currency: opts.currency, amount: opts.payout!.toString(),
         transactionId: payoutKey(betId), roundId, betId,
       });
       payoutTxId = w.operatorTxId;
@@ -617,7 +618,7 @@ describe("V.6 operator-mode void routes to operator rollback (no new turnover)",
       status: "cashed_out", stake: 1000, payout: 2500,
     });
     // After settlement: −1000 +2500 = +1500 at the operator.
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance + 1500);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance + 1500));
     const betsBefore = operatorApi.calls.bet;
     const winsBefore = operatorApi.calls.win;
     const rollbacksBefore = operatorApi.calls.rollback;
@@ -628,7 +629,7 @@ describe("V.6 operator-mode void routes to operator rollback (no new turnover)",
     expect(res.reclaimedPayout).toBe("2500");
 
     // BOTH original moves were rolled back at the operator → balance back to start.
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance));
     expect(operatorApi.calls.rollback).toBe(rollbacksBefore + 2); // payout reclaim + stake refund
     // NO new turnover — reverse must never post a fresh bet/win (no GGR inflation).
     expect(operatorApi.calls.bet).toBe(betsBefore);
@@ -645,13 +646,13 @@ describe("V.6 operator-mode void routes to operator rollback (no new turnover)",
     const { betId } = await settledOperatorBet({
       operatorId: op.id, userId, walletId, playerId, currency, status: "busted", stake: 1000,
     });
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - 1000); // stake lost
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 1000)); // stake lost
     const rollbacksBefore = operatorApi.calls.rollback;
 
     const res = await opBets.voidBet(op.id, betId);
     expect(res.reversed).toBe(true);
     expect(res.reclaimedPayout).toBe("0"); // no payout to reclaim
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance); // stake refunded
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // stake refunded
     expect(operatorApi.calls.rollback).toBe(rollbacksBefore + 1); // ONLY the stake refund
   });
 });

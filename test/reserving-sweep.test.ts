@@ -330,7 +330,7 @@ test("operator: the sweep rolls back the operator charge for a stale debited res
   // Actually debit the operator wallet under the deterministic key the sweep rolls
   // back — the post-debit/pre-activation crash state in OPERATOR mode.
   const tx = await provider.debit(walletId, 100n, "bet_debit", key, { refType: "bet", refId: "stub" });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance - 100); // 900 — money out at operator
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 100)); // 900 — money out at operator
   expect(sandbox.operator.calls.bet).toBe(1);
 
   // Seed the OLD stuck reserving row (best-effort debitTxId stamped, as real
@@ -357,7 +357,7 @@ test("operator: the sweep rolls back the operator charge for a stale debited res
   // The operator charge was REVERSED: a rollback was made for this txId and the
   // balance is back to start. THIS is the money-conservation proof for the sweep.
   expect(sandbox.operator.calls.rollback).toBeGreaterThanOrEqual(rollbacksBefore + 1);
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // 1000 — fully restored
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // 1000 — fully restored
 
   // The stuck slot is gone (no local debit row → dropped after rollback), and the
   // internal ledger was never touched (no phantom local refund/debit conjured).
@@ -385,7 +385,7 @@ test("operator: the sweep spares a young operator-debited reserving slot (no rol
   const key = debitKey(roundId, userId, "A");
 
   const tx = await provider.debit(walletId, 100n, "bet_debit", key, { refType: "bet", refId: "stub" });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance - 100); // 900
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 100)); // 900
 
   // YOUNG slot (createdAt ≈ now) — an in-flight placeBet about to activate.
   const betId = await reservingBet({ roundId, userId, walletId, panel: "A", amount: 100n, debitTxId: tx.id });
@@ -397,6 +397,6 @@ test("operator: the sweep spares a young operator-debited reserving slot (no rol
   // stands (the bet may still become active and win). Destroying it here = money bug.
   expect(n).toBe(0);
   expect(sandbox.operator.calls.rollback).toBe(rollbacksBefore); // no rollback issued
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance - 100); // still 900
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 100)); // still 900
   expect((await prisma.bet.findUniqueOrThrow({ where: { id: betId } })).status).toBe("reserving"); // untouched
 });

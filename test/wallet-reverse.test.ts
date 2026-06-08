@@ -210,7 +210,7 @@ describe("SeamlessOperatorWallet.reverse — rolls back the ORIGINAL operator tx
     const wallet = new SeamlessOperatorWallet(op, resolver);
     // Original payout the operator applied.
     await wallet.credit("w1", 250n, "payout_credit", "bet:b1:payout", { refType: "bet", refId: "b1" });
-    expect(op.balanceOf("pR", "EUR")).toBe(1250);
+    expect(op.balanceOf("pR", "EUR")).toBe(1250n);
     const betsBefore = op.calls.bet;
     const winsBefore = op.calls.win;
 
@@ -224,7 +224,7 @@ describe("SeamlessOperatorWallet.reverse — rolls back the ORIGINAL operator tx
       ref: { refType: "bet", refId: "b1" },
     });
 
-    expect(op.balanceOf("pR", "EUR")).toBe(1000); // payout undone on the operator's statement
+    expect(op.balanceOf("pR", "EUR")).toBe(1000n); // payout undone on the operator's statement
     expect(op.calls.rollback).toBe(1);
     expect(op.calls.bet).toBe(betsBefore); // NO new turnover
     expect(op.calls.win).toBe(winsBefore);
@@ -234,7 +234,7 @@ describe("SeamlessOperatorWallet.reverse — rolls back the ORIGINAL operator tx
     const op = new MockOperator({ "pR:EUR": 1000 });
     const wallet = new SeamlessOperatorWallet(op, resolver);
     await wallet.debit("w1", 100n, "bet_debit", "bet:r1:debit", { refType: "bet", refId: "b1" });
-    expect(op.balanceOf("pR", "EUR")).toBe(900);
+    expect(op.balanceOf("pR", "EUR")).toBe(900n);
     const params: ReverseParams = {
       originalKey: "bet:r1:debit",
       reverseKey: "bet:b1:void_refund",
@@ -245,7 +245,7 @@ describe("SeamlessOperatorWallet.reverse — rolls back the ORIGINAL operator tx
     };
     await wallet.reverse("w1", params);
     await wallet.reverse("w1", params); // repeat — must not double-reverse
-    expect(op.balanceOf("pR", "EUR")).toBe(1000); // restored once
+    expect(op.balanceOf("pR", "EUR")).toBe(1000n); // restored once
     expect(op.calls.rollback).toBe(2); // called twice, but second is a no-op at the operator
   });
 
@@ -305,8 +305,8 @@ describe("WalletRouter.reverse — dispatch by persisted wallet mode", () => {
     const seamless = new SeamlessOperatorWallet(op, async () => ({ operatorId: "o", playerId: "p", currency: "EUR" }));
     const router = new WalletRouter(ledger, seamless, async () => false); // real → operator
 
-    await op.bet("o", { playerId: "p", currency: "EUR", amount: 100, transactionId: `bet:${w}:debit`, roundId: "", betId: "b" });
-    expect(op.balanceOf("p", "EUR")).toBe(900);
+    await op.bet("o", { playerId: "p", currency: "EUR", amount: "100", transactionId: `bet:${w}:debit`, roundId: "", betId: "b" });
+    expect(op.balanceOf("p", "EUR")).toBe(900n);
 
     await router.reverse(w, {
       originalKey: `bet:${w}:debit`,
@@ -317,7 +317,7 @@ describe("WalletRouter.reverse — dispatch by persisted wallet mode", () => {
       ref: { refType: "bet", refId: "b" },
     });
 
-    expect(op.balanceOf("p", "EUR")).toBe(1000); // reversed at the operator
+    expect(op.balanceOf("p", "EUR")).toBe(1000n); // reversed at the operator
     expect(op.calls.rollback).toBe(1);
     // No internal ledger inverse row was written for an operator wallet.
     const row = await prisma.ledgerTransaction.findUnique({ where: { idempotencyKey: `bet:${w}:void_refund` } });

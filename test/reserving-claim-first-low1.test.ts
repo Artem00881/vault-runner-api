@@ -463,7 +463,7 @@ test("Low-1 operator: a 'cancelling' operator slot is re-recovered — operator 
   // deterministic key recovery rolls back, but a prior pass claimed the slot and
   // crashed before the rollback → the row sits 'cancelling'.
   const tx = await provider.debit(walletId, 100n, "bet_debit", key, { refType: "bet", refId: "stub" });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance - 100); // 900
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 100)); // 900
   expect(sandbox.operator.calls.bet).toBe(1);
 
   const betId = await seedBet({
@@ -487,7 +487,7 @@ test("Low-1 operator: a 'cancelling' operator slot is re-recovered — operator 
   // The operator charge was REVERSED: a rollback was issued and the balance is back
   // to start. THIS is the money-conservation proof for the 'cancelling' re-entry.
   expect(sandbox.operator.calls.rollback).toBeGreaterThanOrEqual(rollbacksBefore + 1);
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // 1000 — fully restored
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // 1000 — fully restored
 
   // The slot is gone (no local debit row → dropped after the rollback), and the
   // internal ledger was never touched (no phantom local refund/debit conjured).
@@ -500,7 +500,7 @@ test("Low-1 operator: a 'cancelling' operator slot is re-recovered — operator 
   // Idempotent on a second pass: already gone, rollback no-ops.
   const rollbacksAfter = sandbox.operator.calls.rollback;
   await recoverOp();
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // still 1000
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // still 1000
   // No NEW slot to process — count must not grow from re-reversing a dropped slot.
   void rollbacksAfter;
 });

@@ -163,7 +163,7 @@ describe("cashOut authoritative crash gate (Finding 1) — DB round is the sourc
     // ACTIVE bet on a betting round.
     activeRoundId = await makeRound("betting", 5.0);
     const betId = await placeActiveBet(userId, walletId, "A", stake);
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake));
     const winsBefore = operatorApi.calls.win;
 
     // Engine running + DB round AUTHORITATIVELY running, crashPoint 5.0 > mult 2.0 → legit.
@@ -182,7 +182,7 @@ describe("cashOut authoritative crash gate (Finding 1) — DB round is the sourc
     expect(after.payoutTxId).toBeTruthy();
 
     // Operator was credited exactly once: 100_000 − 1000 + 2000.
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake + stake * 2);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake + stake * 2));
     expect(operatorApi.calls.win).toBe(winsBefore + 1);
   });
 
@@ -196,8 +196,8 @@ describe("cashOut authoritative crash gate (Finding 1) — DB round is the sourc
 
     activeRoundId = await makeRound("betting", 5.0);
     const betId = await placeActiveBet(userId, walletId, "A", stake);
-    const balAfterStake = operatorApi.balanceOf(playerId, currency); // 99_000
-    expect(balAfterStake).toBe(startBalance - stake);
+    const balAfterStake = operatorApi.balanceOf(playerId, currency); // 99_000n
+    expect(balAfterStake).toBe(BigInt(startBalance - stake));
     const winsBefore = operatorApi.calls.win;
     const creditRowsBefore = await payoutCreditRows(walletId);
 

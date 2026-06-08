@@ -171,7 +171,7 @@ test("3. money routes to the operator: resolved walletId → debit/credit hit th
   // The OPERATOR is the source of truth and saw the moves for THIS player+currency.
   expect(sandbox.operator.calls.bet).toBe(1);
   expect(sandbox.operator.calls.win).toBe(1);
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(1150);
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(1150n);
 
   // Balance route (WalletController.balance) reads getBalance(walletId) → the
   // operator's real balance, NOT the local journal wallet (still 0).
@@ -209,8 +209,8 @@ test("3b. tenant isolation — a second operator's player is resolved & charged 
   await provB.debit(b.session.walletId, 300n, "bet_debit", `bet:${randomUUID()}:debit`, ref);
 
   // Each operator only saw its own player's move; balances are independent.
-  expect(sbA.operator.balanceOf(sharedPlayerId, currency)).toBe(400);
-  expect(sbB.operator.balanceOf(sharedPlayerId, currency)).toBe(500);
+  expect(sbA.operator.balanceOf(sharedPlayerId, currency)).toBe(400n);
+  expect(sbB.operator.balanceOf(sharedPlayerId, currency)).toBe(500n);
 
   sbA.stop();
   sbB.stop();

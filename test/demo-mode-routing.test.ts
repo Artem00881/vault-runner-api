@@ -104,7 +104,7 @@ test("2. a REAL wallet's debit hits the operator; the local journal stays 0", as
   const r = await router.debit(real.walletId, 100n, "bet_debit", `bet:${randomUUID()}:debit`);
   expect(r.balanceAfter).toBe(900n); // operator is the source of truth
   expect(mockOperator.calls.bet).toBe(1);
-  expect(mockOperator.balanceOf(playerId, currency)).toBe(900);
+  expect(mockOperator.balanceOf(playerId, currency)).toBe(900n);
 
   const localJournal = await prisma.wallet.findUniqueOrThrow({ where: { id: real.walletId } });
   expect(localJournal.balance).toBe(0n); // never debited locally for a real wallet

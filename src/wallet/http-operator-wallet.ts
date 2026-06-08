@@ -53,9 +53,9 @@ export class HttpOperatorWalletApi implements OperatorWalletApi {
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.OPERATOR_WALLET_TIMEOUT_MS ?? 3000);
   }
 
-  async balance(operatorId: string, playerId: string, currency: string): Promise<number> {
-    const res = await this.post<{ balance: number }>(operatorId, "balance", { playerId, currency });
-    return Math.trunc(res.balance);
+  async balance(operatorId: string, playerId: string, currency: string): Promise<string> {
+    const res = await this.post<{ balance: string }>(operatorId, "balance", { playerId, currency });
+    return res.balance; // F-001c: BigInt-safe decimal string (was Math.trunc(res.balance) — lossy ≥2^53)
   }
 
   async bet(operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse> {
@@ -75,8 +75,8 @@ export class HttpOperatorWalletApi implements OperatorWalletApi {
     path: "bet" | "win" | "rollback",
     body: unknown,
   ): Promise<OperatorWalletResponse> {
-    const res = await this.post<{ operatorTxId: string; balance: number }>(operatorId, path, body);
-    return { operatorTxId: res.operatorTxId, balance: Math.trunc(res.balance) };
+    const res = await this.post<{ operatorTxId: string; balance: string }>(operatorId, path, body);
+    return { operatorTxId: res.operatorTxId, balance: res.balance }; // F-001c: string (was Math.trunc — lossy ≥2^53)
   }
 
   /** One POST to the operator, with timeout + status/error → typed-error mapping. */

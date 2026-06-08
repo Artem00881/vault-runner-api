@@ -55,7 +55,7 @@ for (const f of WIN_FAILURES) {
     // The balance reflects whether the operator applied the credit, and it is
     // left exactly as the operator has it — never decreased by a rollback. A
     // timeout-after-apply leaves +250; a pre-apply error leaves it untouched.
-    const expected = f.applied ? 1250 : 1000;
+    const expected = f.applied ? 1250n : 1000n;
     expect(op.balanceOf("p1", "EUR")).toBe(expected);
   });
 }
@@ -69,12 +69,12 @@ test("H2: a later idempotent retry of the SAME payout key confirms once — neve
 
   op.misbehaveOnce({ kind: "timeout_after_apply" }); // applied at the operator, +250
   await expect(wallet.credit("w1", 250n, "payout_credit", k, ref("bRECON"))).rejects.toThrow("payout_pending");
-  expect(op.balanceOf("p1", "EUR")).toBe(1250);
+  expect(op.balanceOf("p1", "EUR")).toBe(1250n);
 
   // Reconciler re-issue: same key → operator returns the SAME result, no re-apply.
   const c = await wallet.credit("w1", 250n, "payout_credit", k, ref("bRECON"));
   expect(c.balanceAfter).toBe(1250n);
-  expect(op.balanceOf("p1", "EUR")).toBe(1250); // not 1500
+  expect(op.balanceOf("p1", "EUR")).toBe(1250n); // not 1500
   expect(op.calls.rollback).toBe(0); // still zero — a won payout is never reversed
 });
 
@@ -88,5 +88,5 @@ test("CONTRAST: a DEBIT timeout DOES still roll back (wallet_unavailable) — th
 
   // The debit path compensates: exactly one rollback, balance restored to 1000.
   expect(op.calls.rollback).toBe(1);
-  expect(op.balanceOf("p1", "EUR")).toBe(1000);
+  expect(op.balanceOf("p1", "EUR")).toBe(1000n);
 });

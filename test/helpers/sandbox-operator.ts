@@ -36,7 +36,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 export function startSandboxOperator(
-  opts: { seed?: Record<string, number>; apiKey?: string } = {},
+  opts: { seed?: Record<string, number | bigint>; apiKey?: string } = {},
 ): SandboxOperator {
   const mock = new MockOperator(opts.seed ?? {});
   const apiKey = opts.apiKey ?? "sandbox-key";

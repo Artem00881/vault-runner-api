@@ -165,7 +165,7 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
     const stake = 1000;
     const placed = await bets.placeBet(userId, "A", stake, undefined, walletId);
     expect(placed.ok).toBe(true);
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake); // 99_000
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake)); // 99_000n
     expect(operatorApi.calls.bet).toBeGreaterThanOrEqual(1);
 
     // The bet row is active and DEBITED (debitTxId = the operator's non-uuid tx id).
@@ -187,7 +187,7 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
     expect(cashed.payout).toBe(stake * 2); // 2000
 
     // OPERATOR balance reflects debit then credit: 100_000 - 1000 + 2000 = 101_000.
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake + stake * 2);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake + stake * 2));
     expect(operatorApi.calls.win).toBeGreaterThanOrEqual(1);
 
     // The bet row is finalised: cashed_out with the operator's payout tx id linked.
@@ -224,7 +224,7 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
       { minBet: 1n, maxBet: 100000n, maxWinPerBet: 1000000n }, // the resolved per-currency limits
     );
     expect(placed.ok).toBe(true);
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake));
 
     // The bet stamped THIS bet's per-currency win cap (1_000_000) — above the global.
     const afterPlace = await prisma.bet.findUniqueOrThrow({ where: { id: placed.betId! } });
@@ -245,7 +245,7 @@ describe("operator money-path e2e (DB-backed, seamless operator wallet)", () => 
     expect(cashed.payout).toBe(10_000); // GLOBAL cap, NOT 500_000 and NOT 1_000_000
 
     // The OPERATOR was credited exactly the global cap: 1_000_000 - 5000 + 10_000.
-    expect(operatorApi.balanceOf(playerId, currency)).toBe(startBalance - stake + 10_000);
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - stake + 10_000));
     const afterCash = await prisma.bet.findUniqueOrThrow({ where: { id: placed.betId! } });
     expect(afterCash.status).toBe("cashed_out");
     expect(afterCash.payout).toBe(10_000n); // clamped value persisted on the row

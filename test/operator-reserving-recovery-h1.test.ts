@@ -193,7 +193,7 @@ test("H1 operator: a debited 'reserving' bet has its operator charge rolled back
   // recovery rolls back, but the row never flipped to 'active'. Debit via the
   // SAME provider the engine uses so the operator records the applied delta.
   const tx = await provider.debit(walletId, 100n, "bet_debit", key, { refType: "bet", refId: "stub" });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance - 100); // 900 — money out at operator
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 100)); // 900 — money out at operator
   expect(sandbox.operator.calls.bet).toBe(1);
 
   // Seed the stuck reserving row (best-effort debitTxId stamped, as the real
@@ -212,7 +212,7 @@ test("H1 operator: a debited 'reserving' bet has its operator charge rolled back
 
   // The operator charge was REVERSED: balance restored to start, and the operator
   // saw a rollback for this transactionId. THIS is the money-conservation proof.
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // 1000 — fully restored
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // 1000 — fully restored
   expect(sandbox.operator.calls.rollback).toBeGreaterThanOrEqual(rollbacksBefore + 1);
 
   // The stuck slot is gone (no internal debit row → recovery drops it after the
@@ -245,14 +245,14 @@ test("H1 operator: a 'reserving' bet with NO operator debit — recovery's rollb
   // A reservation that never debited (crashed between the reserve insert and the
   // operator debit). The operator never applied a charge for this slot's key.
   const betId = await reservingBet({ roundId, userId, walletId, panel: "A", amount: 100n });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // 500 — nothing moved yet
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // 500 — nothing moved yet
   expect(sandbox.operator.calls.bet).toBe(0);
 
   await recover();
 
   // The rollback for an un-applied transactionId is a no-op at the operator:
   // balance is UNCHANGED. (The call may still be made — idempotent by design.)
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // 500 — untouched
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // 500 — untouched
 
   // The slot is dropped (no internal debit row → deleted), no phantom credit.
   expect(await prisma.bet.findUnique({ where: { id: betId } })).toBeNull();

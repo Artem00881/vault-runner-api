@@ -302,7 +302,7 @@ test("H2 backlog: once the operator is healthy and the backlog clears, both gaug
     expect(b.status).toBe("cashed_out");
     expect(b.payoutTxId).toBeTruthy();
   }
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + 2 * Number(payout));
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + 2n * payout);
 
   // Core invariant: the gauge always reflects the live pending count.
   const liveCount = await bets.countPendingPayouts();

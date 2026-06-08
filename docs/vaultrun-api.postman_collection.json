@@ -416,7 +416,7 @@
     },
     {
       "name": "5. Operator wallet (YOU implement — examples to test YOUR wallet)",
-      "description": "**These call the OPERATOR's endpoint, not the RGS.** They target `{{walletApiUrl}}` with `Authorization: Bearer {{walletApiKey}}` and reproduce the EXACT requests the RGS makes on every money move (spec §7). Fire them at your own wallet implementation to confirm it speaks our protocol: correct request shapes, Bearer auth, idempotency on `transactionId`, the `{ operatorTxId, balance }` / `{ balance }` responses, and `402`/`409`/`{error:\"insufficient_funds\"}` on insufficient funds.\n\nTransaction-id formats (spec §9): stake = `bet:{roundId}:{userId}:{panel}:debit`, payout = `bet:{betId}:payout`, cancel refund = `bet:{betId}:refund`. The same `betId` accompanies the stake, win, and any rollback. All amounts are integer minor units. Reference implementation: `load/operator-wallet-stub.ts`.\n\nTip: run `/bet` then `/win` then `/balance`, and `/rollback` to undo a debit — your wallet must dedup retries and roll back exactly.",
+      "description": "**These call the OPERATOR's endpoint, not the RGS.** They target `{{walletApiUrl}}` with `Authorization: Bearer {{walletApiKey}}` and reproduce the EXACT requests the RGS makes on every money move (spec §7). Fire them at your own wallet implementation to confirm it speaks our protocol: correct request shapes, Bearer auth, idempotency on `transactionId`, the `{ operatorTxId, balance }` / `{ balance }` responses, and `402`/`409`/`{error:\"insufficient_funds\"}` on insufficient funds.\n\nTransaction-id formats (spec §9): stake = `bet:{roundId}:{userId}:{panel}:debit`, payout = `bet:{betId}:payout`, cancel refund = `bet:{betId}:refund`. The same `betId` accompanies the stake, win, and any rollback. **On this operator-wallet contract, `amount` and the response `balance` are integer minor units sent as a BigInt-safe decimal string** (e.g. `\"100\"`) — parse with BigInt, never Number, since a high-decimal-currency value can exceed 2^53 (spec §8). Reference implementation: `load/operator-wallet-stub.ts`.\n\nTip: run `/bet` then `/win` then `/balance`, and `/rollback` to undo a debit — your wallet must dedup retries and roll back exactly.",
       "item": [
         {
           "name": "POST {{walletApiUrl}}/bet",
@@ -449,7 +449,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": 100,\n  \"transactionId\": \"bet:{{roundId}}:{{userId}}:A:debit\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": \"100\",\n  \"transactionId\": \"bet:{{roundId}}:{{userId}}:A:debit\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -457,7 +457,7 @@
               "host": ["{{walletApiUrl}}"],
               "path": ["bet"]
             },
-            "description": "**Debit the stake** (spec §7.1). The RGS calls THIS on `place_bet`.\n\n**Body:** `playerId`, `currency`, `amount` (positive minor units), `transactionId` (`bet:{roundId}:{userId}:A:debit` — dedup on this), `roundId`, `betId`.\n\n**200:** `{ \"operatorTxId\": \"op-987\", \"balance\": 9900 }`. **Insufficient funds:** respond `402`/`409`, or `200/4xx` with `{ \"error\": \"insufficient_funds\" }` (a clean rejection, not retried). MUST be idempotent: a retry with the same `transactionId` returns the same result, never double-debits (spec §9)."
+            "description": "**Debit the stake** (spec §7.1). The RGS calls THIS on `place_bet`.\n\n**Body:** `playerId`, `currency`, `amount` (positive minor units, as a **BigInt-safe decimal string** — parse with BigInt, never Number), `transactionId` (`bet:{roundId}:{userId}:A:debit` — dedup on this), `roundId`, `betId`.\n\n**200:** `{ \"operatorTxId\": \"op-987\", \"balance\": \"9900\" }` (`balance` is a decimal string of minor units). **Insufficient funds:** respond `402`/`409`, or `200/4xx` with `{ \"error\": \"insufficient_funds\" }` (a clean rejection, not retried). MUST be idempotent: a retry with the same `transactionId` returns the same result, never double-debits (spec §9)."
           },
           "response": []
         },
@@ -488,7 +488,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": 200,\n  \"transactionId\": \"bet:{{betId}}:payout\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"currency\": \"{{currency}}\",\n  \"amount\": \"200\",\n  \"transactionId\": \"bet:{{betId}}:payout\",\n  \"roundId\": \"{{roundId}}\",\n  \"betId\": \"{{betId}}\"\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -496,7 +496,7 @@
               "host": ["{{walletApiUrl}}"],
               "path": ["win"]
             },
-            "description": "**Credit the payout** (spec §7.2). The RGS calls THIS on a winning cash-out. Same shape as `/bet`; `amount` is the positive payout (`floor(stake × cashOutMultiplier)`, capped).\n\n**Body:** `transactionId` = `bet:{betId}:payout`. **200:** `{ \"operatorTxId\": \"op-988\", \"balance\": 34155 }`.\n\nA win is **never** rolled back by the RGS; on an unconfirmed `/win` the RGS retries the **idempotent** `/win` (same `transactionId`) and otherwise marks the bet `payout_pending` for its reconciler. **Dedup correctly or you risk double-crediting** (spec §9)."
+            "description": "**Credit the payout** (spec §7.2). The RGS calls THIS on a winning cash-out. Same shape as `/bet`; `amount` is the positive payout (`floor(stake × cashOutMultiplier)`, capped), sent as a **BigInt-safe decimal string**.\n\n**Body:** `transactionId` = `bet:{betId}:payout`. **200:** `{ \"operatorTxId\": \"op-988\", \"balance\": \"34155\" }` (`balance` is a decimal string of minor units).\n\nA win is **never** rolled back by the RGS; on an unconfirmed `/win` the RGS retries the **idempotent** `/win` (same `transactionId`) and otherwise marks the bet `payout_pending` for its reconciler. **Dedup correctly or you risk double-crediting** (spec §9)."
           },
           "response": []
         },
@@ -535,7 +535,7 @@
               "host": ["{{walletApiUrl}}"],
               "path": ["rollback"]
             },
-            "description": "**Undo a named transaction** (spec §7.3). The RGS calls THIS to compensate an ambiguous (timed-out) debit and during stranded-reservation recovery.\n\n**Body:** `transactionId` = the **id of the bet/win being undone** (NOT a new id) — here the stake's `bet:{roundId}:{userId}:A:debit`. **200:** `{ \"operatorTxId\": \"op-989\", \"balance\": 10000 }`.\n\nMUST be **idempotent on its own effect**: if that transaction was applied, reverse it; if it was never applied (or already rolled back), no-op. Either way return the current authoritative balance. It is safe to receive a rollback for a `transactionId` you never saw (spec §9)."
+            "description": "**Undo a named transaction** (spec §7.3). The RGS calls THIS to compensate an ambiguous (timed-out) debit and during stranded-reservation recovery.\n\n**Body:** `transactionId` = the **id of the bet/win being undone** (NOT a new id) — here the stake's `bet:{roundId}:{userId}:A:debit`. **200:** `{ \"operatorTxId\": \"op-989\", \"balance\": \"10000\" }` (`balance` is a decimal string of minor units).\n\nMUST be **idempotent on its own effect**: if that transaction was applied, reverse it; if it was never applied (or already rolled back), no-op. Either way return the current authoritative balance. It is safe to receive a rollback for a `transactionId` you never saw (spec §9)."
           },
           "response": []
         },
@@ -573,7 +573,7 @@
               "host": ["{{walletApiUrl}}"],
               "path": ["balance"]
             },
-            "description": "**Read the authoritative balance** (spec §7.4). The RGS calls THIS to serve `GET /api/wallet/balance`.\n\n**Body:** `{ \"playerId\": \"{{playerId}}\", \"currency\": \"{{currency}}\" }`. **200:** `{ \"balance\": 10000 }` (minor units). Note: unlike the others, this response has **no** `operatorTxId`."
+            "description": "**Read the authoritative balance** (spec §7.4). The RGS calls THIS to serve `GET /api/wallet/balance`.\n\n**Body:** `{ \"playerId\": \"{{playerId}}\", \"currency\": \"{{currency}}\" }`. **200:** `{ \"balance\": \"10000\" }` (minor units, as a **BigInt-safe decimal string** — parse with BigInt). Note: unlike the others, this response has **no** `operatorTxId`."
           },
           "response": []
         }

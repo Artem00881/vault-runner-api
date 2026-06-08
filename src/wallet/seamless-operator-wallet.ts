@@ -60,7 +60,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
     ref?: LedgerRef,
   ): Promise<WalletTxResult> {
     const s = await this.resolveSession(walletId);
-    return this.move("bet", s, walletId, Number(amount), idempotencyKey, ref);
+    return this.move("bet", s, walletId, amount, idempotencyKey, ref);
   }
 
   async credit(
@@ -71,7 +71,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
     ref?: LedgerRef,
   ): Promise<WalletTxResult> {
     const s = await this.resolveSession(walletId);
-    return this.move("win", s, walletId, Number(amount), idempotencyKey, ref);
+    return this.move("win", s, walletId, amount, idempotencyKey, ref);
   }
 
   async rollback(walletId: string, idempotencyKey: string, ref?: LedgerRef): Promise<void> {
@@ -108,7 +108,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
   async getBalance(walletId: string): Promise<bigint> {
     const s = await this.resolveSession(walletId);
     const bal = await this.operator.balance(s.operatorId, s.playerId, s.currency);
-    return BigInt(Math.trunc(bal));
+    return BigInt(bal); // F-001c: operator balance is now a BigInt-safe decimal string
   }
 
   /**
@@ -122,14 +122,14 @@ export class SeamlessOperatorWallet implements WalletProvider {
     kind: "bet" | "win",
     s: OperatorSession,
     walletId: string,
-    amount: number,
+    amount: bigint,
     transactionId: string,
     ref?: LedgerRef,
   ): Promise<WalletTxResult> {
     const req = {
       playerId: s.playerId,
       currency: s.currency,
-      amount,
+      amount: amount.toString(), // F-001b: BigInt-safe decimal string on the wire (was Number → lossy ≥2^53)
       transactionId, // = idempotencyKey → operator dedups retries
       roundId: s.roundId ?? "",
       betId: ref?.refId ?? "",
@@ -142,7 +142,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
           kind === "bet"
             ? await this.operator.bet(s.operatorId, req)
             : await this.operator.win(s.operatorId, req);
-        return { id: res.operatorTxId, balanceAfter: BigInt(Math.trunc(res.balance)) };
+        return { id: res.operatorTxId, balanceAfter: BigInt(res.balance) }; // F-001c: string (was Math.trunc — lossy ≥2^53)
       } catch (e) {
         lastErr = e;
 

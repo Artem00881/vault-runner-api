@@ -184,7 +184,7 @@ test("H2 reconcile: a healthy operator finalises a payout_pending bet exactly on
 
   // The operator was credited exactly once, balance = start + payout.
   expect(sandbox.operator.calls.win).toBe(1);
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + Number(payout));
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + payout);
 
   // Leaderboard loot moved by the payout exactly once.
   const lootAfter1 = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
@@ -197,7 +197,7 @@ test("H2 reconcile: a healthy operator finalises a payout_pending bet exactly on
   const after2 = await prisma.bet.findUniqueOrThrow({ where: { id: betId } });
   expect(after2.payoutTxId).toBe(after1.payoutTxId); // same tx, not re-issued under a new id
   expect(sandbox.operator.calls.win).toBe(1); // still 1 — idempotent, not re-credited
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + Number(payout));
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + payout);
   const lootAfter2 = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
   expect(lootAfter2).toBe(lootAfter1); // loot did NOT move again
 });
@@ -225,12 +225,12 @@ test("H2 reconcile: an idempotent retry of an ALREADY-APPLIED win confirms once 
   await sandbox.operator.win("op", {
     playerId,
     currency,
-    amount: Number(payout),
+    amount: payout.toString(), // F-001b: BigInt-safe decimal string on the wire
     transactionId: `bet:${betId}:payout`,
     roundId,
     betId,
   });
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + Number(payout)); // already paid
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + payout); // already paid
   const winsBefore = sandbox.operator.calls.win; // 1 (our priming call)
 
   const lootBefore = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
@@ -244,7 +244,7 @@ test("H2 reconcile: an idempotent retry of an ALREADY-APPLIED win confirms once 
   // Operator was hit again (the reconciler must re-issue) but did NOT re-apply:
   // balance unchanged, dedup on the transactionId. Player paid exactly once.
   expect(sandbox.operator.calls.win).toBe(winsBefore + 1);
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + Number(payout));
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + payout);
   // Loot still moves once on OUR finalisation (the journal didn't know it was paid).
   const lootAfter = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
   expect(lootAfter - lootBefore).toBe(payout);
@@ -275,7 +275,7 @@ test("H2 reconcile: operator still DOWN → bet stays payout_pending; a later pa
   const downBet = await prisma.bet.findUniqueOrThrow({ where: { id: betId } });
   expect(downBet.status).toBe("payout_pending"); // STILL pending — not lost, not finalised
   expect(downBet.payoutTxId).toBeNull();
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance); // not credited
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance)); // not credited
   const lootMid = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
   expect(lootMid).toBe(lootBefore); // loot untouched while down
 
@@ -287,7 +287,7 @@ test("H2 reconcile: operator still DOWN → bet stays payout_pending; a later pa
   const healedBet = await prisma.bet.findUniqueOrThrow({ where: { id: betId } });
   expect(healedBet.status).toBe("cashed_out");
   expect(healedBet.payoutTxId).toBeTruthy();
-  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(startBalance + Number(payout)); // paid once
+  expect(sandbox.operator.balanceOf(playerId, currency)).toBe(BigInt(startBalance) + payout); // paid once
   const lootAfter = (await prisma.profile.findUniqueOrThrow({ where: { userId } })).totalLoot;
   expect(lootAfter - lootBefore).toBe(payout); // moved exactly once, only after recovery
 });

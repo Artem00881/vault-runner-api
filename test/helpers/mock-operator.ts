@@ -21,6 +21,11 @@ import {
  *     out" (we never get the response) — does our side double-charge on retry?
  *   - timeout-before-apply: the call times out and nothing applied.
  *   - hard error.
+ *
+ * F-001b/c: money is BigInt minor units internally; the wire contract (req.amount,
+ * res.balance) is a BigInt-safe DECIMAL STRING (a high-decimal balance/amount can
+ * exceed 2^53). `seed`/`balanceOf`/the constructor accept number|bigint for test
+ * convenience; `balanceOf` returns the exact bigint.
  */
 type Misbehave =
   | { kind: "timeout_after_apply" }
@@ -28,16 +33,16 @@ type Misbehave =
   | { kind: "error" };
 
 export class MockOperator implements OperatorWalletApi {
-  private balances = new Map<string, number>(); // key: `${playerId}:${currency}`
+  private balances = new Map<string, bigint>(); // key: `${playerId}:${currency}`
   private applied = new Map<string, OperatorWalletResponse>(); // transactionId → result
-  private deltas = new Map<string, number>(); // transactionId → signed delta (for rollback)
+  private deltas = new Map<string, bigint>(); // transactionId → signed delta (for rollback)
   private next: Misbehave | null = null;
 
   /** Public counters so tests can assert how many times the operator was hit. */
   calls = { bet: 0, win: 0, rollback: 0, balance: 0 };
 
-  constructor(seed: Record<string, number> = {}) {
-    for (const [k, v] of Object.entries(seed)) this.balances.set(k, v);
+  constructor(seed: Record<string, number | bigint> = {}) {
+    for (const [k, v] of Object.entries(seed)) this.balances.set(k, BigInt(v));
   }
 
   /** Arm a single misbehaviour for the NEXT state-changing call. */
@@ -45,30 +50,30 @@ export class MockOperator implements OperatorWalletApi {
 
   private key(playerId: string, currency: string) { return `${playerId}:${currency}`; }
 
-  async balance(_operatorId: string, playerId: string, currency: string): Promise<number> {
+  async balance(_operatorId: string, playerId: string, currency: string): Promise<string> {
     this.calls.balance++;
-    return this.balances.get(this.key(playerId, currency)) ?? 0;
+    return (this.balances.get(this.key(playerId, currency)) ?? 0n).toString();
   }
 
   private apply(
     txId: string,
     playerId: string,
     currency: string,
-    delta: number,
+    delta: bigint,
   ): OperatorWalletResponse {
     // Idempotent: a repeated transactionId returns the SAME result, no re-apply.
     const dup = this.applied.get(txId);
     if (dup) return dup;
 
     const k = this.key(playerId, currency);
-    const bal = this.balances.get(k) ?? 0;
+    const bal = this.balances.get(k) ?? 0n;
     const after = bal + delta;
-    if (after < 0) throw new OperatorInsufficientFunds();
+    if (after < 0n) throw new OperatorInsufficientFunds();
     this.balances.set(k, after);
     // operatorTxId is an arbitrary operator-side string, NOT a uuid (Bet.debitTxId/
     // payoutTxId are text) — keep the mock realistic so any DB-backed operator test
     // exercises the non-uuid path instead of accidentally passing on a uuid.
-    const res: OperatorWalletResponse = { operatorTxId: "op-tx-" + randomUUID(), balance: after };
+    const res: OperatorWalletResponse = { operatorTxId: "op-tx-" + randomUUID(), balance: after.toString() };
     this.applied.set(txId, res);
     this.deltas.set(txId, delta); // remember for an exact rollback
     return res;
@@ -79,7 +84,7 @@ export class MockOperator implements OperatorWalletApi {
     txId: string,
     playerId: string,
     currency: string,
-    delta: number,
+    delta: bigint,
   ): Promise<OperatorWalletResponse> {
     const m = this.next;
     this.next = null;
@@ -100,12 +105,12 @@ export class MockOperator implements OperatorWalletApi {
 
   async bet(_operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse> {
     this.calls.bet++;
-    return this.run(req.transactionId, req.playerId, req.currency, -req.amount);
+    return this.run(req.transactionId, req.playerId, req.currency, -BigInt(req.amount));
   }
 
   async win(_operatorId: string, req: OperatorWinRequest): Promise<OperatorWalletResponse> {
     this.calls.win++;
-    return this.run(req.transactionId, req.playerId, req.currency, +req.amount);
+    return this.run(req.transactionId, req.playerId, req.currency, BigInt(req.amount));
   }
 
   async rollback(_operatorId: string, req: OperatorRollbackRequest): Promise<OperatorWalletResponse> {
@@ -118,22 +123,22 @@ export class MockOperator implements OperatorWalletApi {
       // simply mark it rolled back and restore the delta. The test operator
       // stores deltas implicitly via balance, so reverse by reapplying inverse.
       // To keep it simple+correct, we store original deltas:
-      const delta = this.deltas.get(req.transactionId) ?? 0;
-      this.balances.set(k, (this.balances.get(k) ?? 0) - delta);
+      const delta = this.deltas.get(req.transactionId) ?? 0n;
+      this.balances.set(k, (this.balances.get(k) ?? 0n) - delta);
       this.applied.delete(req.transactionId);
       this.deltas.delete(req.transactionId);
     }
-    return { operatorTxId: "op-tx-" + randomUUID(), balance: this.balances.get(k) ?? 0 };
+    return { operatorTxId: "op-tx-" + randomUUID(), balance: (this.balances.get(k) ?? 0n).toString() };
   }
 
-  /** test helper */
-  balanceOf(playerId: string, currency: string) {
-    return this.balances.get(this.key(playerId, currency)) ?? 0;
+  /** test helper — exact bigint balance (minor units). */
+  balanceOf(playerId: string, currency: string): bigint {
+    return this.balances.get(this.key(playerId, currency)) ?? 0n;
   }
 
   /** test helper: set a player+currency starting balance (for suites that share one
    *  MockOperator across launches and can't seed via the constructor). */
-  seed(playerId: string, currency: string, balance: number) {
-    this.balances.set(this.key(playerId, currency), balance);
+  seed(playerId: string, currency: string, balance: number | bigint) {
+    this.balances.set(this.key(playerId, currency), BigInt(balance));
   }
 }

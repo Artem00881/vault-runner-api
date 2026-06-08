@@ -416,7 +416,7 @@ Request:
 {
   "playerId": "player-42",
   "currency": "EUR",
-  "amount": 100,
+  "amount": "100",
   "transactionId": "bet:<roundId>:<userId>:A:debit",
   "roundId": "r-2026-0001",
   "betId": "f3…uuid"
@@ -426,7 +426,7 @@ Request:
 Success **200**:
 
 ```json
-{ "operatorTxId": "op-987", "balance": 9900 }
+{ "operatorTxId": "op-987", "balance": "9900" }
 ```
 
 Insufficient funds — respond with **HTTP 402** or **409**, OR **200/4xx** with body
@@ -437,11 +437,11 @@ rejection (the bet is rejected, not retried).
 |---|---|
 | `playerId` | Your player id (from the launch token). |
 | `currency` | ISO-4217 code (uppercase). |
-| `amount` | Positive minor units to debit (the stake). |
+| `amount` | Positive minor units to debit (the stake), as a **BigInt-safe decimal string**. |
 | `transactionId` | **Unique per money-move; dedup on this** (idempotency key). |
 | `roundId`, `betId` | Our round/bet ids — context for your statement and reconciliation (key your book by `betId`). |
 | `operatorTxId` (resp) | Your reference id for the applied transaction. |
-| `balance` (resp) | Player balance after the move, minor units. |
+| `balance` (resp) | Player balance after the move, minor units, as a **BigInt-safe decimal string**. |
 
 ### 7.2 `POST /win` — credit the payout
 
@@ -451,14 +451,14 @@ Request (same shape as `/bet`; `amount` is the positive payout):
 {
   "playerId": "player-42",
   "currency": "EUR",
-  "amount": 24255,
+  "amount": "24255",
   "transactionId": "bet:<betId>:payout",
   "roundId": "r-2026-0001",
   "betId": "f3…uuid"
 }
 ```
 
-Success **200**: `{ "operatorTxId": "op-988", "balance": 34155 }`.
+Success **200**: `{ "operatorTxId": "op-988", "balance": "34155" }`.
 
 A win is **never rolled back** by the RGS. If a `/win` call is ambiguous/unconfirmed
 the RGS retries the idempotent `/win` (same `transactionId`) and, failing that,
@@ -479,7 +479,7 @@ Request:
 }
 ```
 
-Success **200**: `{ "operatorTxId": "op-989", "balance": 10000 }`.
+Success **200**: `{ "operatorTxId": "op-989", "balance": "10000" }`.
 
 - `transactionId` is the **id of the bet/win being undone** (not a new id).
 - **Idempotent on its own effect:** if that transaction was applied, undo it; if it
@@ -492,7 +492,7 @@ Success **200**: `{ "operatorTxId": "op-989", "balance": 10000 }`.
 ### 7.4 `POST /balance` — read the authoritative balance
 
 Request: `{ "playerId": "player-42", "currency": "EUR" }`
-Success **200**: `{ "balance": 10000 }`.
+Success **200**: `{ "balance": "10000" }`.
 
 Used by the RGS to serve `GET /api/wallet/balance` (the player's real balance comes
 from you, not our journal).
@@ -513,6 +513,11 @@ Source of truth: `game-math-spec.md` §8/§12, `src/common/currency.ts`.
 
 - **Integer minor units everywhere.** No floats on the wire. `100` EUR-minor =
   €1.00; `1_000_000` USDT-minor (6 dp) = 1.000000 USDT.
+- **On the operator-wallet contract (§7), amounts and balances are sent as decimal
+  strings** (`"amount"`, `"balance"`) — **parse with BigInt, never `Number`**. A
+  single high-decimal-currency value can exceed 2^53 minor units (e.g. ETH at 18 dp:
+  2^53 wei ≈ 0.009 ETH), which a JSON `number` would silently corrupt. The magnitude
+  is unchanged — it is the integer count of minor units, just quoted.
 - **Decimals are display-only.** No money math reads them; a wrong precision can
   only mis-scale a display, never corrupt a balance.
 - **Payout = floor(stake × cashOutMultiplier)** in minor units (rounded down, toward
@@ -1085,7 +1090,7 @@ Content-Type: application/json
 {
   "playerId": "player-42",
   "currency": "EUR",
-  "amount": 100,
+  "amount": "100",
   "transactionId": "bet:r-2026-0001:u-7:A:debit",
   "roundId": "r-2026-0001",
   "betId": "f3a1…"
@@ -1093,7 +1098,7 @@ Content-Type: application/json
 ```
 ```json
 200 OK
-{ "operatorTxId": "op-987", "balance": 9900 }
+{ "operatorTxId": "op-987", "balance": "9900" }
 ```
 
 Client ack / event:
@@ -1116,7 +1121,7 @@ Content-Type: application/json
 {
   "playerId": "player-42",
   "currency": "EUR",
-  "amount": 200,
+  "amount": "200",
   "transactionId": "bet:f3a1…:payout",
   "roundId": "r-2026-0001",
   "betId": "f3a1…"
@@ -1124,7 +1129,7 @@ Content-Type: application/json
 ```
 ```json
 200 OK
-{ "operatorTxId": "op-988", "balance": 10100 }
+{ "operatorTxId": "op-988", "balance": "10100" }
 ```
 
 Client events:

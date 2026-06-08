@@ -7,7 +7,10 @@
  * contract — the same shape will be published to operators as the integration
  * spec (Phase 6 docs).
  *
- * Money is integer minor units (currency-agnostic; see game-math-spec §8/§12).
+ * Money is integer minor units (currency-agnostic; see game-math-spec §8/§12), sent
+ * as a DECIMAL STRING (F-001b/c): a single high-decimal-currency balance or amount can
+ * exceed 2^53 minor units (e.g. ETH at 18 dp — 2^53 wei ≈ 0.009 ETH), which a JSON
+ * `number` would silently corrupt. Parse with BigInt, never `Number`.
  * Every state-changing call carries a unique `transactionId` so the operator can
  * make it idempotent (a retry must NOT double-apply).
  */
@@ -16,8 +19,8 @@ export interface OperatorBetRequest {
   /** Operator-side player session/account the launch token resolved to. */
   playerId: string;
   currency: string;
-  /** Positive minor units to debit (the stake). */
-  amount: number;
+  /** Positive minor units to debit (the stake), as a BigInt-safe decimal string. */
+  amount: string;
   /** Unique per money-move; the operator dedups on this. */
   transactionId: string;
   /** Context for the operator's statement (our round/bet ids). */
@@ -28,8 +31,8 @@ export interface OperatorBetRequest {
 export interface OperatorWinRequest {
   playerId: string;
   currency: string;
-  /** Positive minor units to credit (the payout). */
-  amount: number;
+  /** Positive minor units to credit (the payout), as a BigInt-safe decimal string. */
+  amount: string;
   transactionId: string;
   roundId: string;
   betId: string;
@@ -48,8 +51,8 @@ export interface OperatorRollbackRequest {
 export interface OperatorWalletResponse {
   /** Operator's own reference id for the applied transaction. */
   operatorTxId: string;
-  /** Player balance after the move, minor units. */
-  balance: number;
+  /** Player balance after the move, minor units, as a BigInt-safe decimal string. */
+  balance: string;
 }
 
 /**
@@ -63,7 +66,7 @@ export interface OperatorWalletResponse {
  * request bodies above stay the clean operator-facing contract.
  */
 export interface OperatorWalletApi {
-  balance(operatorId: string, playerId: string, currency: string): Promise<number>;
+  balance(operatorId: string, playerId: string, currency: string): Promise<string>;
   bet(operatorId: string, req: OperatorBetRequest): Promise<OperatorWalletResponse>;
   win(operatorId: string, req: OperatorWinRequest): Promise<OperatorWalletResponse>;
   /**
