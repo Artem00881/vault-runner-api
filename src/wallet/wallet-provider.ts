@@ -97,3 +97,11 @@ export interface WalletProvider {
 
 /** DI token for the active WalletProvider (mirrors SALT_PROVIDER). */
 export const WALLET_PROVIDER = Symbol("WALLET_PROVIDER");
+
+/**
+ * DI token for the RAW per-operator wallet client ({@link OperatorWalletApi}), or `null`
+ * in internal mode. Used by the rollback-outbox drain (audit M1 — F-027), which re-emits
+ * `operator.rollback(...)` for any owed rollback. Null in internal mode makes the drain a
+ * no-op there (no operator exists). Provided by WalletModule alongside WALLET_PROVIDER.
+ */
+export const OPERATOR_WALLET_API = Symbol("OPERATOR_WALLET_API");

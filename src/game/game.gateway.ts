@@ -20,6 +20,9 @@ import type { PerBetLimits } from "./risk.service";
 import { placeSchema, panelSchema, timeSyncSchema } from "./ws-schemas";
 import { MetricsService } from "../metrics/metrics.service";
 import { ElectionService } from "../ha/election.service";
+import { WalletRollbackService } from "../wallet/wallet-rollback.service";
+import { OPERATOR_WALLET_API } from "../wallet/wallet-provider";
+import type { OperatorWalletApi } from "../wallet/operator-wallet.types";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -132,6 +135,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @Inject(GameSessionService) private readonly sessions: GameSessionService,
     @Inject(MetricsService) private readonly metrics: MetricsService,
     @Inject(ElectionService) private readonly election: ElectionService,
+    @Inject(WalletRollbackService) private readonly walletRollbacks: WalletRollbackService,
+    // Raw operator client (null in internal mode) — the M1 rollback-outbox drain re-emits
+    // through it; null makes the drain a no-op (no operator to call).
+    @Inject(OPERATOR_WALLET_API) private readonly operatorApi: OperatorWalletApi | null,
   ) {}
 
   afterInit(server: Server) {
@@ -239,6 +246,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       // re-running its idempotent reversals + finalising — both wallet modes. Leader-gated
       // (shared DB + money) by the guard above; alerts on anything still stuck.
       await this.bets.reconcileVoidingBets();
+      // M1 (F-027): drain the durable operator-rollback outbox — re-emit any rollback whose
+      // operator call previously failed, until it confirms. A no-op in internal mode
+      // (operatorApi is null → drainPending returns 0). Leader-gated by the guard above.
+      await this.walletRollbacks.drainPending(this.operatorApi);
+      // Reflect the live owed-rollback backlog on the gauge (drops to 0 once drained).
+      this.metrics.setWalletRollbackPending(await this.walletRollbacks.countPending());
     } catch (e: any) {
       // Per-bet failures are already logged inside recoverReservingBets; this catches a
       // top-level failure (e.g. the findMany itself on a DB blip) so it isn't silent.

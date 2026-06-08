@@ -61,6 +61,10 @@ export class MetricsService {
   readonly pendingPayoutOldestSeconds: Gauge;
   readonly reservingSlots: Gauge;
   readonly reservingOldestSeconds: Gauge;
+  // Operator-mode rollback outbox (M1 / F-027): rollbacks owed to the operator whose
+  // emit failed and are awaiting the drain. A stuck non-zero = an operator that keeps
+  // rejecting a rollback — loud + alertable (the drain never abandons it).
+  readonly walletRollbackPending: Gauge;
 
   readonly settlementLatency: Histogram;
 
@@ -100,6 +104,7 @@ export class MetricsService {
     this.pendingPayoutOldestSeconds = new Gauge({ name: "vaultrun_pending_payout_oldest_seconds", help: "Age (seconds) of the oldest pending payout by settledAt; 0 if none", registers: reg });
     this.reservingSlots = new Gauge({ name: "vaultrun_reserving_slots", help: "Bets in a transient reservation state (reserving|cancelling); a stuck age = an owed refund the sweep hasn't cleared", registers: reg });
     this.reservingOldestSeconds = new Gauge({ name: "vaultrun_reserving_oldest_seconds", help: "Age (seconds) of the oldest reserving|cancelling slot by createdAt; 0 if none", registers: reg });
+    this.walletRollbackPending = new Gauge({ name: "vaultrun_wallet_rollback_pending", help: "Operator-wallet rollbacks owed (status pending) — a failed-emit rollback the drain keeps re-issuing (M1/F-027); >0 stuck = an operator rejecting a rollback", registers: reg });
 
     this.settlementLatency = new Histogram({
       name: "vaultrun_settlement_latency_ms",
@@ -185,6 +190,12 @@ export class MetricsService {
   setReservingBacklog(count: number, oldestAgeSeconds: number) {
     this.reservingSlots.set(count);
     this.reservingOldestSeconds.set(oldestAgeSeconds);
+  }
+
+  /** Reflect the live operator-rollback outbox backlog (M1 / F-027). Refreshed each
+   *  reserving-sweep cycle after the drain, so it drops to 0 once everything confirms. */
+  setWalletRollbackPending(count: number) {
+    this.walletRollbackPending.set(count);
   }
 
   private updateRtp() {

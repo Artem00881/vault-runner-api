@@ -21,11 +21,14 @@
  *  4. BUSTED PURITY   — no `busted` bet has a payout_credit row (we never pay a bust).
  *  5. BACKLOG DRAINED — reserving|cancelling == 0 AND payout_pending == 0 (the
  *     `reserving`/`payout_pending` gauges must return to 0 after the soak settles).
+ *  6. ROLLBACK OUTBOX DRAINED — wallet_rollbacks pending == 0 (the operator-mode
+ *     rollback outbox, M1/F-027: a failed-emit rollback the reserving sweep re-issues
+ *     must confirm and drain to 0 after the soak settles).
  *
- * NOTE on payout_pending: it is an OWED, claimed win not yet confirmed. A clean
- * soak ends with the reconciler having drained it to 0 (invariant 5). If you run
- * this mid-soak with operator faults still in flight, expect a non-zero pending
- * count — that's the reconciler's backlog, not a discrepancy; let it drain first.
+ * NOTE on payout_pending (inv 5) and the rollback outbox (inv 6): both are OWED,
+ * self-healing backlogs the periodic sweeps drain. A clean soak ends with both at 0.
+ * If you run this MID-soak with operator faults still in flight, expect a non-zero
+ * count — that's the sweep's backlog, not a discrepancy; let it drain first.
  *
  * SCOPE (mode-aware): the internal ledger (`ledger_transactions`) is written ONLY
  * for internal/guest play (`operatorId IS NULL`). Operator-mode bets route to the
@@ -224,6 +227,21 @@ async function main() {
     name: "5. backlog drained (reserving|cancelling|voiding == 0, payout_pending == 0)",
     ok: reservingSlots === 0 && pendingPayouts === 0,
     detail: `reserving|cancelling|voiding=${reservingSlots} pending_payouts=${pendingPayouts}`,
+  });
+
+  // --- 6. ROLLBACK OUTBOX DRAINED: wallet_rollbacks pending == 0 (operator-mode M1/F-027) ---
+  // A failed-emit operator rollback is persisted `pending` and re-issued by the reserving
+  // sweep's drain until the operator confirms it. After a clean soak it must be 0. (Like
+  // payout_pending, a mid-soak non-zero is the sweep's backlog, not a money discrepancy.)
+  // Count BOTH pending and draining (matches MetricsService.countPending / the gauge): a
+  // row crashed mid-emit sits `draining` until its lease expires + the next sweep reclaims
+  // it, so counting only `pending` could read a false "drained" for that window.
+  const pendingRollbacks = await prisma.walletRollback.count({ where: { status: { in: ["pending", "draining"] } } });
+  checks.push({
+    name: "6. rollback outbox drained (wallet_rollbacks pending == 0)",
+    ok: pendingRollbacks === 0,
+    detail: `wallet_rollbacks pending=${pendingRollbacks}` +
+      (pendingRollbacks ? ` (a mid-soak backlog is the sweep's, not a discrepancy — let it drain)` : ""),
   });
 
   // ---- report ----

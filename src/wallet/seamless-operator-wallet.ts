@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import type { LedgerType, LedgerRef } from "./ledger.service";
 import type { WalletProvider, WalletTxResult, ReverseParams } from "./wallet-provider";
+import type { RollbackStore } from "./wallet-rollback.service";
 import {
   type OperatorWalletApi,
   OperatorInsufficientFunds,
@@ -48,6 +49,13 @@ export class SeamlessOperatorWallet implements WalletProvider {
     private readonly operator: OperatorWalletApi,
     private readonly resolveSession: SessionResolver,
     opts: SeamlessOptions = {},
+    /**
+     * Durable rollback ledger (audit M1 — F-002 once-only + F-027 outbox). OPTIONAL so the
+     * 20+ existing pure-unit constructions keep compiling and behaving EXACTLY as today
+     * (when absent, rollbackOnce reproduces the old emit-and-swallow). The module factory
+     * passes a real WalletRollbackService.
+     */
+    private readonly rollbackStore?: RollbackStore,
   ) {
     this.maxRetries = opts.maxRetries ?? 3;
   }
@@ -76,13 +84,8 @@ export class SeamlessOperatorWallet implements WalletProvider {
 
   async rollback(walletId: string, idempotencyKey: string, ref?: LedgerRef): Promise<void> {
     const s = await this.resolveSession(walletId);
-    await this.operator.rollback(s.operatorId, {
-      playerId: s.playerId,
-      currency: s.currency,
-      transactionId: idempotencyKey,
-      roundId: s.roundId ?? "",
-      betId: ref?.refId ?? "",
-    });
+    // Compensation for an ambiguous move (not the intended effect) — best-effort, swallowed.
+    await this.rollbackOnce(s, idempotencyKey, ref, "ambiguous_debit", false);
   }
 
   /**
@@ -96,13 +99,12 @@ export class SeamlessOperatorWallet implements WalletProvider {
    */
   async reverse(walletId: string, p: ReverseParams): Promise<void> {
     const s = await this.resolveSession(walletId);
-    await this.operator.rollback(s.operatorId, {
-      playerId: s.playerId,
-      currency: s.currency,
-      transactionId: p.originalKey,
-      roundId: s.roundId ?? "",
-      betId: p.ref?.refId ?? "",
-    });
+    // The void rollback IS the intended effect → propagate a failure (the caller aborts the
+    // void). Once-only on the original key: a void resume (e.g. interrupted between the
+    // reclaim and refund legs) that re-runs this sees the confirmed row and SKIPS the
+    // operator emit — so it can't double-reverse even against a non-idempotent operator.
+    const reason = p.originalDirection === "credit" ? "void_reclaim" : "void_refund";
+    await this.rollbackOnce(s, p.originalKey, p.ref, reason, true, p.amount);
   }
 
   async getBalance(walletId: string): Promise<bigint> {
@@ -164,13 +166,13 @@ export class SeamlessOperatorWallet implements WalletProvider {
         // Timeout = AMBIGUOUS. The operator may or may not have applied it.
         // Compensate: rollback this transactionId (idempotent), then fail.
         if (e instanceof OperatorTimeout) {
-          await this.safeRollback(s, transactionId, ref);
+          await this.safeRollback(s, transactionId, ref, "ambiguous_debit");
           throw new BadRequestException("wallet_unavailable");
         }
 
         // Other errors: retry a couple of times (transient), then give up.
         if (attempt >= this.maxRetries) {
-          await this.safeRollback(s, transactionId, ref);
+          await this.safeRollback(s, transactionId, ref, "transient_debit");
           throw new BadRequestException("wallet_error");
         }
       }
@@ -178,19 +180,89 @@ export class SeamlessOperatorWallet implements WalletProvider {
     throw lastErr;
   }
 
-  /** Best-effort rollback; never throws (we're already in a failure path). */
-  private async safeRollback(s: OperatorSession, transactionId: string, ref?: LedgerRef) {
-    try {
-      await this.operator.rollback(s.operatorId, {
+  /**
+   * Best-effort rollback for a debit-compensation path; never throws (we're already failing
+   * the bet). `reason` distinguishes ambiguous_debit (timeout) from transient_debit
+   * (exhausted retries) in the durable ledger. The F-027 durable-discrepancy capture lives in
+   * rollbackOnce (a failed emit leaves a `pending` row the drain re-issues) — no longer a TODO.
+   */
+  private async safeRollback(s: OperatorSession, transactionId: string, ref: LedgerRef | undefined, reason: string) {
+    await this.rollbackOnce(s, transactionId, ref, reason, false);
+  }
+
+  /**
+   * The SINGLE choke point for every operator rollback we emit (audit M1). Two modes:
+   *
+   *  - NO durable store (pure-unit construction): reproduce TODAY'S exact behaviour — emit
+   *    the operator rollback; on failure rethrow iff `propagate` (the void path), else
+   *    swallow (the debit-compensation path). Zero behavioural delta from before M1.
+   *
+   *  - WITH a store: make it ONCE-ONLY (F-002) and DURABLE (F-027):
+   *     1. claim(pending) — its OWN committed write BEFORE the operator HTTP call. If the
+   *        claim says this txId is ALREADY confirmed, RETURN without emitting (the guard
+   *        that stops a void resume / retry double-reversing a non-idempotent operator).
+   *     2. emit operator.rollback, then confirm() — its OWN write AFTER the call. On a
+   *        failed emit: recordEmitFailure (the row STAYS pending = the durable discrepancy
+   *        the drain re-issues), then rethrow iff `propagate`, else swallow.
+   *
+   *  CRITICAL: the claim and confirm are SEPARATE committed writes around the HTTP call — we
+   *  never hold a DB transaction (and thus a row lock) across the operator call.
+   */
+  private async rollbackOnce(
+    s: OperatorSession,
+    transactionId: string,
+    ref: LedgerRef | undefined,
+    reason: string,
+    propagate: boolean,
+    amount?: bigint,
+  ): Promise<void> {
+    const emit = () =>
+      this.operator.rollback(s.operatorId, {
         playerId: s.playerId,
         currency: s.currency,
         transactionId,
         roundId: s.roundId ?? "",
         betId: ref?.refId ?? "",
       });
-    } catch {
-      // TODO Phase 0.3: if rollback itself fails, flag for the reconciliation
-      // job rather than losing the discrepancy.
+
+    // Unwired (pure-unit): preserve the pre-M1 behaviour exactly.
+    if (!this.rollbackStore) {
+      try {
+        await emit();
+      } catch (e) {
+        if (propagate) throw e;
+        // else swallow — best-effort compensation, exactly as before.
+      }
+      return;
+    }
+
+    // F-002: once-only on the LOGICAL reversal (operatorId, betId|transactionId + reason) —
+    // NOT the reusable transactionId, so a confirmed ambiguous_debit on one bet can't suppress
+    // a genuinely-different void_refund (or another attempt's compensation) on the same key
+    // (audit M1 conflation fix). A `confirmed` row means this reversal already applied → skip.
+    // `inFlight` (#2): the periodic drain currently owns this reversal (`draining`, live lease)
+    // → skip emitting so the live-void and the sweep can't double-reverse a non-idempotent
+    // operator; the drain confirms it (and re-emits later if its own emit fails). The owed
+    // reversal is durable either way.
+    const { alreadyConfirmed, inFlight, ref: claimRef } = await this.rollbackStore.claim({
+      operatorId: s.operatorId,
+      playerId: s.playerId,
+      currency: s.currency,
+      transactionId,
+      reason,
+      betId: ref?.refId,
+      amount,
+    });
+    if (alreadyConfirmed || inFlight) return;
+
+    try {
+      await emit();
+      await this.rollbackStore.confirm(claimRef);
+    } catch (e) {
+      // F-027: the pending row IS the durable discrepancy; the drain re-issues it.
+      await this.rollbackStore.recordEmitFailure(claimRef, e);
+      if (propagate) throw e;
+      // else swallow — the bet is already rejected; the owed rollback is now durable.
     }
   }
 }

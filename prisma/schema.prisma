@@ -251,3 +251,48 @@ model AuditEvent {
   @@index([action, createdAt])
   @@map("audit_events")
 }
+
+/// Operator-wallet rollback ledger (audit M1 — F-002 once-only marker + F-027 durable
+/// outbox). ONE row per (operatorId, transactionId) we ever need to roll back at the
+/// operator (ambiguous/transient debit compensation, and the void reclaim/refund legs).
+///
+/// Two jobs in one table:
+///  - F-002 (once-only): the @@unique([operatorId, transactionId]) makes a rollback emit
+///    idempotent ON OUR SIDE — a `confirmed` row means "already rolled back, do NOT re-emit"
+///    so a void resume / retry can't double-reverse even against a non-idempotent operator.
+///  - F-027 (durable discrepancy): a row left `pending` (the operator rollback call failed)
+///    is the persisted owed-rollback the periodic drain (game.gateway sweep) re-emits until
+///    it confirms — the discrepancy is never lost.
+///
+/// NO foreign key BY DESIGN (mirrors AuditEvent): the ids are denormalised so nothing can
+/// CASCADE a row away. NOT append-only / NO immutability trigger (unlike audit_events): a
+/// row legitimately transitions pending → confirmed (status/attempts/lastError/resolvedAt
+/// are updated), so the table is mutable; the test/soak teardown scoped-deletes its own rows.
+model WalletRollback {
+  id            String    @id @default(uuid()) @db.Uuid
+  operatorId    String    @map("operator_id") @db.Uuid
+  playerId      String    @map("player_id")
+  currency      String
+  // The ORIGINAL operator transaction being reversed (the operator dedups on this). REUSABLE
+  // (a debit key is reused by a re-bet) → NOT the once-only key; the drain re-emits with it.
+  transactionId String    @map("transaction_id")
+  // The LOGICAL-reversal once-only identity = `{betId|transactionId}#{reason}`. Intent-and-
+  // bet-distinct so cross-intent / same-reason-different-bet reversals never conflate (M1).
+  dedupeKey     String    @map("dedupe_key")
+  reason        String // ambiguous_debit | transient_debit | void_reclaim | void_refund
+  betId         String?   @map("bet_id") @db.Uuid
+  amount        BigInt? // original move magnitude (minor units); informational for the drain/recon
+  status        String    @default("pending") // pending | draining | confirmed
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error")
+  // #2: while `draining`, the owning drain holds the row until this instant; a stale lease
+  // (crashed drain) is reclaimable by the next pass. NULL when not draining.
+  leaseUntil    DateTime? @map("lease_until") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  resolvedAt    DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  @@unique([operatorId, dedupeKey])
+  @@index([status, createdAt])
+  @@map("wallet_rollbacks")
+}
