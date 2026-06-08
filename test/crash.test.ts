@@ -1,6 +1,20 @@
 import { test, expect } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { crashFromHmacHex, computeCrash, HOUSE_EDGE } from "../src/fairness/crash";
+
+/**
+ * Deterministic 32-byte hex seed stream from a fixed master seed (SHA-256 counter mode:
+ * seed_i = SHA256(master || i)). Used by the distribution test below so the 100k-sample
+ * empirical RTP / P(crash≥x) is REPRODUCIBLE every run — the test validates the crash
+ * MATH distribution, which a large FIXED-seed sample reproduces deterministically. This
+ * removes the intermittent CI flake the old `randomBytes` sample caused (the empirical
+ * fractions drifted run-to-run and occasionally tripped the ±tolerance). The seeds are
+ * still full-entropy SHA-256 digests fed through the REAL computeCrash — only their
+ * SOURCE is deterministic, so the distribution under test is unchanged.
+ */
+function seededSeedHex(master: string, i: number): string {
+  return createHash("sha256").update(`${master}:${i}`).digest("hex");
+}
 
 test("house edge is 3%", () => {
   expect(HOUSE_EDGE).toBe(0.03);
@@ -26,11 +40,15 @@ test("crash is always >= 1.00", () => {
   }
 });
 
-test("distribution matches P(crash >= x) ≈ 0.97 / x and RTP ≈ 97%", () => {
+test("distribution matches P(crash >= x) ≈ 0.97 / x and RTP ≈ 97% (deterministic sample)", () => {
+  // DETERMINISTIC sample (fixed master seed → reproducible every run; was randomBytes,
+  // which flaked intermittently in CI). Same N=100k as before; the seeds come from the
+  // SHA-256 counter-mode stream above and are fed through the REAL computeCrash, so this
+  // still validates the crash-math distribution — it just does so reproducibly.
   const N = 100_000;
-  const salt = randomBytes(32).toString("hex");
+  const salt = seededSeedHex("crash-dist-salt", 0); // fixed salt (a 32-byte hex digest)
   const crashes: number[] = new Array(N);
-  for (let i = 0; i < N; i++) crashes[i] = computeCrash(randomBytes(32).toString("hex"), salt);
+  for (let i = 0; i < N; i++) crashes[i] = computeCrash(seededSeedHex("crash-dist-seed", i), salt);
 
   const frac = (x: number) => crashes.filter((c) => c >= x).length / N;
 

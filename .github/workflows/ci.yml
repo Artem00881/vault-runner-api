@@ -88,6 +88,19 @@ jobs:
       - name: Tests
         run: bun test
 
+      # MONEY-INVARIANT / RECONCILE GATE (audit F-018). Two layers:
+      #  1. The DETERMINISTIC gate runs INSIDE `bun test` above —
+      #     test/reconcile-check.test.ts builds a fresh, fully-scoped book (cashout,
+      #     bust, void(refund), void(reclaim+refund), operator payout) and asserts the
+      #     6 reconcile-check invariants hold (0 discrepancies) over JUST those ids, so
+      #     it is reproducible on any DB (it never depends on global state). A regression
+      #     that broke the money definition (e.g. a mis-typed void leg) fails the suite.
+      #  2. This step is the GLOBAL belt-and-braces: on the ephemeral CI Postgres (empty +
+      #     migrated, and the suites tear their rows down FK-safe) the WHOLE-DB reconcile
+      #     must also net to 0. It exits non-zero on any money discrepancy, gating the merge.
+      - name: Money-invariant reconcile gate (whole-DB, after the self-cleaning suite)
+        run: bun scripts/reconcile-check.ts
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

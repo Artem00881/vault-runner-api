@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll, beforeAll } from "bun:test";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { FairnessService } from "../src/fairness/fairness.service";
 import type { SaltProvider, SaltCommitment } from "../src/fairness/salt.provider";
@@ -36,8 +36,39 @@ const meteredFairness = new FairnessService(prisma, meteredFake, makeAudit(prism
 
 const createdChainIds: string[] = [];
 const createdRoundIds: string[] = [];
+
+// F-072: park-and-restore the live servable state so the isolated variant runs the real
+// cold-start → pre-commit → arm → promote flow on a dirty DB (the H3 park pattern below).
+const PARK = "test_parked_orch";
+const parked: { id: string; status: string }[] = [];
+
+async function activeEpochExists(): Promise<boolean> {
+  const a = await prisma.fairnessChain.findFirst({ where: { status: "active" } });
+  return !!(a && a.length > 8);
+}
+
+async function parkServable() {
+  const servable = await prisma.fairnessChain.findMany({ where: { status: { in: ["active", "armed", "pending"] } } });
+  for (const c of servable) {
+    parked.push({ id: c.id, status: c.status });
+    await prisma.fairnessChain.update({ where: { id: c.id }, data: { status: PARK } });
+  }
+}
+
+async function restoreParked() {
+  for (const p of parked) {
+    await prisma.fairnessChain.update({ where: { id: p.id }, data: { status: p.status } }).catch(() => {});
+  }
+  parked.length = 0;
+}
+
+beforeAll(async () => {
+  await prisma.$connect();
+});
+
 afterAll(async () => {
   try {
+    await restoreParked(); // belt-and-braces if a test threw before restoring
     if (createdRoundIds.length) await prisma.round.deleteMany({ where: { id: { in: createdRoundIds } } });
     if (createdChainIds.length) {
       await prisma.fairnessSeed.deleteMany({ where: { chainId: { in: createdChainIds } } });
@@ -61,49 +92,79 @@ async function exhaust(chainId: string) {
   }
 }
 
-test("block-salt: cold-start random fallback, then pre-commit → arm → promote a block epoch", async () => {
-  const existingActive = await prisma.fairnessChain.findFirst({ where: { status: "active" } });
-  if (existingActive && existingActive.length > 8) {
-    console.warn("active epoch present — skipping block-salt orchestration test (run on a clean DB / CI)");
-    return;
-  }
+/**
+ * The cold-start → pre-commit → arm → promote orchestration assertions, parameterized
+ * by a (service, provider) pair so it can run against either the module-level instances
+ * (clean-DB variant) or a fresh pair after parkServable() (isolated variant). MUST be
+ * called when ensureActiveChain() will cold-start a fresh active epoch.
+ */
+async function assertColdStartArmPromote(svc: FairnessService, provider: FakeBlockProvider) {
   process.env.FAIRNESS_CHAIN_LENGTH = "3";
+  delete process.env.FAIRNESS_REQUIRE_BLOCK_SALT; // non-strict: cold start uses the random fallback
 
   // Cold start: the block salt isn't ready, so play starts on a RANDOM fallback epoch.
-  await fairness.ensureChain();
-  const cur = await fairness.getCurrentCommit();
+  provider.ready = false;
+  await svc.ensureChain();
+  const cur = await svc.getCurrentCommit();
   expect(cur!.saltSource).toBe("random");
   const ep0 = await prisma.fairnessChain.findFirst({ where: { epoch: cur!.epoch } });
   createdChainIds.push(ep0!.id);
 
   // maintain() pre-commits the NEXT epoch as a PENDING block-salt epoch (future block published).
-  await fairness.maintain();
-  const pending = await prisma.fairnessChain.findFirst({ where: { status: "pending" } });
+  await svc.maintain();
+  const pending = await prisma.fairnessChain.findFirst({ where: { status: "pending" }, orderBy: { epoch: "desc" } });
   expect(pending!.saltSource).toBe("eth-block");
   expect(pending!.targetBlock).not.toBeNull();
   expect(pending!.salt).toBeNull();
   createdChainIds.push(pending!.id);
 
   // Block not finalized yet → stays pending.
-  fake.ready = false;
-  await fairness.maintain();
+  provider.ready = false;
+  await svc.maintain();
   expect((await prisma.fairnessChain.findUnique({ where: { id: pending!.id } }))!.status).toBe("pending");
 
   // Block finalizes → maintain() arms it (salt set, status "armed").
-  fake.ready = true;
-  await fairness.maintain();
+  provider.ready = true;
+  await svc.maintain();
   const armed = await prisma.fairnessChain.findUnique({ where: { id: pending!.id } });
   expect(armed!.status).toBe("armed");
   expect(armed!.salt).toBe(BLOCK_HASH);
 
   // Exhaust the active epoch → rollover promotes the armed block-salt epoch.
   await exhaust(ep0!.id);
-  const seed = await fairness.allocateSeed();
-  expect(seed.chain.salt).toBe(BLOCK_HASH); // now serving the block-hash salt
-  const active = await prisma.fairnessChain.findFirst({ where: { status: "active" } });
+  const seed = await svc.allocateSeed();
+  expect(seed).not.toBeNull();
+  expect(seed!.chain.salt).toBe(BLOCK_HASH); // now serving the block-hash salt
+  const active = await prisma.fairnessChain.findFirst({ where: { status: "active" }, orderBy: { epoch: "desc" } });
   expect(active!.id).toBe(armed!.id);
   expect(active!.saltSource).toBe("eth-block");
-  expect(fairness.crashForSeed(seed)).toBe(computeCrash(seed.seed!, BLOCK_HASH));
+  expect(svc.crashForSeed(seed!)).toBe(computeCrash(seed!.seed!, BLOCK_HASH));
+}
+
+// Resolve the dirty-DB gate ONCE at module load (top-level await) for test.skipIf.
+const ACTIVE_EPOCH_EXISTS = await activeEpochExists();
+
+// HONEST SKIP on a dirty DB (was a vacuous early-return that passed with 0 assertions —
+// F-072). Runs on a clean DB / CI against the module-level fake/fairness instances.
+test.skipIf(ACTIVE_EPOCH_EXISTS)(
+  "block-salt: cold-start random fallback, then pre-commit → arm → promote a block epoch",
+  async () => {
+    await assertColdStartArmPromote(fairness, fake);
+  },
+);
+
+// UNCONDITIONAL DB-isolated variant (F-072): parks the live servable state and uses a
+// FRESH service+provider pair, so the full cold-start → arm → promote flow is exercised
+// on EVERY run (even the dirty dev DB). Restores the live state afterward.
+test("block-salt: cold-start → pre-commit → arm → promote a block epoch [isolated]", async () => {
+  await parkServable();
+  const isoProvider = new FakeBlockProvider();
+  const isoFairness = new FairnessService(prisma, isoProvider, makeAudit(prisma));
+  try {
+    await assertColdStartArmPromote(isoFairness, isoProvider);
+  } finally {
+    await restoreParked();
+  }
 });
 
 // ---------------------------------------------------------------------------
