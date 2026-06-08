@@ -214,21 +214,40 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   /**
    * Close ONE open round and refund its still-active bets — the shared close+refund
    * primitive used by recoverInterruptedRounds() AND by the resume path's fallback for
-   * anomalous/corrupt rows. Idempotent: the `bet:{id}:restart_refund` credit key dedups in
-   * the ledger, so a double boot (or a resume that later re-closes) can never double-pay.
-   * Only `active` bets carry a live debit to refund; cashed_out/busted/cancelled are
+   * anomalous/corrupt rows. F-003: the refund goes through `wallet$.reverse` (rollback-of-
+   * original), so in OPERATOR mode it rolls back the original stake-debit (no GGR-inflating
+   * `win`); in INTERNAL mode it posts a `refund` credit under the idempotent
+   * `bet:{id}:restart_refund` key (unchanged behaviour), so a double boot (or a resume that
+   * later re-closes) can never double-pay. Only `active` bets carry a live debit to refund;
+   * cashed_out/busted/cancelled are
    * terminal and untouched. The round is force-marked `completed` (it never reached a real
    * settlement). NOTE: this refunds — it does NOT honor a deterministic crash — so it is
    * only ever used when a round is UNRESUMABLE (corrupt/ancient/anomalous), never as the
    * normal path for a healthy in-flight round.
    */
   private async closeAndRefundRound(roundId: string) {
-    const activeBets = await this.prisma.bet.findMany({ where: { roundId, status: "active" } });
+    const activeBets = await this.prisma.bet.findMany({
+      where: { roundId, status: "active" },
+      // F-003: select the bet's (round,user,panel) so we can target the ORIGINAL stake-debit
+      // key for the reversal below (mirrors the void-refund leg in performVoidReversals).
+      select: { id: true, walletId: true, amount: true, roundId: true, userId: true, panel: true },
+    });
     for (const bet of activeBets) {
       try {
-        await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:restart_refund`, {
-          refType: "bet",
-          refId: bet.id,
+        // F-003: refund the still-`active` stake via REVERSE (rollback-of-original), NOT a fresh
+        // credit. In OPERATOR mode a credit routed to `move("win")`, recording a brand-new
+        // win/turnover and inflating GGR; the correct accounting is to roll back the original
+        // `…:debit` on the operator's statement (no new turnover) — exactly what a void refund
+        // does. In INTERNAL/demo mode this is behaviourally identical to before: the ledger posts
+        // a `refund` CREDIT under the same `bet:{id}:restart_refund` key (idempotent — a double
+        // boot still can't double-pay). Mirrors performVoidReversals' stake-refund leg.
+        await this.wallet$.reverse(bet.walletId, {
+          originalKey: `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`,
+          reverseKey: `bet:${bet.id}:restart_refund`,
+          amount: bet.amount,
+          originalDirection: "debit",
+          type: "refund",
+          ref: { refType: "bet", refId: bet.id },
         });
         await this.prisma.bet.update({
           where: { id: bet.id },

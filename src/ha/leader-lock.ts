@@ -13,8 +13,11 @@
  * and fenced off before any write. Redis carries an advisory-only MIRROR of the
  * lease (fast follower reads); Postgres always wins on disagreement.
  *
- * Phase 4.5a ships these primitives ADDITIVE and UNWIRED — nothing calls
- * engine.start()/stop() yet (that is 4.5b).
+ * These primitives shipped ADDITIVE in 4.5a and are WIRED LIVE since 4.5b: the engine
+ * subscribes to ElectionService and drives start()/stop() off leadership
+ * (game-engine.service.ts onModuleInit). On the single-node prod deploy one node wins the
+ * lock on boot and runs the loop; the election machinery is what makes a multi-node
+ * failover seamless.
  */
 export interface LeaderLock {
   /**

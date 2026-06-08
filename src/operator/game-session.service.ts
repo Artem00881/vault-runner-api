@@ -1,4 +1,4 @@
-import { Injectable, Inject } from "@nestjs/common";
+import { Injectable, Inject, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
@@ -112,18 +112,31 @@ export class GameSessionService {
     }
 
     // Consume the jti by recording the session (unique launchJti enforces
-    // one-time use; a replayed token hits the unique constraint).
-    const session = await this.prisma.gameSession.create({
-      data: {
-        operatorId: v.operatorId,
-        playerId: v.playerId,
-        currency,
-        locale: v.locale,
-        walletId: wallet.id,
-        demo,
-        launchJti: v.jti,
-      },
-    });
+    // one-time use; a replayed token hits the unique constraint). F-012: a CONCURRENT
+    // double-submit of the same valid token has both calls pass verify() (jti still
+    // unused), then the second loses the unique `launchJti` race → P2002. The one-time-use
+    // invariant HOLDS (exactly one session per jti, no double-launch, no money effect) — we
+    // just map the loser's P2002 to a clean 401 instead of letting it surface as a 500 +
+    // Sentry noise. Any non-P2002 error still propagates.
+    let session;
+    try {
+      session = await this.prisma.gameSession.create({
+        data: {
+          operatorId: v.operatorId,
+          playerId: v.playerId,
+          currency,
+          locale: v.locale,
+          walletId: wallet.id,
+          demo,
+          launchJti: v.jti,
+        },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        throw new UnauthorizedException("launch_token_already_used");
+      }
+      throw e;
+    }
 
     // Demo (fun-mode) wallet: reset to the FULL play-money bankroll on EACH launch
     // (operator chose reset-on-relaunch). Idempotent per launch via the unique

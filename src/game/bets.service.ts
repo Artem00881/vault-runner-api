@@ -10,6 +10,7 @@ import { AuditEventService } from "../audit/audit-event.service";
 import type { EffectiveRg } from "../operator/rg-config";
 import { isWageredStatus, isWonStatus } from "../common/bet-status";
 import { floorPayout } from "../common/money";
+import { shortId } from "../common/log-redact";
 
 export type Panel = "A" | "B";
 
@@ -80,7 +81,8 @@ const RESERVING_ALERT_SEC = Number(process.env.RESERVING_ALERT_SEC ?? 600);
  *  metric so a cross-user probe pattern is alertable, not buried in bet_failed (L-2). */
 class WalletOwnershipError extends Error {
   constructor(walletId: string, userId: string) {
-    super(`wallet ${walletId} does not belong to user ${userId}`);
+    // F-069: redact the pseudonymous ids — this message is interpolated into a warn log.
+    super(`wallet ${shortId(walletId)} does not belong to user ${shortId(userId)}`);
   }
 }
 
@@ -196,7 +198,7 @@ export class BetsService {
     if (existing && existing.status !== "reserving") return { ok: false, reason: "already_bet", panel };
 
     const wallet = await this.wallet(userId, walletId).catch((e: any) => {
-      this.log.warn(`placeBet wallet resolution failed for user ${userId}: ${e?.message}`);
+      this.log.warn(`placeBet wallet resolution failed for user ${shortId(userId)}: ${e?.message}`); // F-069: redact pseudonymous userId in logs
       // Distinct label for a cross-user/mismatched walletId so it's alertable (L-2);
       // the client still sees a generic bet_failed (no info leak).
       this.metrics.recordRejected(e instanceof WalletOwnershipError ? "wallet_owner_mismatch" : "bet_failed");
@@ -223,9 +225,18 @@ export class BetsService {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${roundId}))`;
         const roundBets = await tx.bet.findMany({
           where: { roundId, status: { in: ["active", "reserving"] } },
-          select: { amount: true, walletId: true, status: true },
+          select: { amount: true, walletId: true, status: true, currency: true },
         });
-        const currentExposure = roundBets.reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
+        // F-004: the round is shared across currencies, but there is no FX table — summing raw
+        // minor units of EUR + BTC + sats into one cap is meaningless (it would let many small-
+        // minor-unit high-value bets slip past the bankroll breaker). Accumulate + cap exposure
+        // PER CURRENCY: only the bets in THIS bet's currency count toward the cap it's checked
+        // against. The new bet's currency is the wallet's canonical (uppercased) code — the same
+        // value stamped on the Bet row below — so the accumulator and the new bet always agree.
+        const ccy = wallet.currency.toUpperCase();
+        const currentExposure = roundBets
+          .filter((b) => b.currency === ccy)
+          .reduce((sum, b) => sum + this.risk.potentialPayout(b.amount), 0n);
         const expCheck = this.risk.checkRoundExposure(currentExposure, amt);
         if (!expCheck.ok) { rejectReason = expCheck.reason; throw new Error("reserve_rejected"); }
 

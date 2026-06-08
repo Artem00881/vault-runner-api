@@ -23,6 +23,7 @@ import { ElectionService } from "../ha/election.service";
 import { WalletRollbackService } from "../wallet/wallet-rollback.service";
 import { OPERATOR_WALLET_API } from "../wallet/wallet-provider";
 import type { OperatorWalletApi } from "../wallet/operator-wallet.types";
+import { shortId } from "../common/log-redact";
 
 function userRoom(userId: string) {
   return `user:${userId}`;
@@ -309,7 +310,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
             try {
               acc = await this.bets.sessionAccounting(walletId, new Date(startedAt));
             } catch (e: any) {
-              this.log.warn(`RG accounting failed for ${userId}: ${e?.message}`);
+              this.log.warn(`RG accounting failed for ${shortId(userId)}: ${e?.message}`); // F-069: redact pseudonymous userId
             }
           }
           this.server.to(userRoom(userId)).emit("reality_check", {
@@ -447,7 +448,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
           // A signed token carried RG but no usable sessionStartedAt — impossible via the
           // real mint path (both are set together), so log it so a future regression that
           // would silently drop the RG controls is visible rather than failing open quietly.
-          this.log.warn(`operator session token carried RG but no valid sessionStartedAt — RG NOT applied for user ${userId}`);
+          this.log.warn(`operator session token carried RG but no valid sessionStartedAt — RG NOT applied for user ${shortId(userId)}`); // F-069: redact pseudonymous userId
         }
         client.join(userRoom(userId));
         // one active game socket per user — drop any previous one (multi-tab abuse)

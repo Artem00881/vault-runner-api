@@ -103,9 +103,10 @@ export class RiskService {
 
   /**
    * Worst-case potential payout of a bet = the most the house could owe:
-   * min(amount × maxMultiplier, maxWinPerBet). GLOBAL by design — it feeds only
-   * the round-exposure circuit-breaker (a currency-agnostic house safeguard), so
-   * it intentionally does NOT take a per-currency override.
+   * min(amount × maxMultiplier, maxWinPerBet), in the bet's own minor units. Feeds the
+   * round-exposure circuit-breaker, which the caller now accumulates + caps PER CURRENCY
+   * (F-004) — so this intentionally does NOT take a per-currency override (the cap config
+   * is one ceiling applied independently to each currency's accumulator).
    */
   potentialPayout(amount: bigint): bigint {
     const uncapped = amount * BigInt(this.limits.maxMultiplier);
@@ -113,15 +114,18 @@ export class RiskService {
   }
 
   /**
-   * Would adding `amount` to a round whose committed exposure is
-   * `currentExposure` exceed the round cap? Reject the bet BEFORE the round runs
-   * if so (the circuit breaker for bankroll). GLOBAL/house-level.
+   * Would adding `amount` to a round exceed the round cap, given `currentExposure` =
+   * the already-committed worst-case payout FOR THE SAME CURRENCY as `amount`? Reject
+   * the bet BEFORE the round runs if so (the bankroll circuit breaker).
    *
-   * TODO(phase-later): per-currency exposure caps / FX. The round is shared across
-   * operators AND currencies; you can't sum mixed-currency worst-case payouts
-   * (EUR + BTC + USDT) into one cap without exchange rates. So this stays a single
-   * currency-agnostic minor-unit house safeguard for now (the live demo is
-   * single-currency; per-currency PER-BET limits above are the Phase-3 win).
+   * F-004: this is now applied PER CURRENCY. The round is shared across currencies and
+   * there is no FX table, so summing mixed-currency worst-case payouts (EUR + BTC + USDT)
+   * into one cap is meaningless. The caller (BetsService) therefore accumulates exposure
+   * separately per currency and calls this with only the new bet's-currency accumulator,
+   * checked against the single `maxRoundExposure` ceiling applied independently to each
+   * currency. (The same minor-unit ceiling is intentionally reused per currency — without
+   * FX there is no single real-value bound, and a per-currency `maxRoundExposure` table can
+   * layer on later; this already closes the cross-currency under-reservation gap.)
    */
   checkRoundExposure(
     currentExposure: bigint,

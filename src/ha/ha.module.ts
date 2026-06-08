@@ -6,13 +6,15 @@ import { PgAdvisoryLock } from "./pg-advisory-lock";
 import type { LeaderLock } from "./leader-lock";
 
 /**
- * Phase 4.5a — engine HA module.
+ * Engine HA module (Phase 4.5a primitives, WIRED LIVE since Phase 4.5b).
  *
- * INTENTIONALLY NOT IMPORTED into AppModule in 4.5a. The primitives (ElectionService
- * + the Postgres advisory `LeaderLock`) exist, are unit-tested, and are ready to wire,
- * but importing this would start election + change start/stop semantics — that is 4.5b,
- * which needs the money-path-auditor / fairness-verifier sign-off. Leaving it unimported
- * keeps the running single-node game byte-for-byte unchanged.
+ * WIRED: imported by AppModule (and via GameModule), so `ElectionService` is
+ * constructed at boot and the engine drives start()/stop() off its
+ * `leader-acquired`/`leader-lost` events (see game-engine.service.ts onModuleInit).
+ * The 4.5b wiring landed with the money-path-auditor / fairness-verifier sign-off.
+ * NOTE: prod runs SINGLE-NODE — one node simply wins the lock on boot and starts the
+ * loop, so the net single-node behaviour is unchanged from the pre-4.5b code path; the
+ * election machinery is what makes a multi-node deploy seamless-failover-safe.
  *
  * The factory builds the real `PgAdvisoryLock`: a DEDICATED `pg.Client` from
  * DATABASE_URL (never the pooled Prisma client) + the shared Redis client as the

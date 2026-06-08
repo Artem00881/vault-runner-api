@@ -20,7 +20,8 @@ import type { LeaderLock } from "./leader-lock";
  * race. We set aggressive TCP keepalives so that teardown is ~3s, not the OS default
  * of minutes, which (with the follower poll) is how we hit the <5s failover SLA.
  *
- * ADDITIVE/UNWIRED in 4.5a: nothing constructs this in the running app yet.
+ * WIRED LIVE since 4.5b: HaModule's factory constructs this in the running app (a
+ * dedicated pg.Client), and ElectionService drives engine start()/stop() off it.
  */
 export class PgAdvisoryLock implements LeaderLock {
   private readonly log = new Logger(PgAdvisoryLock.name);

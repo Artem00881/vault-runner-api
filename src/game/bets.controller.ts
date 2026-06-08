@@ -31,11 +31,15 @@ function serialize(b: {
 export class BetsController {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  /** Active bets (for resync after a reconnect). */
+  /** Active bets (for resync after a reconnect). Includes `payout_pending` (F-071): a bet
+   *  that WON but whose operator payout hasn't confirmed is still owed money the reconnecting
+   *  player must see ("win pending confirmation") — its `payout` is serialized so the UI can
+   *  show the owed amount. Money is safe either way (the reconciler keeps retrying); this is a
+   *  player-facing display fix. Read-only. */
   @Get("active")
   async active(@CurrentUserId() userId: string) {
     const rows = await this.prisma.bet.findMany({
-      where: { userId, status: "active" },
+      where: { userId, status: { in: ["active", "payout_pending"] } },
       orderBy: { createdAt: "desc" },
     });
     return rows.map(serialize);

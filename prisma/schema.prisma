@@ -110,6 +110,10 @@ model LedgerTransaction {
   wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Restrict) // F-017: the money journal is retained — never cascade-delete
 
   @@index([walletId, createdAt(sort: Desc)])
+  // F-020: index the reconcile/forensic lookup by reference (e.g. `WHERE ref_type='bet' AND
+  // ref_id=<uuid>` in scripts/reconcile-check.ts). Without it those joins seq-scan at scale.
+  // The hot money path is unaffected (it dedups via the unique idempotency_key).
+  @@index([refType, refId])
   @@map("ledger_transactions")
 }
 
