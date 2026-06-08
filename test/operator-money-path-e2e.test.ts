@@ -11,6 +11,7 @@ import { GameSessionService } from "../src/operator/game-session.service";
 import { WalletRouter } from "../src/wallet/wallet-router";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { MockOperator } from "./helpers/mock-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Item 2 — the missing real-money money-path e2e (DB-backed, OPERATOR seamless wallet).
@@ -57,7 +58,7 @@ const ledger = new LedgerService(prisma);
 const risk = new RiskService();
 const metrics = new MetricsService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // The in-process OPERATOR wallet (source of truth for real money). Balances are
 // keyed `${playerId}:${currency}`; seeded per-launch below.
@@ -76,7 +77,7 @@ const fakeEngine: any = {
   getPublicState: () => ({ roundId: activeRoundId, phase, phaseEndsAt: Date.now() + 60_000, multiplier: liveMult, serverTime: Date.now() }),
   currentMultiplier: () => liveMult,
 };
-const bets = new BetsService(prisma, router, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, router, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];

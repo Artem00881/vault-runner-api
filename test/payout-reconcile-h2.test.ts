@@ -11,6 +11,7 @@ import { BetsService } from "../src/game/bets.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
 import { startSandboxOperator, type SandboxOperator } from "./helpers/sandbox-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit H2 — reconcilePendingPayouts() completes a stuck operator payout.
@@ -31,7 +32,7 @@ const JWT_SECRET = "h2-reconcile-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 const risk = new RiskService();
 const metrics = new MetricsService();
 
@@ -130,7 +131,7 @@ function operatorBets(sandbox: SandboxOperator, timeoutMs = 200) {
   );
   // maxRetries:1 so one armed sandbox timeout fully exhausts retries this pass.
   const provider = new SeamlessOperatorWallet(client, sessions.resolver(), { maxRetries: 1 });
-  return new BetsService(prisma, provider, stubEngine, risk, metrics);
+  return new BetsService(prisma, provider, stubEngine, risk, metrics, makeAudit(prisma, metrics));
 }
 
 beforeAll(async () => {

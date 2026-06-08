@@ -9,6 +9,7 @@ import { GameEngineService } from "../src/game/game-engine.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
 import { startSandboxOperator, type SandboxOperator } from "./helpers/sandbox-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit H1 re-review, Finding 1 (OPERATOR mode): money is NEVER
@@ -43,7 +44,7 @@ const JWT_SECRET = "h1-op-reserving-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 const redisStub: any = { client: { set: async () => {} } };
 const fairnessStub: any = {};

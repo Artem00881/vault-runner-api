@@ -12,6 +12,7 @@ import { GameSessionService } from "../src/operator/game-session.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
 import { startSandboxOperator, type SandboxOperator } from "./helpers/sandbox-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit Low-1 (CLAIM-FIRST, gate-independent reserving recovery).
@@ -58,7 +59,7 @@ const recover = () => (internalEngine as any).recoverInterruptedRounds();
 const OP_JWT_SECRET = "low1-claim-first-op-secret";
 const jwt = new JwtService({ secret: OP_JWT_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Deterministic debit key recovery treats as the source of truth.
 const debitKey = (roundId: string, userId: string, panel: string) =>
@@ -282,7 +283,7 @@ test("Low-1: placeBet loses the flip CAS (slot reclaimed) → ok:false, no phant
     }),
     currentMultiplier: () => 1.0,
   };
-  const bets = new BetsService(reclaimedPrisma, ledger, fakeEngine, risk, metrics);
+  const bets = new BetsService(reclaimedPrisma, ledger, fakeEngine, risk, metrics, makeAudit(reclaimedPrisma, metrics));
 
   const betsBefore = await counterValue(metrics.betsTotal);
 

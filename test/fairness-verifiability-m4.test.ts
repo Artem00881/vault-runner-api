@@ -6,6 +6,7 @@ import { FairnessController } from "../src/fairness/fairness.controller";
 import { DailySaltProvider } from "../src/fairness/salt.provider";
 import { generateSeedChain } from "../src/fairness/seed-chain";
 import { computeCrash, sha256Hex } from "../src/fairness/crash";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit M4 — provably-fair API verifiability (regression).
@@ -26,7 +27,7 @@ import { computeCrash, sha256Hex } from "../src/fairness/crash";
 
 const prisma = new PrismaService();
 const salt = new DailySaltProvider();
-const fairness = new FairnessService(prisma, salt);
+const fairness = new FairnessService(prisma, salt, makeAudit(prisma));
 const controller = new FairnessController(fairness, prisma);
 
 // Distinct synthetic epochs per case (epoch is UNIQUE; well above live data).

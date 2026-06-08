@@ -6,6 +6,7 @@ import { GameEngineService } from "../src/game/game-engine.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit H1 *review* (stranded-debit): money is NEVER destroyed
@@ -262,7 +263,7 @@ test("H1: real placeBet — debit succeeds but activation update throws → bet 
   // BetsService uses failingPrisma for its own writes, but the REAL ledger (over
   // the real prisma) for the debit — so the money genuinely moves and recovery
   // (also real prisma) can find the debit row.
-  const bets = new BetsService(failingPrisma, ledger, fakeEngine, risk, metrics);
+  const bets = new BetsService(failingPrisma, ledger, fakeEngine, risk, metrics, makeAudit(failingPrisma, metrics));
 
   const res = await bets.placeBet(userId, "A", 100);
 

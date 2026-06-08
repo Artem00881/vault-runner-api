@@ -38,7 +38,16 @@ services:
       - redisdata:/data
 
   api:
-    build: .
+    build:
+      context: .
+      # Build/version traceability (audit F-059). Forwarded to the image so /version +
+      # the vaultrun_build_info metric report the running commit. Set them in the env
+      # before `./op-compose.sh up -d --build` (see DEPLOY.md §5):
+      #   export GIT_SHA=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%FT%TZ)
+      # Unset → "unknown" (identical to the prior behaviour).
+      args:
+        GIT_SHA: "${GIT_SHA:-unknown}"
+        BUILD_TIME: "${BUILD_TIME:-unknown}"
     container_name: vaultrun-api
     restart: unless-stopped
     # No env_file — secrets come from 1Password via op-compose.sh (op run), and

@@ -5,6 +5,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
 import { LedgerService } from "../src/wallet/ledger.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3.6 — launch response decimals + locale normalization (DB-backed). Mirrors the
@@ -22,7 +23,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 const prisma = new PrismaService();
 const jwt = new JwtService({ secret: "locale-decimals-secret" });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 const createdOperatorIds: string[] = [];
 

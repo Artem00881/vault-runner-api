@@ -5,6 +5,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit H1 (round exposure cap is racy / bypassable by parallel
@@ -62,7 +63,7 @@ const fakeEngine: any = {
   currentMultiplier: () => 1.0,
 };
 
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // Test parameters, derived from the env the suite is run with. We DON'T hardcode
 // the cap — we read RiskService's resolved limits so the assertions stay true even

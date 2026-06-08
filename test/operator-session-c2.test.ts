@@ -8,6 +8,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { startSandboxOperator } from "./helpers/sandbox-operator";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit C2 — multi-tenant money path, end-to-end.
@@ -32,7 +33,7 @@ const JWT_SECRET = "c2-session-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Track everything we create for FK-safe teardown.
 const createdOperatorIds: string[] = [];

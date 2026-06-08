@@ -3,6 +3,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { FairnessService } from "../src/fairness/fairness.service";
 import type { SaltProvider, SaltCommitment } from "../src/fairness/salt.provider";
 import { computeCrash } from "../src/fairness/crash";
+import { makeAudit } from "./helpers/audit";
 
 const prisma = new PrismaService();
 
@@ -24,7 +25,7 @@ class FakeBlockProvider implements SaltProvider {
 
 const BLOCK_HASH = "0x" + "ab".repeat(32);
 const fake = new FakeBlockProvider();
-const fairness = new FairnessService(prisma, fake);
+const fairness = new FairnessService(prisma, fake, makeAudit(prisma));
 
 const createdChainIds: string[] = [];
 const createdRoundIds: string[] = [];

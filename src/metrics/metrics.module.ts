@@ -1,6 +1,7 @@
 import { Global, Module } from "@nestjs/common";
 import { MetricsService } from "./metrics.service";
 import { MetricsController } from "./metrics.controller";
+import { VersionController } from "./version.controller";
 
 /**
  * Global so any service (bets, gateway, engine) can record metrics by injecting
@@ -8,7 +9,7 @@ import { MetricsController } from "./metrics.controller";
  */
 @Global()
 @Module({
-  controllers: [MetricsController],
+  controllers: [MetricsController, VersionController],
   providers: [MetricsService],
   exports: [MetricsService],
 })

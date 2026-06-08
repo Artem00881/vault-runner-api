@@ -71,10 +71,23 @@ Deploy through the **`op-compose.sh`** wrapper so secrets are injected from
 directly in prod — it will fail the `:?` guard with "POSTGRES_PASSWORD not set".
 
 ```bash
+# Build/version traceability (F-059): stamp the image with the git commit + build
+# time so GET /version and the vaultrun_build_info metric report the running build.
+# (Unset → "unknown"; behaviour is otherwise identical.)
+export GIT_SHA=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%FT%TZ)
 ./op-compose.sh up -d --build
 ```
 This builds the API image, starts Postgres + Redis, runs database migrations
-automatically, and starts the server on port **3001**.
+automatically, and starts the server on port **3001**. `docker-compose.prod.yml`
+forwards `GIT_SHA`/`BUILD_TIME` as build args; verify after deploy with
+`curl -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:3001/version`
+(gated by the same `METRICS_TOKEN` as `/metrics`; unset = open on the loopback origin).
+
+> **Audit-log immutability (F-058 ops follow-up):** the `audit_events` table is
+> APPEND-ONLY — the app only ever INSERTs. To make that enforced, once the app DB
+> role is provisioned run (as the DB owner):
+> `REVOKE UPDATE, DELETE ON "audit_events" FROM <app_role>;`
+> so a compromised app credential cannot rewrite or erase the significant-event trail.
 
 Check it:
 ```bash

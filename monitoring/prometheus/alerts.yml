@@ -94,6 +94,18 @@ groups:
           summary: "Error rate elevated"
           description: "Handled errors > 1/s for 5 minutes."
 
+      # Significant-event audit log dropping writes (F-058). The audit write is
+      # BEST-EFFORT (it never breaks a money/operator/fairness action), so a failure
+      # increments this counter instead of throwing. Any firing means the immutable
+      # "who did what, when" trail GLI-19 expects has GAPS — investigate the DB/app.
+      - alert: AuditEventWriteFailing
+        expr: increase(vaultrun_audit_event_write_failures_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Audit-log writes are failing (significant-event trail has gaps)"
+          description: "{{ $value }} significant-event audit-log write(s) failed in 5m (F-058). The action still proceeded (best-effort), but the append-only audit trail is dropping events — check the DB/app."
+
       - alert: HostDiskLow
         expr: min(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) < 0.15
         for: 10m

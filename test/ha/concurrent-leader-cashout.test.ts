@@ -5,6 +5,7 @@ import { LedgerService } from "../../src/wallet/ledger.service";
 import { RiskService } from "../../src/game/risk.service";
 import { MetricsService } from "../../src/metrics/metrics.service";
 import { BetsService, type Panel } from "../../src/game/bets.service";
+import { makeAudit } from "../helpers/audit";
 
 /**
  * Phase 4.5c.1 — CONCURRENT LEADER-OVERLAP (the soft race) regression. The money-path-auditor
@@ -64,7 +65,7 @@ function makeEngineStub(roundId: string, liveMult: number): any {
 
 /** A live BetsService bound to ONE node's engine stub but the SHARED real Prisma + ledger. */
 function makeBets(engineStub: any): BetsService {
-  return new BetsService(prisma, ledger as any, engineStub, risk, metrics);
+  return new BetsService(prisma, ledger as any, engineStub, risk, metrics, makeAudit(prisma, metrics));
 }
 
 // ---- cleanup tracking (FK-safe) ----

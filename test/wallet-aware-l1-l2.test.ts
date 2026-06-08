@@ -7,6 +7,7 @@ import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
 import { WalletController } from "../src/wallet/wallet.controller";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit M-C2.1 follow-ups L-1 + L-2 (operator-aware wallet path).
@@ -62,7 +63,7 @@ const fakeEngine: any = {
   }),
   currentMultiplier: () => 1.0,
 };
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // Track synthetic rows for FK-safe cleanup. Users cascade their
 // wallets/ledger/profile/bets; we still null out the round refs first.

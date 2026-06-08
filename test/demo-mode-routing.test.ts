@@ -8,6 +8,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { WalletRouter } from "../src/wallet/wallet-router";
 import { MockOperator } from "./helpers/mock-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3 — demo / fun mode, the WalletRouter (THE money-safety boundary).
@@ -29,7 +30,7 @@ const jwt = new JwtService({ secret: "demo-routing-secret" });
 const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, ledger);
+const sessions = new GameSessionService(prisma, launch, jwt, ledger, makeAudit(prisma));
 
 const createdOperatorIds: string[] = [];
 const createdUserIds: string[] = [];
@@ -170,7 +171,7 @@ test("5b. FAIL-CLOSED: isDemoWallet PROPAGATES a lookup error (does not fail-ope
       },
     },
   };
-  const broken = new GameSessionService(brokenPrisma, launch, jwt, ledger);
+  const broken = new GameSessionService(brokenPrisma, launch, jwt, ledger, makeAudit(brokenPrisma));
   await expect(broken.isDemoWallet("any-wallet-id")).rejects.toThrow(/db down/);
 });
 

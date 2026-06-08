@@ -9,6 +9,7 @@ import { GameSessionService } from "../src/operator/game-session.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
 import { startSandboxOperator, type SandboxOperator } from "./helpers/sandbox-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Operator-hardening: the PERIODIC, AGE-GATED 'reserving' recovery sweep.
@@ -50,7 +51,7 @@ const internalEngine = new GameEngineService(prisma, redisStub, fairnessStub, le
 const OP_JWT_SECRET = "reserving-sweep-op-secret";
 const jwt = new JwtService({ secret: OP_JWT_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Deterministic debit key recovery treats as the source of truth.
 const debitKey = (roundId: string, userId: string, panel: string) =>

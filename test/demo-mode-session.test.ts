@@ -5,6 +5,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
 import { LedgerService } from "../src/wallet/ledger.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3 — demo / fun mode, session layer.
@@ -31,7 +32,7 @@ const jwt = new JwtService({ secret: "demo-session-secret" });
 const prisma = new PrismaService();
 const ledger = new LedgerService(prisma);
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, ledger);
+const sessions = new GameSessionService(prisma, launch, jwt, ledger, makeAudit(prisma));
 
 const createdOperatorIds: string[] = [];
 

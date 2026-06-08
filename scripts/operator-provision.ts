@@ -75,10 +75,36 @@ export interface ProvisionInput {
   strictCurrencies?: boolean; // Phase 3.6: throw (not warn) if a currency isn't in the canonical table
 }
 
+/** Append a significant-event audit row (F-058) from the CLI. Best-effort + standalone
+ *  (no Nest DI here): writes directly via the same PrismaClient the script already uses,
+ *  and NEVER throws — a provision must not fail because its audit line didn't land.
+ *  NEVER pass a secret value in before/after/meta (key rotation logs only a hash prefix). */
+async function recordAudit(
+  prisma: Pick<PrismaClient, "auditEvent">,
+  e: { action: string; targetId?: string; operatorId?: string; before?: unknown; after?: unknown; meta?: unknown },
+): Promise<void> {
+  try {
+    await prisma.auditEvent.create({
+      data: {
+        actor: "provision-cli",
+        action: e.action,
+        targetType: "operator",
+        targetId: e.targetId ?? null,
+        operatorId: e.operatorId ?? null,
+        before: (e.before ?? undefined) as any,
+        after: (e.after ?? undefined) as any,
+        meta: (e.meta ?? undefined) as any,
+      },
+    });
+  } catch (err) {
+    console.warn(`  ⚠ audit event write failed (best-effort, ignored): ${String(err)}`);
+  }
+}
+
 /** Create or update an operator (upsert by code). Returns the row, whether it was
  *  created, and the launchSecret ONLY when freshly generated (create or rotate). */
 export async function provisionOperator(
-  prisma: Pick<PrismaClient, "operator">,
+  prisma: Pick<PrismaClient, "operator" | "auditEvent">,
   input: ProvisionInput,
 ): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string; unknownCurrencies: string[] }> {
   // Canonicalise currency codes to UPPERCASE (ISO-4217) on write so the launch-time
@@ -138,6 +164,26 @@ export async function provisionOperator(
     update: patch,
   });
 
+  // Significant-event audit log (F-058). Record WHAT config changed — but NEVER a secret
+  // value: a rotated launchSecret is logged only as the flag `launchSecretRotated`, and
+  // walletApiKey is reduced to whether one is set. (The reporting-key rotation is its own
+  // event below.) on CREATE = operator.provision; on UPDATE = operator.config_update.
+  const sanitizedPatch: Record<string, unknown> = { ...patch };
+  if ("launchSecret" in sanitizedPatch) {
+    delete sanitizedPatch.launchSecret;
+    sanitizedPatch.launchSecretRotated = true;
+  }
+  if ("walletApiKey" in sanitizedPatch) sanitizedPatch.walletApiKey = input.walletApiKey ? "(set)" : "(cleared)";
+  await recordAudit(prisma, {
+    action: created ? "operator.provision" : "operator.config_update",
+    targetId: operator.id,
+    operatorId: operator.id,
+    after: created
+      ? { code: operator.code, name: operator.name, enabled: operator.enabled, demoEnabled: operator.demoEnabled, currencies: operator.currencies, walletApiSet: !!operator.walletApiKey }
+      : sanitizedPatch,
+    meta: { code: operator.code, unknownCurrencies },
+  });
+
   // Optional: mint/rotate the inbound REPORTING api key. The token embeds the operator
   // id (known only after the upsert), so we store its hash in a follow-up update and
   // return the plaintext token ONCE. Rotating invalidates any prior reporting key.
@@ -146,6 +192,15 @@ export async function provisionOperator(
     const { token, hash } = generateReportingKey(operator.id);
     await prisma.operator.update({ where: { id: operator.id }, data: { reportingApiKeyHash: hash } });
     reportingApiKey = token;
+    // F-058: record the rotation WITHOUT the token or the hash — only the self-describing
+    // algo prefix ("sha256:" / "hmac-sha256:") so an auditor sees that (and how) it happened.
+    const hashPrefix = hash.includes(":") ? `${hash.slice(0, hash.indexOf(":"))}:` : "(unknown)";
+    await recordAudit(prisma, {
+      action: "reporting_key.rotate",
+      targetId: operator.id,
+      operatorId: operator.id,
+      meta: { code: operator.code, hashPrefix },
+    });
   }
 
   return {

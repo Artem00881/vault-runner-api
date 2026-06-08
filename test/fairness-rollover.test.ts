@@ -3,9 +3,10 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { FairnessService } from "../src/fairness/fairness.service";
 import { DailySaltProvider } from "../src/fairness/salt.provider";
 import { computeCrash, sha256Hex } from "../src/fairness/crash";
+import { makeAudit } from "./helpers/audit";
 
 const prisma = new PrismaService();
-const fairness = new FairnessService(prisma, new DailySaltProvider());
+const fairness = new FairnessService(prisma, new DailySaltProvider(), makeAudit(prisma));
 
 const createdRoundIds: string[] = [];
 const createdChainIds: string[] = [];

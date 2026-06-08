@@ -24,5 +24,16 @@ ENV NODE_ENV=production
 ENV PORT=3001
 EXPOSE 3001
 
+# Build/version traceability (audit F-059). Pass at build time:
+#   --build-arg GIT_SHA=$(git rev-parse HEAD) --build-arg BUILD_TIME=$(date -u +%FT%TZ)
+# Unset → "unknown" (behaviour identical to before this fix). Promoted to ENV so the
+# running process (GET /version + the vaultrun_build_info metric) can read them, and
+# stamped as the standard OCI revision label on the image.
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_SHA=$GIT_SHA
+ENV BUILD_TIME=$BUILD_TIME
+LABEL org.opencontainers.image.revision=$GIT_SHA
+
 # Apply pending migrations, then start the server.
 CMD ["sh", "-c", "bunx prisma migrate deploy && bun run src/main.ts"]

@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { Registry, Counter, Gauge, Histogram, collectDefaultMetrics } from "prom-client";
+import { BUILD_VERSION, BUILD_COMMIT } from "../common/build-info";
 
 /**
  * Prometheus metrics — the server's "dashboard" (Phase 1.3). Exposes counters a
@@ -25,6 +26,10 @@ export class MetricsService {
   readonly cashoutsTotal: Counter;
   readonly roundsTotal: Counter;
   readonly errorsTotal: Counter;
+  // Significant-event audit-log write failures (F-058). The audit write is BEST-EFFORT
+  // (it must never break a money/operator action), so a failure increments this instead
+  // of throwing — a non-zero rate means the immutable audit trail is dropping events.
+  readonly auditEventWriteFailures: Counter;
 
   readonly wsConnections: Gauge;
   readonly realizedRtp: Gauge;
@@ -37,6 +42,11 @@ export class MetricsService {
   readonly reservingOldestSeconds: Gauge;
 
   readonly settlementLatency: Histogram;
+
+  // Build/version traceability (F-059). A constant gauge (value 1) whose LABELS carry
+  // the running commit + version, so a scrape (or a Grafana table) tells you exactly
+  // which build a node is on — the cert ask "trace a live node back to a git commit".
+  readonly buildInfo: Gauge;
 
   // running totals to compute the realized-RTP gauge
   private stakeSum = 0;
@@ -55,6 +65,7 @@ export class MetricsService {
     this.cashoutsTotal = new Counter({ name: "vaultrun_cashouts_total", help: "Successful cash-outs", registers: reg });
     this.roundsTotal = new Counter({ name: "vaultrun_rounds_total", help: "Rounds completed", registers: reg });
     this.errorsTotal = new Counter({ name: "vaultrun_errors_total", help: "Handled errors", labelNames: ["where"], registers: reg });
+    this.auditEventWriteFailures = new Counter({ name: "vaultrun_audit_event_write_failures_total", help: "Significant-event audit-log writes that failed (best-effort; the action still proceeded)", registers: reg });
 
     this.wsConnections = new Gauge({ name: "vaultrun_ws_connections", help: "Active WS connections", registers: reg });
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
@@ -69,6 +80,17 @@ export class MetricsService {
       buckets: [10, 25, 50, 100, 200, 500, 1000],
       registers: reg,
     });
+
+    // Build-info gauge (F-059): the metric value is always 1; the running build is
+    // carried in the labels. GIT_SHA/version default to "unknown" when the image was
+    // built without --build-arg GIT_SHA (behaviour identical to before this fix).
+    this.buildInfo = new Gauge({
+      name: "vaultrun_build_info",
+      help: "Build info (value always 1); the running commit + version are in the labels",
+      labelNames: ["commit", "version"],
+      registers: reg,
+    });
+    this.buildInfo.set({ commit: BUILD_COMMIT(), version: BUILD_VERSION }, 1);
   }
 
   /** Record a placed bet + its stake (updates realized-RTP denominator). */

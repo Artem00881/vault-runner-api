@@ -6,6 +6,7 @@ import { DailySaltProvider, EthBlockSaltProvider } from "../src/fairness/salt.pr
 import type { SaltProvider, SaltCommitment } from "../src/fairness/salt.provider";
 import { generateSeedChain } from "../src/fairness/seed-chain";
 import { sha256Hex } from "../src/fairness/crash";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit M6 regression: in real-money mode (FAIRNESS_REQUIRE_BLOCK_SALT=true) the
@@ -49,7 +50,7 @@ class FakeBlockProvider implements SaltProvider {
 }
 
 const fake = new FakeBlockProvider();
-const fairness = new FairnessService(prisma, fake);
+const fairness = new FairnessService(prisma, fake, makeAudit(prisma));
 
 const SYNTH_BASE = 3_000_000; // synthetic epoch floor — never collides with live chains
 

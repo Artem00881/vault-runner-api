@@ -12,6 +12,7 @@ import { BetsService } from "../src/game/bets.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { HttpOperatorWalletApi } from "../src/wallet/http-operator-wallet";
 import { startSandboxOperator, type SandboxOperator } from "./helpers/sandbox-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit H2 (operability) — the pending-payout BACKLOG REPORTING.
@@ -40,7 +41,7 @@ const JWT_SECRET = "h2-backlog-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 const risk = new RiskService();
 const metrics = new MetricsService();
 
@@ -148,7 +149,7 @@ function operatorBets(sandbox: SandboxOperator, timeoutMs = 200) {
   );
   // maxRetries:1 so one operator failure fully exhausts retries in a pass.
   const provider = new SeamlessOperatorWallet(client, sessions.resolver(), { maxRetries: 1 });
-  return new BetsService(prisma, provider, stubEngine, risk, metrics);
+  return new BetsService(prisma, provider, stubEngine, risk, metrics, makeAudit(prisma, metrics));
 }
 
 beforeAll(async () => {
@@ -180,7 +181,7 @@ test("H2 backlog: countPendingPayouts() returns the exact number of payout_pendi
   const { userId, walletId } = await launchPlayer(currency, playerId);
 
   // A probe BetsService — counting needs no wallet provider, so leave it unset.
-  const counter = new BetsService(prisma, {} as any, stubEngine, risk, metrics);
+  const counter = new BetsService(prisma, {} as any, stubEngine, risk, metrics, makeAudit(prisma, metrics));
 
   // Baseline: whatever is already pending in the shared DB (clean dev DB == 0).
   const baseline = await counter.countPendingPayouts();

@@ -8,6 +8,7 @@ import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService, type Panel } from "../src/game/bets.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3.5 — Bet STAMP regression (DB-backed). placeBet denormalises onto the Bet
@@ -27,14 +28,14 @@ const risk = new RiskService();
 const metrics = new MetricsService();
 const jwt = new JwtService({ secret: "stamp-secret" });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, ledger);
+const sessions = new GameSessionService(prisma, launch, jwt, ledger, makeAudit(prisma));
 
 let activeRoundId = "";
 const fakeEngine: any = {
   getPublicState: () => ({ roundId: activeRoundId, phase: "betting", phaseEndsAt: Date.now() + 60_000, multiplier: 1, serverTime: Date.now() }),
   currentMultiplier: () => 1,
 };
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];

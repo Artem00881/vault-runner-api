@@ -13,6 +13,7 @@ import { WalletRouter } from "../src/wallet/wallet-router";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { WAGERED_STATUSES } from "../src/common/bet-status";
 import { MockOperator } from "./helpers/mock-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Operator-initiated VOID of a SETTLED bet (Phase 6) — money-moving, DB-backed.
@@ -44,7 +45,7 @@ const ledger = new LedgerService(prisma);
 const risk = new RiskService();
 const metrics = new MetricsService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 const fakeEngine: any = {
   getPublicState: () => ({ roundId: "", phase: "betting", phaseEndsAt: Date.now() + 60_000, multiplier: 1, serverTime: Date.now() }),
@@ -52,7 +53,7 @@ const fakeEngine: any = {
 };
 
 // INTERNAL/ledger-mode service (the play-money book — what reconcile-check audits).
-const betsLedger = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const betsLedger = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];
@@ -466,7 +467,7 @@ describe("V.4 reconcileVoidingBets — finishes a stranded voiding bet (resume)"
       rollback: ledger.rollback.bind(ledger),
       getBalance: ledger.getBalance.bind(ledger),
     };
-    const flakyBets = new BetsService(prisma, flakyProvider, fakeEngine, risk, metrics);
+    const flakyBets = new BetsService(prisma, flakyProvider, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
     // First void attempt: reclaim applies (−2500), refund throws → bet stuck `voiding`.
     await expect(flakyBets.voidBet(null as any, betId)).rejects.toThrow("refund_boom");
@@ -539,7 +540,7 @@ describe("V.6 operator-mode void routes to operator rollback (no new turnover)",
   const operatorApi = new MockOperator();
   const seamless = new SeamlessOperatorWallet(operatorApi, sessions.resolver());
   const router = new WalletRouter(ledger, seamless, (walletId) => sessions.isDemoWallet(walletId));
-  const opBets = new BetsService(prisma, router, fakeEngine, risk, metrics);
+  const opBets = new BetsService(prisma, router, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
   async function launchReal(currency: string, operatorBalance: number) {
     const op = await prisma.operator.create({

@@ -11,6 +11,7 @@ import { GameSessionService } from "../src/operator/game-session.service";
 import { SeamlessOperatorWallet } from "../src/wallet/seamless-operator-wallet";
 import { WalletRouter } from "../src/wallet/wallet-router";
 import { MockOperator } from "./helpers/mock-operator";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3 — demo / fun mode, end-to-end through BetsService in OPERATOR mode.
@@ -36,7 +37,7 @@ const risk = new RiskService();
 const metrics = new MetricsService();
 const jwt = new JwtService({ secret: "demo-e2e-secret" });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, ledger);
+const sessions = new GameSessionService(prisma, launch, jwt, ledger, makeAudit(prisma));
 
 // Fake engine: one knob flips phase so the same instance drives placeBet ("betting")
 // and cashOut / evaluateAutoCashouts ("running").
@@ -110,7 +111,7 @@ function betsWithRouter(seed: Record<string, number> = {}) {
   const mockOperator = new MockOperator(seed);
   const seamless = new SeamlessOperatorWallet(mockOperator, sessions.resolver());
   const router = new WalletRouter(ledger, seamless, (w) => sessions.isDemoWallet(w));
-  const bets = new BetsService(prisma, router, fakeEngine, risk, metrics);
+  const bets = new BetsService(prisma, router, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
   return { mockOperator, bets };
 }
 
@@ -239,6 +240,7 @@ test("5. money-path HIGH regression: a real cashOut whose mode-lookup THROWS fai
     fakeEngine,
     risk,
     metrics,
+    makeAudit(prisma, metrics),
   );
   const throwBets = new BetsService(
     prisma,
@@ -248,6 +250,7 @@ test("5. money-path HIGH regression: a real cashOut whose mode-lookup THROWS fai
     fakeEngine,
     risk,
     metrics,
+    makeAudit(prisma, metrics),
   );
 
   // Place the real bet while the lookup works → debits the operator.

@@ -4,6 +4,7 @@ import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule } from "@nestjs/throttler";
 import { IpThrottlerGuard } from "./common/ip-throttler.guard";
 import { PrismaModule } from "./prisma/prisma.module";
+import { AuditModule } from "./audit/audit.module";
 import { RedisModule } from "./redis/redis.module";
 import { AuthModule } from "./auth/auth.module";
 import { WalletModule } from "./wallet/wallet.module";
@@ -27,6 +28,7 @@ import { CurrencyController } from "./common/currency.controller";
       },
     ]),
     PrismaModule,
+    AuditModule, // immutable significant-event audit log (F-058) — @Global, injected by game/fairness/operator
     RedisModule,
     AuthModule,
     WalletModule,

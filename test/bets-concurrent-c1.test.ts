@@ -5,6 +5,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit C1 (headline money bug).
@@ -49,7 +50,7 @@ const fakeEngine: any = {
   currentMultiplier: () => 1.0,
 };
 
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // Track synthetic rows for FK-safe cleanup (rounds cascade bets; users cascade
 // wallets/ledger/profiles; seeds then chains last).

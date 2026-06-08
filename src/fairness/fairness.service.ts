@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
+import { AuditEventService } from "../audit/audit-event.service";
 import { SALT_PROVIDER, DailySaltProvider, type SaltProvider, type SaltCommitment } from "./salt.provider";
 import { generateSeedChain, verifyChainLink } from "./seed-chain";
 import { computeCrash, sha256Hex } from "./crash";
@@ -42,6 +43,7 @@ export class FairnessService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(SALT_PROVIDER) private readonly saltProvider: SaltProvider,
+    @Inject(AuditEventService) private readonly audit: AuditEventService,
   ) {}
 
   /** Ensure an active epoch exists. Returns the public commitment. */
@@ -109,6 +111,10 @@ export class FairnessService {
     const epoch = (max._max.epoch ?? -1) + 1;
     const strict = requireBlockSalt();
 
+    // Track whether we substituted the random safety-net salt — that fact must become a
+    // QUERYABLE significant event (F-058 / cert ask: "the salt fell back to random").
+    let fallback: { reason: string; from: string } | undefined;
+
     let c: SaltCommitment;
     try {
       c = await this.saltProvider.commit();
@@ -119,6 +125,7 @@ export class FairnessService {
         return null;
       }
       this.log.warn(`epoch ${epoch}: salt commit failed (${String(e)}) → random fallback`);
+      fallback = { reason: "commit_failed", from: this.saltProvider.constructor.name };
       c = await this.fallback.commit();
     }
     if (activate && !c.salt) {
@@ -130,6 +137,7 @@ export class FairnessService {
         return null;
       }
       this.log.warn(`epoch ${epoch}: ${c.source} salt not ready → random fallback so play continues`);
+      fallback = { reason: "salt_not_ready", from: c.source };
       c = await this.fallback.commit();
     }
 
@@ -162,6 +170,46 @@ export class FairnessService {
     this.log.log(
       `fairness epoch ${epoch} ${status} (${c.source}${c.targetBlock ? ` block ${c.targetBlock}` : ""}, ${len} seeds)`,
     );
+
+    // Significant-event audit log (F-058). All best-effort (never block the round):
+    //  - epoch_commit: a fresh epoch's public commit was published (commitHash = seed[0]);
+    //  - salt_fallback: we substituted the grindable random safety-net salt (cert-relevant);
+    //  - salt_armed: this epoch's salt is already known (random / pre-resolved block) at open.
+    await this.audit.record({
+      actor: "system",
+      action: "rng.epoch_commit",
+      targetType: "rng_epoch",
+      targetId: String(epoch),
+      meta: {
+        epoch,
+        status,
+        saltSource: c.source,
+        commitHash: seeds[0],
+        targetChain: c.targetChain ?? null,
+        targetBlock: c.targetBlock != null ? String(c.targetBlock) : null,
+        length: len,
+      },
+    });
+    if (fallback) {
+      await this.audit.record({
+        actor: "system",
+        action: "rng.salt_fallback",
+        targetType: "rng_epoch",
+        targetId: String(epoch),
+        meta: { epoch, reason: fallback.reason, fellBackFrom: fallback.from, saltSource: c.source },
+      });
+    }
+    if (c.salt) {
+      await this.audit.record({
+        actor: "system",
+        action: "rng.salt_armed",
+        targetType: "rng_epoch",
+        targetId: String(epoch),
+        // sha256OfUtf8 matches the PUBLIC salt-hash in getCurrentCommit (a salt is an
+        // arbitrary string, not hex) so the audited hash equals the published one.
+        meta: { epoch, status, saltSource: c.source, saltHash: sha256OfUtf8(c.salt) },
+      });
+    }
     return chain;
   }
 
@@ -200,6 +248,20 @@ export class FairnessService {
         if (salt) {
           await this.prisma.fairnessChain.update({ where: { id: p.id }, data: { salt, status: "armed", armedAt: new Date() } });
           this.log.log(`fairness epoch ${p.epoch} armed (${p.saltSource}${p.targetBlock ? ` block ${p.targetBlock}` : ""})`);
+          // F-058: a pending (block) epoch's committed salt finalized → armed. Best-effort.
+          await this.audit.record({
+            actor: "system",
+            action: "rng.salt_armed",
+            targetType: "rng_epoch",
+            targetId: String(p.epoch),
+            meta: {
+              epoch: p.epoch,
+              status: "armed",
+              saltSource: p.saltSource,
+              saltHash: sha256OfUtf8(salt),
+              targetBlock: p.targetBlock != null ? String(p.targetBlock) : null,
+            },
+          });
         }
       }
       const active = await this.findActive();

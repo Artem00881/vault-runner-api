@@ -5,6 +5,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
 import { LedgerService } from "../src/wallet/ledger.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit L-C2.1 + L-C2.2 — operator session-lifecycle hardening.
@@ -33,7 +34,7 @@ const JWT_SECRET = "lc2-session-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const prisma = new PrismaService();
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Track everything we create for FK-safe teardown + a baseline to prove we
 // leave the shared dev DB exactly as we found it.

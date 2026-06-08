@@ -6,6 +6,7 @@ import { WALLET_PROVIDER, type WalletProvider, type WalletTxResult } from "../wa
 import { GameEngineService } from "./game-engine.service";
 import { RiskService, type PerBetLimits } from "./risk.service";
 import { MetricsService } from "../metrics/metrics.service";
+import { AuditEventService } from "../audit/audit-event.service";
 import type { EffectiveRg } from "../operator/rg-config";
 import { isWageredStatus, isWonStatus } from "../common/bet-status";
 import { floorPayout } from "../common/money";
@@ -95,6 +96,7 @@ export class BetsService {
     @Inject(GameEngineService) private readonly engine: GameEngineService,
     @Inject(RiskService) private readonly risk: RiskService,
     @Inject(MetricsService) private readonly metrics: MetricsService,
+    @Inject(AuditEventService) private readonly audit: AuditEventService,
   ) {}
 
   // Resolve the wallet for a NEW bet. Prefer the EXACT walletId the session bound at
@@ -568,6 +570,23 @@ export class BetsService {
       `bet ${betId} VOIDED by operator ${operatorId}${reason ? ` (reason: ${reason})` : ""} — ` +
         `refund stake ${bet.amount}${hadPayout ? `, reclaim payout ${bet.payout}` : ""}`,
     );
+    // Significant-event audit log (F-058) — AFTER the void succeeds. Best-effort: the
+    // money move already happened, so a log failure must not turn a successful void into
+    // an error (record() never throws). `before` = the status we voided FROM.
+    await this.audit.record({
+      actor: `operator:${operatorId}`,
+      action: "operator.bet_void",
+      targetType: "bet",
+      targetId: betId,
+      operatorId,
+      before: { status: bet.status },
+      after: { status: "voided" },
+      meta: {
+        reason: reason ?? null,
+        refundedStake: bet.amount.toString(),
+        reclaimedPayout: hadPayout ? bet.payout.toString() : "0",
+      },
+    });
     return {
       ok: true,
       betId,

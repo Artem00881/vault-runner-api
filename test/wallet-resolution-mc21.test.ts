@@ -8,6 +8,7 @@ import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
 import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit M-C2.1 — resolve a bet's wallet by the SESSION's bound
@@ -60,7 +61,7 @@ const fakeEngine: any = {
   currentMultiplier: () => 1.0,
 };
 
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // For case 4 (operator session token). Mirrors operator-session-c2.test.ts /
 // launch-token.test.ts: GameSessionService signs the play token with this
@@ -68,7 +69,7 @@ const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
 const SESSION_SECRET = "mc21-session-secret";
 const jwt = new JwtService({ secret: SESSION_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Track synthetic rows for FK-safe cleanup (bets → rounds → seeds → chains;
 // users cascade wallets/ledger/profile; operators cascade their sessions).

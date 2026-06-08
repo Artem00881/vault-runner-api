@@ -14,6 +14,7 @@ import {
   effectiveLimitsFor,
   type EffectiveBetLimits,
 } from "../src/operator/bet-limits";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3, piece 2 — per-currency operator bet limits ENFORCED on the bet path
@@ -58,7 +59,7 @@ const metrics = new MetricsService();
 const JWT_SECRET = "p3-betlimits-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 // Fake engine: a single mutable knob flips the phase so the SAME instance can drive
 // placeBet ("betting") and cashOut / evaluateAutoCashouts ("running"). BetsService
@@ -77,7 +78,7 @@ const fakeEngine: any = {
   currentMultiplier: () => liveMult,
 };
 
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // FK-safe teardown trackers (rounds cascade bets; users cascade wallets/ledger/
 // profiles; seeds then chains last; operators cascade their GameSessions and the

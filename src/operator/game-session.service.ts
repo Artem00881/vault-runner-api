@@ -3,6 +3,7 @@ import { JwtService } from "@nestjs/jwt";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
+import { AuditEventService } from "../audit/audit-event.service";
 import { LaunchTokenService } from "./launch-token.service";
 import { LedgerService } from "../wallet/ledger.service";
 import type { OperatorSession, SessionResolver } from "../wallet/seamless-operator-wallet";
@@ -44,6 +45,7 @@ export class GameSessionService {
     @Inject(LaunchTokenService) private readonly launch: LaunchTokenService,
     @Inject(JwtService) private readonly jwt: JwtService,
     @Inject(LedgerService) private readonly ledger: LedgerService,
+    @Inject(AuditEventService) private readonly audit: AuditEventService,
   ) {}
 
   /** Open the game from an operator launch token → create (consume) a session. */
@@ -201,10 +203,29 @@ export class GameSessionService {
    * `revokedAt: null` filter). Returns how many sessions were revoked.
    */
   async revokeForWallet(walletId: string): Promise<number> {
+    // Capture the live sessions about to be revoked (id + operatorId) for the audit log
+    // BEFORE the update flips revokedAt; this read does not change the revoke semantics.
+    const targets = await this.prisma.gameSession.findMany({
+      where: { walletId, revokedAt: null },
+      select: { id: true, operatorId: true },
+    });
     const r = await this.prisma.gameSession.updateMany({
       where: { walletId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    // Significant-event audit log (F-058) — only when something was actually revoked, so
+    // the idempotent already-revoked no-op doesn't spam the log. Best-effort (never throws).
+    if (r.count > 0) {
+      await this.audit.record({
+        actor: "system",
+        action: "session.revoke",
+        targetType: "game_session",
+        targetId: walletId,
+        operatorId: targets[0]?.operatorId,
+        after: { revokedAt: new Date().toISOString() },
+        meta: { walletId, revokedCount: r.count, sessionIds: targets.map((t) => t.id) },
+      });
+    }
     return r.count;
   }
 

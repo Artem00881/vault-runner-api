@@ -7,6 +7,7 @@ import { RiskService } from "../../src/game/risk.service";
 import { MetricsService } from "../../src/metrics/metrics.service";
 import { BetsService, type Panel } from "../../src/game/bets.service";
 import { GameEngineService, GROWTH } from "../../src/game/game-engine.service";
+import { makeAudit } from "../helpers/audit";
 
 /**
  * Phase 4.5c.2 — SEAMLESS FAILOVER-RESUME regression suite (the phase's headline behavior,
@@ -194,7 +195,7 @@ function makeEngine() {
  *  driver (honor-then-crash) + the settle relay (settling/crash → settleRound). Returns the
  *  BetsService so a test can assert through the real wiring. */
 function wireMoneyDrivers(engine: GameEngineService): BetsService {
-  const bets = new BetsService(prisma, ledger as any, engine, risk, metrics);
+  const bets = new BetsService(prisma, ledger as any, engine, risk, metrics, makeAudit(prisma, metrics));
   engine.setAutoCashoutDriver((m) => bets.evaluateAutoCashouts(m));
   engine.events.on("settle", (p: { roundId: string }) => {
     void bets.settleRound(p.roundId);

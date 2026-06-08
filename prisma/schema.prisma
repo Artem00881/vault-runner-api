@@ -15,22 +15,22 @@ datasource db {
 // each operator has its own launch secret, currencies, limits and wallet API.
 // (Phase 0.3 — money pivot. The live demo runs without any operator row.)
 model Operator {
-  id           String   @id @default(uuid()) @db.Uuid
-  code         String   @unique // short slug, e.g. "demo-operator"
-  name         String
-  enabled      Boolean  @default(true)
-  demoEnabled  Boolean  @default(false) @map("demo_enabled") // may this operator launch play-money "fun mode"? compliance-conservative: off until explicitly provisioned
-  launchSecret String   @map("launch_secret") // per-operator HMAC secret for launch tokens
-  currencies   String[] @default([]) // ISO/crypto codes this operator offers
-  walletApiUrl String?  @map("wallet_api_url") // operator seamless-wallet endpoint
-  walletApiKey String?  @map("wallet_api_key") // key WE use to call THEM
-  callbackUrl  String?  @map("callback_url") // return-to-lobby URL
-  ipWhitelist  String[] @default([]) @map("ip_whitelist")
-  betLimits    Json?    @map("bet_limits") // per-currency bet-level tables
-  rgConfig     Json?    @map("rg_config") // responsible-gambling config (reality checks + session limits)
-  reportingApiKeyHash String? @map("reporting_api_key_hash") // HASHED inbound API key for the operator REPORTING surface (Phase 3.5); null = no reporting access. Only ever VERIFIED, never used to sign — so it is hashed at rest (unlike launchSecret/walletApiKey).
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                  String   @id @default(uuid()) @db.Uuid
+  code                String   @unique // short slug, e.g. "demo-operator"
+  name                String
+  enabled             Boolean  @default(true)
+  demoEnabled         Boolean  @default(false) @map("demo_enabled") // may this operator launch play-money "fun mode"? compliance-conservative: off until explicitly provisioned
+  launchSecret        String   @map("launch_secret") // per-operator HMAC secret for launch tokens
+  currencies          String[] @default([]) // ISO/crypto codes this operator offers
+  walletApiUrl        String?  @map("wallet_api_url") // operator seamless-wallet endpoint
+  walletApiKey        String?  @map("wallet_api_key") // key WE use to call THEM
+  callbackUrl         String?  @map("callback_url") // return-to-lobby URL
+  ipWhitelist         String[] @default([]) @map("ip_whitelist")
+  betLimits           Json?    @map("bet_limits") // per-currency bet-level tables
+  rgConfig            Json?    @map("rg_config") // responsible-gambling config (reality checks + session limits)
+  reportingApiKeyHash String?  @map("reporting_api_key_hash") // HASHED inbound API key for the operator REPORTING surface (Phase 3.5); null = no reporting access. Only ever VERIFIED, never used to sign — so it is hashed at rest (unlike launchSecret/walletApiKey).
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   sessions GameSession[]
 
@@ -41,17 +41,17 @@ model Operator {
 // Binds an operator-side player+currency to a local wallet (the per-operator
 // reconciliation journal anchor) and records the token jti for one-time use.
 model GameSession {
-  id          String   @id @default(uuid()) @db.Uuid
-  operatorId  String   @map("operator_id") @db.Uuid
-  playerId    String   @map("player_id") // operator-side player id
-  currency    String
-  locale      String   @default("en")
-  walletId    String   @map("wallet_id") @db.Uuid // local journal wallet
-  demo        Boolean  @default(false) // play-money "fun mode" session: money routes to the internal ledger, NEVER the operator wallet (Phase 3)
-  launchJti   String   @unique @map("launch_jti") // token id → one-time use
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt  DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
-  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
+  id         String    @id @default(uuid()) @db.Uuid
+  operatorId String    @map("operator_id") @db.Uuid
+  playerId   String    @map("player_id") // operator-side player id
+  currency   String
+  locale     String    @default("en")
+  walletId   String    @map("wallet_id") @db.Uuid // local journal wallet
+  demo       Boolean   @default(false) // play-money "fun mode" session: money routes to the internal ledger, NEVER the operator wallet (Phase 3)
+  launchJti  String    @unique @map("launch_jti") // token id → one-time use
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
 
   operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
 
@@ -166,24 +166,24 @@ model Round {
 }
 
 model Bet {
-  id          String    @id @default(uuid()) @db.Uuid
-  roundId     String    @map("round_id") @db.Uuid
-  userId      String    @map("user_id") @db.Uuid
-  walletId    String    @map("wallet_id") @db.Uuid
-  panel       String // A | B
-  amount      BigInt
-  autoCashout Decimal?  @map("auto_cashout") @db.Decimal(10, 2)
-  status      String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending|voiding|voided (voiding/voided = operator void, Phase 6)
-  cashoutMult Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
-  payout      BigInt    @default(0)
-  demo        Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)
-  operatorId  String?   @map("operator_id") @db.Uuid // denormalised from the session for per-operator REPORTING (Phase 3.5); null = internal/guest play (excluded from operator reports). Stamped from the verified play token; never client-supplied.
-  currency    String?   // denormalised journal currency (canonical UPPERCASE) for per-currency reporting (Phase 3.5)
-  maxWinPerBet BigInt?  @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
-  debitTxId   String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
-  payoutTxId  String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  settledAt   DateTime? @map("settled_at") @db.Timestamptz(6)
+  id           String    @id @default(uuid()) @db.Uuid
+  roundId      String    @map("round_id") @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  walletId     String    @map("wallet_id") @db.Uuid
+  panel        String // A | B
+  amount       BigInt
+  autoCashout  Decimal?  @map("auto_cashout") @db.Decimal(10, 2)
+  status       String    @default("active") // reserving|cancelling|active|cashed_out|busted|cancelled|payout_pending|voiding|voided (voiding/voided = operator void, Phase 6)
+  cashoutMult  Decimal?  @map("cashout_mult") @db.Decimal(10, 2)
+  payout       BigInt    @default(0)
+  demo         Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)
+  operatorId   String?   @map("operator_id") @db.Uuid // denormalised from the session for per-operator REPORTING (Phase 3.5); null = internal/guest play (excluded from operator reports). Stamped from the verified play token; never client-supplied.
+  currency     String? // denormalised journal currency (canonical UPPERCASE) for per-currency reporting (Phase 3.5)
+  maxWinPerBet BigInt?   @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
+  debitTxId    String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
+  payoutTxId   String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  settledAt    DateTime? @map("settled_at") @db.Timestamptz(6)
 
   round  Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -223,4 +223,30 @@ model Profile {
 
   @@index([biggestMultiplier(sort: Desc), totalLoot(sort: Desc)])
   @@map("profiles")
+}
+
+// Unified significant-event AUDIT LOG (audit F-058). An APPEND-ONLY, standalone
+// record of operator / config / key / void / session-revoke / RNG events — the
+// "who did what, when" trail GLI-19 expects alongside the money ledger + seed chain.
+// DELIBERATELY has NO relation/FK (the ids are denormalised, the way Bet carries a
+// bare operatorId): nothing can CASCADE a row away, and the table stands on its own.
+// The app only ever INSERTs here (AuditEventService exposes no update/delete); prod
+// REVOKEs UPDATE/DELETE from the app DB role to make immutability enforced, not assumed.
+model AuditEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  actor      String // who: "operator:<id>" | "system" | "provision-cli" | "engine" | "reconciler"
+  action     String // dotted verb, e.g. "operator.bet_void" | "operator.provision" | "reporting_key.rotate" | "session.revoke" | "rng.epoch_commit" | "rng.salt_fallback"
+  targetType String?  @map("target_type") // "bet" | "operator" | "game_session" | "rng_epoch" | ...
+  targetId   String?  @map("target_id") // free-form id of the affected entity (NOT a typed FK)
+  operatorId String?  @map("operator_id") @db.Uuid // denormalised for per-operator queries — NO relation/FK (keep the log standalone + append-only). UUID to match game_bets/game_sessions.operator_id (a real operator id IS a uuid); actor/targetType/targetId stay TEXT (genuinely free-form).
+  ip         String? // caller IP when the event was operator-initiated over HTTP
+  before     Json? // entity state / changed fields before the action (NEVER a secret value)
+  after      Json? // entity state / changed fields after the action (NEVER a secret value)
+  meta       Json? // extra context (reason, counts, hash-prefix, …)
+
+  @@index([createdAt])
+  @@index([operatorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_events")
 }

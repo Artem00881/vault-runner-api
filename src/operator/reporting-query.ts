@@ -140,3 +140,41 @@ export function parseTransactionQuery(query: unknown): TransactionQuery {
   }
   throw new BadRequestException("unrecognized transactionId");
 }
+
+/**
+ * Significant-event audit-log query (F-058). Optional `action` exact filter + optional
+ * from/to instants + a clamped `limit`. The operatorId is NEVER read here — the route
+ * hard-scopes results to the authenticated operator (OperatorAuthGuard). `action` is
+ * length-capped and charset-restricted (the dotted-verb shape) so it can't smuggle a
+ * pattern into the equality filter.
+ */
+export interface AuditQuery {
+  action?: string;
+  from?: Date;
+  to?: Date;
+  limit: number;
+}
+
+const ACTION_RE = /^[a-z0-9_.]{1,64}$/;
+
+export function parseAuditQuery(query: unknown): AuditQuery {
+  const q = (query ?? {}) as Record<string, unknown>;
+  const action = asString(q.action)?.trim() || undefined;
+  if (action !== undefined && !ACTION_RE.test(action)) throw new BadRequestException("invalid action");
+
+  // from/to are OPTIONAL here (an audit query often wants "latest N" with no range).
+  const fromS = asString(q.from)?.trim();
+  const toS = asString(q.to)?.trim();
+  const from = fromS ? parseInstant(fromS, "from") : undefined;
+  const to = toS ? parseInstant(toS, "to") : undefined;
+  if (from && to && from.getTime() > to.getTime()) throw new BadRequestException("from must be <= to");
+
+  let limit = DEFAULT_LIMIT;
+  const lr = asString(q.limit);
+  if (lr !== undefined) {
+    const n = Number(lr);
+    if (!Number.isInteger(n) || n < 1) throw new BadRequestException("invalid limit");
+    limit = Math.min(n, MAX_LIMIT);
+  }
+  return { action, from, to, limit };
+}

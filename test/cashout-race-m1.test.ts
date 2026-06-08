@@ -5,6 +5,7 @@ import { LedgerService } from "../src/wallet/ledger.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Regression for audit M1 (double cash-out inflates leaderboard / desyncs payout).
@@ -42,7 +43,7 @@ const fakeEngine: any = {
   currentMultiplier: () => RUNNING_MULT,
 };
 
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];

@@ -10,6 +10,7 @@ import { LaunchTokenService } from "../src/operator/launch-token.service";
 import { GameSessionService } from "../src/operator/game-session.service";
 import { deserializeRg, type EffectiveRg } from "../src/operator/rg-config";
 import { rgEvaluate, type RgSocketState } from "../src/game/game.gateway";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Phase 3 — responsible-gambling ENFORCEMENT (DB-backed). Mirrors the P3 bet-limits
@@ -27,7 +28,7 @@ const metrics = new MetricsService();
 const JWT_SECRET = "rg-enforce-secret";
 const jwt = new JwtService({ secret: JWT_SECRET });
 const launch = new LaunchTokenService(jwt, prisma);
-const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma));
+const sessions = new GameSessionService(prisma, launch, jwt, new LedgerService(prisma), makeAudit(prisma));
 
 let activeRoundId = "";
 let phase: "betting" | "running" = "betting";
@@ -36,7 +37,7 @@ const fakeEngine: any = {
   getPublicState: () => ({ roundId: activeRoundId, phase, phaseEndsAt: Date.now() + 60_000, multiplier: liveMult, serverTime: Date.now() }),
   currentMultiplier: () => liveMult,
 };
-const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics);
+const bets = new BetsService(prisma, ledger, fakeEngine, risk, metrics, makeAudit(prisma, metrics));
 
 const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];

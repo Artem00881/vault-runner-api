@@ -4,7 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { WAGERED_STATUSES, isWageredStatus, isWonStatus } from "../common/bet-status";
 import { minorUnitsToString, rtpRatioString } from "../common/money";
 import { currencyMeta } from "../common/currency";
-import type { BetsQuery, ReportQuery, TransactionQuery } from "./reporting-query";
+import type { AuditQuery, BetsQuery, ReportQuery, TransactionQuery } from "./reporting-query";
 
 /**
  * Operator REPORTING aggregation (Phase 3.5). Strictly READ-ONLY — it never touches
@@ -409,6 +409,39 @@ export class ReportingService {
         betId: q.kind === "betId" ? q.betId : null,
         kind: q.kind,
       },
+    };
+  }
+
+  /**
+   * Read this operator's significant-event AUDIT LOG (F-058). HARD-scoped to the
+   * authenticated operatorId (the same tenant gate as every other reporting query) — an
+   * operator sees ONLY its own events; cross-tenant + system/RNG (operatorId null) rows
+   * are never returned. Newest-first, keyset-free (limit-capped). Read-only.
+   */
+  async auditEvents(operatorId: string, q: AuditQuery) {
+    const where: Prisma.AuditEventWhereInput = { operatorId };
+    if (q.action) where.action = q.action;
+    if (q.from || q.to) where.createdAt = { ...(q.from ? { gte: q.from } : {}), ...(q.to ? { lte: q.to } : {}) };
+    const rows = await this.prisma.auditEvent.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: q.limit,
+    });
+    return {
+      operatorId,
+      count: rows.length,
+      events: rows.map((r) => ({
+        id: r.id,
+        createdAt: r.createdAt.toISOString(),
+        actor: r.actor,
+        action: r.action,
+        targetType: r.targetType,
+        targetId: r.targetId,
+        ip: r.ip,
+        before: r.before,
+        after: r.after,
+        meta: r.meta,
+      })),
     };
   }
 }

@@ -5,6 +5,7 @@ import { PrismaService } from "../src/prisma/prisma.service";
 import { RiskService } from "../src/game/risk.service";
 import { MetricsService } from "../src/metrics/metrics.service";
 import { BetsService } from "../src/game/bets.service";
+import { makeAudit } from "./helpers/audit";
 
 /**
  * Audit Low-4 — observability for the transient-reservation BACKLOG.
@@ -36,7 +37,7 @@ const metrics = new MetricsService();
 
 // reportReservingBacklog only reads the DB + sets gauges → no wallet/engine needed.
 const stubEngine: any = { getPublicState: () => null, currentMultiplier: () => 1.0 };
-const bets = new BetsService(prisma, {} as any, stubEngine, risk, metrics);
+const bets = new BetsService(prisma, {} as any, stubEngine, risk, metrics, makeAudit(prisma, metrics));
 
 // RESERVING_ALERT_SEC is read at module-load in bets.service.ts from the same env
 // (default 600). We assert against the same default; the env isn't set in tests.
