@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../../src/prisma/prisma.service";
@@ -79,12 +79,22 @@ const createdSeedIds: string[] = [];
 const createdChainIds: string[] = [];
 const createdUserIds: string[] = [];
 
-/** A fresh fairness chain + a single usable seed (chainIndex 1). Synthetic epoch (>9e6) so it
- *  never collides with real/dev epochs; status 'exhausted' so fairness scans skip it. */
+// Synthetic-epoch allocator. `epoch` is @@unique, and the HA suites run in ONE shared `bun test`
+// process — a plain `9e6 + random(1e6)` collides across suites/reps (birthday paradox over many
+// chain inserts, or against a prior run's not-yet-purged rows), throwing P2002 mid-makeSeed (a
+// cross-suite isolation flake). Make it collision-proof: a per-suite base band (distinct from the
+// other HA suites) + a per-process random offset (dodges leftover rows from a prior run) + a
+// STRICTLY MONOTONIC counter (no two inserts in this process ever repeat). Still > real/dev epochs.
+const EPOCH_BASE = 900_000_000 + Math.floor(Math.random() * 10_000_000); // fr suite band
+let epochSeq = 0;
+const nextEpoch = () => EPOCH_BASE + epochSeq++;
+
+/** A fresh fairness chain + a single usable seed (chainIndex 1). Synthetic epoch so it never
+ *  collides with real/dev epochs OR a sibling suite; status 'exhausted' so fairness scans skip it. */
 async function makeSeed(): Promise<string> {
   const chain = await prisma.fairnessChain.create({
     data: {
-      epoch: 9_000_000 + Math.floor(Math.random() * 1_000_000),
+      epoch: nextEpoch(),
       commitHash: "fr-" + randomUUID(),
       length: 2,
       salt: "fr-" + randomUUID(),
@@ -173,6 +183,16 @@ async function makeActiveBet(
   return betId;
 }
 
+// ── cross-suite isolation harness ──────────────────────────────────────────────────────────
+// Every engine a test builds is tracked here so afterEach can QUIESCE all in-flight async work
+// (a SEAMLESS-CLIMB round's armed crash timer that stays running 60s, the deadman, and the
+// void-wrapped settle relay) BEFORE the next test/suite asserts. A resumed climb left running in
+// the DB, or a settle that out-runs a test's fixed setTimeout, would otherwise be transiently
+// visible to a neighbor's resumeOrRecover / round-STATUS assertion in the SHARED `bun test`
+// process (the diagnosed which-round-resumed flake).
+const liveEngines: GameEngineService[] = [];
+const inflightSettles: Promise<unknown>[] = [];
+
 /** Build a freshly-wired engine for ONE test: fresh redis-capture + reveal log + election. */
 function makeEngine() {
   const captured: Captured = { set: [], publish: [] };
@@ -188,17 +208,20 @@ function makeEngine() {
     noopCache,
   );
   (engine as any).running = true; // we're "started" (leader acquired) so schedule() arms timers
+  liveEngines.push(engine);
   return { engine, captured, reveals, election };
 }
 
 /** Wire the real money drivers exactly like gateway.afterInit: the awaitable auto-cashout
- *  driver (honor-then-crash) + the settle relay (settling/crash → settleRound). Returns the
- *  BetsService so a test can assert through the real wiring. */
+ *  driver (honor-then-crash) + the settle relay (settling/crash → settleRound). The settle stays
+ *  fire-and-forget (production-faithful), but we ALSO keep a handle to each in-flight settle so
+ *  afterEach can AWAIT it — so a settle's `bet.updateMany` can never land after the test under it
+ *  has finished and leak into the next. Returns the BetsService so a test can assert via it. */
 function wireMoneyDrivers(engine: GameEngineService): BetsService {
   const bets = new BetsService(prisma, ledger as any, engine, risk, metrics, makeAudit(prisma, metrics));
   engine.setAutoCashoutDriver((m) => bets.evaluateAutoCashouts(m));
   engine.events.on("settle", (p: { roundId: string }) => {
-    void bets.settleRound(p.roundId);
+    inflightSettles.push(bets.settleRound(p.roundId).catch(() => {}));
   });
   return bets;
 }
@@ -225,6 +248,23 @@ async function quiesceOpenRounds() {
     data: { status: "completed" },
   });
 }
+
+/** Stop every engine this test armed (cancels its armed crash/deadman timers), detach its
+ *  settle listeners (so a stray late emit can't re-fire a relay), drain in-flight settles, then
+ *  close any OPEN round — so NO timer, NO listener and NO resumed-climb open round survives into
+ *  the next test/suite. Several scenarios deliberately leave the DB round OPEN (the seamless
+ *  climb / newest-resumed) and rely only on stop() to cancel the timer; this is the belt that
+ *  also closes the round so a leaked neighbor can't be mistaken for a resume candidate. */
+afterEach(async () => {
+  for (const e of liveEngines.splice(0)) {
+    try { (e as any).stop(); } catch { /* idempotent */ }
+    try { e.events.removeAllListeners(); } catch { /* no-op */ }
+  }
+  if (inflightSettles.length) {
+    await Promise.allSettled(inflightSettles.splice(0));
+  }
+  await quiesceOpenRounds();
+});
 
 beforeAll(async () => {
   await prisma.$connect();
@@ -527,14 +567,17 @@ describe("Phase 4.5c.2 seamless failover-resume", () => {
   });
 
   // ── Scenario 7 ───────────────────────────────────────────────────────────────────────
-  test("multiple open rounds → newest resumed, older ones close+refunded (their active bets refunded)", async () => {
+  test("multiple open rounds → newest resumed, older PRE-OUTCOME one close+refunded (its active bet refunded)", async () => {
     await quiesceOpenRounds();
-    // older open round (createdAt in the past) with a live bet — must be close+refunded.
+    // older open round (createdAt in the past) with a live bet — PRE-OUTCOME (betting, not
+    // ancient) so close+refund is the correct outcome-aware close (F-079). A POST-OUTCOME stale
+    // extra would instead SETTLE (bust the loser, keep paid winners) — covered directly in
+    // test/ha/stale-extra-outcome-aware.test.ts. Here we keep the original "older one refunded"
+    // assertion valid by making the extra a pre-outcome (no-result) round.
     const olderId = await makeRound({
-      status: "running",
+      status: "betting",
       crashPoint: 30.0,
-      startedAt: new Date(Date.now() - 500),
-      phaseEndsAt: new Date(Date.now() + 60_000),
+      phaseEndsAt: new Date(Date.now() + 5000), // fresh (not stale) — refund is by PHASE, not staleness
       createdAt: new Date(Date.now() - 10_000),
     });
     const wOld = await makeWallet(9000n);

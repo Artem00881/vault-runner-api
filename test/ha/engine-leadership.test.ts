@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../../src/prisma/prisma.service";
@@ -43,10 +43,17 @@ const createdRoundIds: string[] = [];
 const createdSeedIds: string[] = [];
 const createdChainIds: string[] = [];
 
+// Synthetic-epoch allocator: distinct per-suite band + per-process random offset + strictly
+// monotonic counter so @@unique(epoch) can't P2002-collide across the shared-process HA suites
+// (or a prior run's leftover rows).
+const EPOCH_BASE = 960_000_000 + Math.floor(Math.random() * 10_000_000);
+let epochSeq = 0;
+const nextEpoch = () => EPOCH_BASE + epochSeq++;
+
 async function makeChainAndSeed() {
   const chain = await prisma.fairnessChain.create({
     data: {
-      epoch: 2_000_000 + Math.floor(Math.random() * 1_000_000),
+      epoch: nextEpoch(),
       commitHash: "c" + randomUUID(),
       length: 2,
       salt: "s" + randomUUID(),
@@ -63,6 +70,15 @@ async function makeChainAndSeed() {
 
 beforeAll(async () => {
   await prisma.$connect();
+});
+// The wiring tests leave a synthetic `waiting`/`betting` round behind (they assert the row
+// was NOT transitioned). Close any OPEN round in afterEach so it can't be visible to a later
+// suite's resumeOrRecover/open-round scan in the SHARED `bun test` process.
+afterEach(async () => {
+  await prisma.round.updateMany({
+    where: { status: { in: ["waiting", "betting", "running", "crashed", "settling"] } },
+    data: { status: "completed" },
+  });
 });
 afterAll(async () => {
   try {

@@ -66,6 +66,13 @@ const noopCache: any = { getPublicState: () => null, currentMultiplier: () => 1.
 // USE time, not module load), so a normal top import is fine.
 import { GameEngineService } from "../../src/game/game-engine.service";
 
+// Every engine a test builds is tracked so afterEach can stop it (cancel its loop timer +
+// deadman) and detach listeners — a hung/throwing phase reschedules a safe(enterWaiting) into
+// this.timer with a 1500ms back-off, which must not tick into the next test in the SHARED
+// process even though these paths touch no DB. (Each test also stops its own engine; this is
+// the belt for the never-resolving / throwing arms.)
+const liveEngines: GameEngineService[] = [];
+
 function makeEngine(leader: boolean) {
   const metrics = makeMetrics();
   const election = makeElection(leader);
@@ -78,6 +85,7 @@ function makeEngine(leader: boolean) {
     election as any,
     noopCache,
   );
+  liveEngines.push(engine);
   return { engine, metrics, election };
 }
 
@@ -93,6 +101,12 @@ beforeEach(() => {
   setEnv("ENGINE_DEADMAN_CHECK_MS", "50");
 });
 afterEach(() => {
+  // Stop every engine (cancels this.timer + the deadman) and drop listeners so a rescheduled
+  // safe()/back-off from a hung-or-throwing phase can't tick into the next test.
+  for (const e of liveEngines.splice(0)) {
+    try { (e as any).stop(); } catch { /* idempotent */ }
+    try { e.events.removeAllListeners(); } catch { /* no-op */ }
+  }
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;

@@ -245,6 +245,63 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * F-079 (money — OUTCOME-AWARE stale-extra close). resumeOrRecover resumes the newest open
+   * round and must close out any OLDER open round (a "stale extra" — the single-open-round
+   * invariant should make this impossible, but a split-brain/anomaly could leave one). Closing
+   * it must MIRROR the pre/post-outcome distinction resumeRound/unresumableReason already make,
+   * NOT blanket-refund:
+   *
+   *   - PRE-OUTCOME (waiting / betting): no deterministic result was produced and no money is
+   *     owed → REFUND its live bets (closeAndRefundRound). Correct + unchanged.
+   *
+   *   - POST-OUTCOME (running / crashed / settling): the crash is DETERMINISTIC and already
+   *     committed; real money is owed (winners that auto-cashed below the crash keep their pay,
+   *     the rest bust). Refunding a not-yet-busted `active` LOSER here (the old behavior) is a
+   *     player-favorable GGR leak. Instead we DRIVE SETTLEMENT through the EXACT same idempotent
+   *     mechanism a normal completion / a settling-resume uses: reveal the seed (idempotent),
+   *     backfill crashedAt if the dead leader never stamped it, then EMIT the `settle` event for
+   *     THIS round's id → gateway.onSettle → bets.settleRound(roundId), whose `updateMany where
+   *     {roundId, status:'active'}` busts the stranded losers (CAS-on-status) while leaving
+   *     already-`cashed_out` winners untouched (so it can NEVER double-pay or claw back a win).
+   *     We do NOT author any new money logic here — settleRound is the single, idempotent,
+   *     conserving bust path; emitting `settle` is identical to resumeRound's settling branch.
+   *     Finally force-mark the round `completed` (it never reached its own enterCompleted). The
+   *     emit-then-complete ordering is benign: settleRound busts by {roundId,status:'active'}
+   *     regardless of round status, exactly as the settling-resume branch documents.
+   *
+   * NOTE: this is a stale EXTRA only — it does not become the resumed loop. We deliberately do
+   * NOT honor late auto-cashout targets for a stale extra (no live curve, and the honor-pay is
+   * the resumed candidate's job): any still-`active` bet on a post-outcome extra simply busts,
+   * the conservative (house-favorable, never player-favorable) outcome, which is also exactly
+   * what the live loop's crashed→settling gap does for a bet that outlived its cash-out window.
+   */
+  private async closeStaleExtra(r: { id: string; status: string; seedId: string | null; crashedAt: Date | null }) {
+    const postOutcome = r.status === "running" || r.status === "crashed" || r.status === "settling";
+    if (!postOutcome) {
+      // Pre-outcome (waiting/betting): refund — no result was produced.
+      this.log.warn(`resume: stale extra ${r.id} (${r.status}) is pre-outcome → close+refund`);
+      await this.closeAndRefundRound(r.id);
+      return;
+    }
+    // Post-outcome: SETTLE (bust stranded active losers, keep paid winners) via the idempotent
+    // settle path — never refund a committed-crash loser.
+    this.log.warn(`resume: stale extra ${r.id} (${r.status}) is post-outcome → settle (bust stranded losers, keep winners)`);
+    if (r.seedId) await this.fairness.revealSeed(r.seedId); // idempotent revealedAt write
+    // fairness-L1 backfill (mirrors the crashed-resume branch): stamp crashedAt only if the dead
+    // leader died before doing so — idempotent + forensic-only.
+    if (r.crashedAt === null) {
+      await this.prisma.round.updateMany({ where: { id: r.id, crashedAt: null }, data: { crashedAt: new Date() } });
+    }
+    // Drive the bust through the SAME idempotent settlement a normal completion uses (gateway
+    // onSettle → bets.settleRound(roundId); CAS on status='active'). This does NOT touch
+    // this.state, so it is safe to emit for a NON-current round id.
+    this.events.emit("settle", { roundId: r.id, crashMultiplier: null });
+    // Force-mark completed (the extra never reached its own enterCompleted). settleRound busts by
+    // {roundId,status:'active'} regardless of round status, so this ordering is benign.
+    await this.prisma.round.update({ where: { id: r.id }, data: { status: "completed", settledAt: new Date() } });
+  }
+
+  /**
    * Phase 4.5c.2 — SEAMLESS FAILOVER-RESUME entry point (called from start()).
    *
    * Instead of always close+refunding the in-flight round (the old behavior), a survivor
@@ -253,7 +310,8 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
    * nothing more), false if there was nothing to resume (start() opens a fresh round).
    *
    * Steps (design): (1) clear stale reserving slots first; (2) find OPEN rounds newest-first;
-   * (3) older opens are anomalies (violate single-open-round) → close+refund + log loudly;
+   * (3) older opens are anomalies (violate single-open-round) → close them OUTCOME-AWARE (F-079:
+   * post-outcome extras settle, pre-outcome extras refund — closeStaleExtra) + log loudly;
    * (4) validate the newest candidate is resumable, else close+refund it (SAFE FALLBACK) and
    * return false so start() opens fresh; (5/6) hand the clean candidate to resumeRound().
    *
@@ -273,15 +331,21 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     if (open.length === 0) return false; // clean DB → start() opens a fresh round
 
     // (3) Any round OLDER than the newest open one violates the single-open-round invariant
-    // (two simultaneously-open rounds should be impossible). Close+refund every stale extra
-    // and log loudly — never try to resume more than one loop.
+    // (two simultaneously-open rounds should be impossible). Close out every stale extra and
+    // log loudly — never try to resume more than one loop. F-079 (money — outcome-aware):
+    // closing a stale extra must MIRROR resumeRound's pre/post-outcome distinction, NOT blanket-
+    // refund. A pre-outcome extra (waiting/betting) produced no result and owes no money → REFUND
+    // its live bets (closeAndRefundRound). A post-outcome extra (running/crashed/settling) has a
+    // DETERMINISTIC crash already committed and real money owed on it → drive SETTLEMENT (bust the
+    // stranded active losers via the same idempotent settle path a normal completion uses; KEEP
+    // already-paid winners) instead of refunding a not-yet-busted loser (the GGR leak this fixes).
     const [candidate, ...stale] = open;
     if (stale.length > 0) {
       this.log.error(
         `resume: found ${open.length} OPEN rounds (expected 1) — single-open-round invariant violated; ` +
-          `close+refunding ${stale.length} stale extra(s), resuming only the newest (${candidate.id})`,
+          `closing ${stale.length} stale extra(s) outcome-aware, resuming only the newest (${candidate.id})`,
       );
-      for (const r of stale) await this.closeAndRefundRound(r.id);
+      for (const r of stale) await this.closeStaleExtra(r);
     }
 
     // (4) Validate the candidate is resumable. A partial/corrupt row (missing seed,
@@ -781,15 +845,24 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private async enterCrashed() {
     if (!this.state) return;
     if (!(await this.stillLeader("enterCrashed"))) return;
+    // F-080 (fairness — zombie-state defense-in-depth): CAPTURE this round's identifiers into
+    // LOCALS at entry. The reveal/update below is awaited; under H5's per-phase deadline a HUNG
+    // enterCrashed can resolve LATE (a "zombie") long after `this.state` has been re-pointed at a
+    // FRESH round by a recovered loop. Reading `this.state.roundId|seedId|crashPoint` AFTER an
+    // await would then reveal/crash the SUCCESSOR round's ids. Operating on the entry-captured
+    // locals makes that impossible by construction — a late zombie can only ever act on the round
+    // it was started for. On the normal path the locals equal this.state at entry, so behavior is
+    // unchanged. (crashPoint is the reveal value, never published — mirror() strips it.)
+    const { roundId, seedId, crashPoint } = this.state;
     this.state.phase = "crashed";
     this.state.phaseEndsAt = Date.now() + PHASE_MS.crashed;
     await this.prisma.round.update({
-      where: { id: this.state.roundId },
+      where: { id: roundId },
       data: { status: "crashed", crashedAt: new Date(), phaseEndsAt: new Date(this.state.phaseEndsAt) },
     });
-    await this.fairness.revealSeed(this.state.seedId); // make the proof public
+    await this.fairness.revealSeed(seedId); // make the proof public
     await this.mirror();
-    this.events.emit("crash", { roundId: this.state.roundId, crashMultiplier: this.state.crashPoint });
+    this.events.emit("crash", { roundId, crashMultiplier: crashPoint });
     this.emitPhase("crashed");
     this.schedule(PHASE_MS.crashed, () => this.safe(() => this.enterSettling(), "settling"));
   }

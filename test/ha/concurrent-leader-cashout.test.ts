@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../../src/prisma/prisma.service";
 import { LedgerService } from "../../src/wallet/ledger.service";
@@ -76,10 +76,17 @@ const createdUserIds: string[] = [];
 
 /** A fresh fairness chain + one usable seed. Synthetic epoch (>9e6) so it never collides with
  *  real/dev epochs; status 'exhausted' so fairness scans skip it. */
+// Synthetic-epoch allocator (see failover-resume.test.ts). DISTINCT per-suite band + per-process
+// random offset + strictly monotonic counter → no @@unique(epoch) P2002 collision across the
+// shared-process HA suites.
+const EPOCH_BASE = 940_000_000 + Math.floor(Math.random() * 10_000_000); // cl suite band (distinct)
+let epochSeq = 0;
+const nextEpoch = () => EPOCH_BASE + epochSeq++;
+
 async function makeSeed(): Promise<string> {
   const chain = await prisma.fairnessChain.create({
     data: {
-      epoch: 9_000_000 + Math.floor(Math.random() * 1_000_000),
+      epoch: nextEpoch(),
       commitHash: "cl-" + randomUUID(),
       length: 2,
       salt: "cl-" + randomUUID(),
@@ -163,6 +170,14 @@ async function quiesceOpenRounds() {
 }
 
 const payoutKey = (betId: string) => `bet:${betId}:payout`;
+
+// This suite drives only AWAITED money paths (no engine loop / no fire-and-forget), but it
+// leaves its `running` rounds OPEN at the end of each test. Close them in afterEach so this
+// suite is a good neighbor — a leaked OPEN round must not be visible to a later suite's
+// resumeOrRecover in the SHARED `bun test` process.
+afterEach(async () => {
+  await quiesceOpenRounds();
+});
 
 beforeAll(async () => {
   await prisma.$connect();

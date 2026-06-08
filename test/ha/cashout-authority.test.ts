@@ -81,10 +81,16 @@ const createdSeedIds: string[] = [];
 const createdChainIds: string[] = [];
 const createdOperatorIds: string[] = [];
 
+// Synthetic-epoch allocator: distinct per-suite band + per-process random offset + strictly
+// monotonic counter so @@unique(epoch) can't P2002-collide across the shared-process HA suites.
+const EPOCH_BASE = 980_000_000 + Math.floor(Math.random() * 10_000_000);
+let epochSeq = 0;
+const nextEpoch = () => EPOCH_BASE + epochSeq++;
+
 /** Create a Round at a given DB status + crashPoint (the authoritative values the gate reads). */
 async function makeRound(status: string, crashPoint: number): Promise<string> {
   const chain = await prisma.fairnessChain.create({
-    data: { epoch: 6_500_000 + Math.floor(Math.random() * 1_000_000), commitHash: "ca-" + randomUUID(), length: 2, salt: "ca-" + randomUUID(), status: "exhausted" },
+    data: { epoch: nextEpoch(), commitHash: "ca-" + randomUUID(), length: 2, salt: "ca-" + randomUUID(), status: "exhausted" },
   });
   const seed = await prisma.fairnessSeed.create({ data: { chainId: chain.id, chainIndex: 1, seedHash: "ca-" + randomUUID() } });
   const round = await prisma.round.create({ data: { seedId: seed.id, nonce: 1n, crashPoint, status, bettingOpensAt: new Date() } });

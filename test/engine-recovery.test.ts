@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { LedgerService } from "../src/wallet/ledger.service";
@@ -24,11 +24,18 @@ const createdSeedIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdChainIds: string[] = [];
 
+// Synthetic-epoch allocator: a distinct high band + per-process random offset + strictly
+// monotonic counter so @@unique(epoch) can't P2002-collide across the shared `bun test` process
+// (a plain `1e6 + random(1e6)` collided with leftover/sibling rows — a cross-suite flake).
+const EPOCH_BASE = 1_000_000_000 + Math.floor(Math.random() * 10_000_000);
+let epochSeq = 0;
+const nextEpoch = () => EPOCH_BASE + epochSeq++;
+
 async function seedRound() {
   // a fairness chain + seed + round are needed for the FKs
   const chain = await prisma.fairnessChain.create({
     data: {
-      epoch: 1_000_000 + Math.floor(Math.random() * 1_000_000), // synthetic, avoids real epochs
+      epoch: nextEpoch(), // synthetic, collision-proof, avoids real epochs
       commitHash: "c" + randomUUID(),
       length: 2,
       salt: "s" + randomUUID(),
@@ -69,6 +76,15 @@ async function fundedWallet(balance: bigint): Promise<string> {
 }
 
 beforeAll(async () => { await prisma.$connect(); });
+// recoverInterruptedRounds() is fully awaited and arms no timers, but close any OPEN round at
+// the end of each test so a synthetic `running` round can never survive into a later suite's
+// resumeOrRecover/open-round scan in the SHARED `bun test` process.
+afterEach(async () => {
+  await prisma.round.updateMany({
+    where: { status: { in: ["waiting", "betting", "running", "crashed", "settling"] } },
+    data: { status: "completed" },
+  });
+});
 afterAll(async () => {
   // Best-effort cleanup of this run's synthetic rows (FK-safe order:
   // rounds cascade their bets; users cascade their wallets + ledger txns;
