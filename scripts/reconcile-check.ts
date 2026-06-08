@@ -77,12 +77,14 @@ async function main() {
   const adjustment = sumOf("adjustment"); // signed (manual)
 
   // IMPORTANT — scope to bets that STILL EXIST. The engine legitimately DELETES bet
-  // rows (placeBet-failure release; reserving-recovery of a no-debit slot) and rounds/
-  // users can be cascade-deleted; the ledger rows (FK → wallet, not bet) survive. A
-  // closed-book reconciliation must therefore compare the ledger against the ledger
-  // rows whose bet still exists — joined by ledger.refType='bet' AND ledger.refId =
-  // bet.id. (Orphaned debits always had a paired refund, so they net to 0 in the
-  // per-wallet balance — Check 2 proves that globally; here we want the bet-centric view.)
+  // rows (placeBet-failure release; reserving-recovery of a no-debit slot); the ledger
+  // rows (FK → wallet, not bet) survive. (As of F-017 users/wallets/rounds are RESTRICT,
+  // NOT cascade-delete — a money record can no longer be erased by deleting its parent;
+  // PII is anonymized in place instead. This reconciliation math is unaffected either way.)
+  // A closed-book reconciliation therefore compares the ledger against the ledger rows
+  // whose bet still exists — joined by ledger.refType='bet' AND ledger.refId = bet.id.
+  // (Orphaned debits always had a paired refund, so they net to 0 in the per-wallet
+  // balance — Check 2 proves that globally; here we want the bet-centric view.)
   type Agg = { s: bigint | null };
   // Ledger joins are implicitly internal-only (operator bets have no ledger rows),
   // but filter b.operator_id IS NULL explicitly so the bet-side and ledger-side

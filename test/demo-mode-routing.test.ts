@@ -74,9 +74,25 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const operatorId of createdOperatorIds) {
+    // F-017: user→wallet (+ wallet→ledger/bet) is now RESTRICT (was CASCADE) — delete the
+    // child rows first, then the users (mirrors reserving-backlog-low4 child-first teardown).
+    const opUser = { user: { username: { startsWith: `op:${operatorId}:` } } } as const;
+    await prisma.bet.deleteMany({ where: { wallet: opUser } });
+    await prisma.ledgerTransaction.deleteMany({ where: { wallet: opUser } });
+    await prisma.profile.deleteMany({ where: opUser });
+    await prisma.wallet.deleteMany({ where: opUser });
     await prisma.user.deleteMany({ where: { username: { startsWith: `op:${operatorId}:` } } });
   }
-  if (createdUserIds.length) await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  if (createdUserIds.length) {
+    // F-017: ledger/wallet/profile → user are now RESTRICT — delete the child rows of the
+    // directly-created (no-session) users before the users themselves.
+    const byUser = { user: { id: { in: createdUserIds } } } as const;
+    await prisma.bet.deleteMany({ where: { wallet: byUser } });
+    await prisma.ledgerTransaction.deleteMany({ where: { wallet: byUser } });
+    await prisma.profile.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await prisma.wallet.deleteMany({ where: byUser });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  }
   if (createdOperatorIds.length) {
     await prisma.operator.deleteMany({ where: { id: { in: createdOperatorIds } } });
   }

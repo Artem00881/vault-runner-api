@@ -35,6 +35,10 @@ export class MetricsService {
   // fallback (demo/play-money: a transparent random salt was substituted). A non-zero
   // strict rate means a real-money node is stalling on the oracle.
   readonly fairnessSaltFallback: Counter;
+  // GDPR erasure-as-anonymization (F-065): one increment per player anonymized in place
+  // (PII scrubbed; money records retained). A privacy-ops signal — lets a dashboard show
+  // erasure requests are being actioned without exposing who.
+  readonly playerAnonymizeTotal: Counter;
 
   readonly wsConnections: Gauge;
   readonly realizedRtp: Gauge;
@@ -72,6 +76,7 @@ export class MetricsService {
     this.errorsTotal = new Counter({ name: "vaultrun_errors_total", help: "Handled errors", labelNames: ["where"], registers: reg });
     this.auditEventWriteFailures = new Counter({ name: "vaultrun_audit_event_write_failures_total", help: "Significant-event audit-log writes that failed (best-effort; the action still proceeded)", registers: reg });
     this.fairnessSaltFallback = new Counter({ name: "vaultrun_fairness_salt_fallback_total", help: "Salt-oracle could not serve a committed block-hash salt (random fallback or strict stall)", labelNames: ["reason", "mode"], registers: reg });
+    this.playerAnonymizeTotal = new Counter({ name: "vaultrun_player_anonymize_total", help: "Players anonymized in place (GDPR erasure-as-anonymization, F-065; money records retained)", registers: reg });
 
     this.wsConnections = new Gauge({ name: "vaultrun_ws_connections", help: "Active WS connections", registers: reg });
     this.realizedRtp = new Gauge({ name: "vaultrun_realized_rtp", help: "Realized RTP = payouts/stakes", registers: reg });
@@ -118,6 +123,8 @@ export class MetricsService {
   /** A salt-oracle fallback/stall (audit H3). mode=strict → real-money node stalled;
    *  mode=fallback → demo/play-money substituted a random salt. */
   recordSaltFallback(reason: "commit_failed" | "salt_not_ready", mode: "strict" | "fallback") { this.fairnessSaltFallback.inc({ reason, mode }); }
+  /** A player was anonymized in place (GDPR erasure-as-anonymization, F-065). */
+  recordPlayerAnonymize() { this.playerAnonymizeTotal.inc(); }
   recordRejected(reason: string) { this.betsRejected.inc({ reason }); }
   /** A responsible-gambling block (reality-check pending / time / loss / wager). Fired
    *  ALONGSIDE recordRejected (kept for back-compat) to give a clean RG-only signal. */

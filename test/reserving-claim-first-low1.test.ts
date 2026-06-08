@@ -219,8 +219,25 @@ afterAll(async () => {
     if (createdRoundIds.length) await prisma.round.deleteMany({ where: { id: { in: createdRoundIds } } });
     if (createdSeedIds.length) await prisma.fairnessSeed.deleteMany({ where: { id: { in: createdSeedIds } } });
     if (createdChainIds.length) await prisma.fairnessChain.deleteMany({ where: { id: { in: createdChainIds } } });
-    if (createdUserIds.length) await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    // F-017: the low1_ internal users carry a wallet + profile (and these tests write
+    // bet_debit/restart_refund ledger rows on those wallets). user→wallet/profile +
+    // wallet→ledger/bet are now RESTRICT, so a bare user.deleteMany is REJECTED (and swallowed)
+    // and would leak — delete the child rows first: bet → ledger → profile → wallet → user.
+    if (createdUserIds.length) {
+      await prisma.bet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: { userId: { in: createdUserIds } } } });
+      await prisma.profile.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.wallet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    }
     for (const operatorId of createdOperatorIds) {
+      // F-017: user→wallet (+ wallet→ledger/bet) is now RESTRICT (was CASCADE) — delete the
+      // child rows first, then the users (mirrors reserving-backlog-low4 child-first teardown).
+      const opUser = { user: { username: { startsWith: `op:${operatorId}:` } } } as const;
+      await prisma.bet.deleteMany({ where: { wallet: opUser } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: opUser } });
+      await prisma.profile.deleteMany({ where: opUser });
+      await prisma.wallet.deleteMany({ where: opUser });
       await prisma.user.deleteMany({ where: { username: { startsWith: `op:${operatorId}:` } } });
     }
     if (createdOperatorIds.length) await prisma.operator.deleteMany({ where: { id: { in: createdOperatorIds } } });

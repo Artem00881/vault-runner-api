@@ -63,6 +63,7 @@ Responsibilities at a glance:
 | Bet/round limits | Provide per-currency config at onboarding | Enforce them server-side |
 | Responsible gambling | Provide RG config at onboarding | Emit reality checks / session limits |
 | Reconciliation | Match against our reports / your book | Provide reporting API + round history |
+| Data protection (GDPR) | **Controller** — owns player identity, KYC/AML, consent, data-subject requests | **Processor** — stores only the pseudonymous `playerId` + derivatives; no name/email/payment/KYC (§17) |
 
 ---
 
@@ -1192,3 +1193,105 @@ a win).
       `/api/fairness/*`).
 - [ ] Test end-to-end against the reference wallet (`load/operator-wallet-stub.ts`)
       and the live hosted sandbox (`https://sandbox.vaultrun.app`).
+
+---
+
+## 17. Data protection & privacy
+
+Source of truth (what is actually stored): `prisma/schema.prisma`,
+`src/operator/game-session.service.ts`, `src/common/client-ip.ts`,
+`src/operator/rg-config.ts`. Full legal/commercial detail:
+`commercial/data-protection-policy.md`, `commercial/dpa-template.md`,
+`commercial/sub-processors.md`.
+
+### 17.1 Controller / processor split
+
+- **You (the operator) are the data controller.** You own the player relationship,
+  KYC/AML, age/identity verification, consent, and **account-level** responsible
+  gambling (self-exclusion, deposit/loss limits). You decide who may play and mint
+  the launch token accordingly.
+- **Vault Run is your processor.** The RGS runs the game and settles each
+  stake/payout against **your** seamless wallet (§7). It processes personal data
+  **only on your documented instructions** and holds only a **pseudonymous** view of
+  the player. Vault Run **never holds player funds** and **never sees a funding
+  instrument**. (Also reflected in the §1 responsibility table.)
+
+### 17.2 Personal data we store — and never store
+
+**Stored (the complete list):**
+
+| Data | Where |
+|---|---|
+| Pseudonymous **`playerId`** (your own id, from the launch token) | `game_sessions.player_id`; embedded in `users.username` = `op:{operatorId}:{playerId}:{currency}` |
+| Derived **display name** `Player <playerId[0:6]>` | `profiles.display_name` |
+| Session **`locale`** | `game_sessions.locale` |
+| Operator-scoped **game/financial records** (bets, rounds, cash-outs, local journal) — integer minor units, linked to the pseudonymous id | `game_bets`, `game_rounds`, `wallets`, `ledger_transactions` |
+| Transient **client IP** — rate-limit bucket key, **in memory only, never persisted** | `src/common/client-ip.ts` (throttler); **not** in the database |
+
+**Never stored:** real name, email, phone, postal address, date of birth,
+government ID / KYC documents, **payment instrument (card / bank / crypto wallet
+address)**, marketing profile, persistent geolocation, or any special-category
+(Art. 9) data. The seamless-wallet model is why we need none of it — you hold it as
+controller. (A scan of the schema confirms no column exists for any of these.)
+
+### 17.3 Erasure / anonymization (operator-initiated)
+
+Erasure is implemented as **anonymize-the-identity, retain-the-financial-record**,
+**tenant-scoped** to your `operatorId`:
+
+- **Identity is anonymized in place** — `users.username` → `anon:<hash>`,
+  `profiles.display_name` → `anon`, `game_sessions.player_id` → tombstone, and
+  `users.anonymized_at` is stamped.
+- **The BigInt money journal and the round/fairness records are RETAINED**,
+  de-identified, for the statutory AML/bookkeeping window — legal basis **GDPR
+  Art. 17(3)(b)** (legal obligation) and **Art. 17(3)(e)** (legal claims). This is
+  your legal hold; the records stay reconcilable.
+- **Precondition:** the player's money must be at rest (no open bet / in-flight
+  settlement) before anonymization, so a later reversal/reconcile cannot resurrect
+  identity. The action is written to the append-only `audit_events` log.
+
+**Mechanism:** the trigger is **operator-initiated** — you route a verified
+data-subject request to us referencing the `playerId` and we execute it tenant-
+scoped. Today this runs via an **internal operator-initiated process**; a
+**self-service operator HTTP endpoint** is **deferred** behind the same controls as
+the other operator money-write surface — a **per-operator rate limit** and a
+**read-vs-write key-scope** decision (§13.3). The handling flow and turnaround are in
+`commercial/data-protection-policy.md` §C.
+
+### 17.4 Retention summary
+
+Defaults/maximums **absent a different instruction from you** (full table in
+`commercial/data-protection-policy.md` §B):
+
+| Data | Default retention |
+|---|---|
+| Financial ledger + bets | **≥ 5 years** (AML/bookkeeping; your legal hold), de-identified on erasure |
+| Game rounds + fairness records | Retained with the ledger |
+| Significant-event audit log (`audit_events`) | Long-term, immutable (append-only) — **no player IP** (only the operator caller IP on operator-initiated HTTP actions) |
+| Player identity | Anonymized on erasure request, or after defined dormancy |
+| Game sessions | Short (session lifecycle + reconciliation) |
+| Rate-limit IP | Ephemeral — in memory only |
+| App logs / Sentry | 30–90 days, errors only (Sentry only when enabled) |
+| Encrypted off-site backups | Rolling 30 days, client-side encrypted (ciphertext at the store) |
+
+A scheduled retention **sweep** (auto-anonymize at end-of-dormancy) is a **future
+item**, not yet built; retention/erasure is operator-initiated today.
+
+### 17.5 KYC / AML boundary (restated)
+
+KYC, AML, identity/age verification, and **account-level** RG (self-exclusion,
+deposit/loss limits across the account) are **yours** as controller — you simply
+don't mint a launch token for an excluded or unverified player. The RGS enforces
+only the **session-scoped** RG you configure (reality checks, session
+time/loss/wager limits; §11, `src/operator/rg-config.ts`). This is why the RGS needs
+none of the identity/payment data in §17.2.
+
+### 17.6 Sub-processors & transfers
+
+Vault Run engages a small set of sub-processors (hosting, edge/CDN, error tracking
+when enabled, secret management, encrypted off-site backups) — the current inventory,
+regions, data categories, and safeguards are in `commercial/sub-processors.md`, with
+**prior-notice-of-change** under GDPR Art. 28(2). Hosting is **EU** (production on
+Vultr; staging/sandbox on Hetzner, Germany); cross-border sub-processor transfers are
+covered by **SCCs** / the provider's transfer framework. A signable **DPA** (Art. 28(3))
+is provided as `commercial/dpa-template.md`.

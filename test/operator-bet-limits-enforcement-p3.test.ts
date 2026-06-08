@@ -180,12 +180,27 @@ afterAll(async () => {
     if (createdRoundIds.length) await prisma.round.deleteMany({ where: { id: { in: createdRoundIds } } });
     if (createdSeedIds.length) await prisma.fairnessSeed.deleteMany({ where: { id: { in: createdSeedIds } } });
     if (createdChainIds.length) await prisma.fairnessChain.deleteMany({ where: { id: { in: createdChainIds } } });
-    // operator journal users (username tagged op:<operatorId>:…) cascade their
-    // wallets/ledger/profile; then directly-created p3_ users; then operators.
+    // F-017: user→wallet is now RESTRICT (was CASCADE) — delete the operator journal users'
+    // child rows (bets/ledger/wallet) first; then directly-created p3_ users; then operators.
     for (const operatorId of createdOperatorIds) {
+      const opUser = { user: { username: { startsWith: `op:${operatorId}:` } } } as const;
+      await prisma.bet.deleteMany({ where: { wallet: opUser } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: opUser } });
+      await prisma.profile.deleteMany({ where: opUser });
+      await prisma.wallet.deleteMany({ where: opUser });
       await prisma.user.deleteMany({ where: { username: { startsWith: `op:${operatorId}:` } } });
     }
-    if (createdUserIds.length) await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    // F-017: the directly-created p3_ users carry a wallet + profile (and placeBet writes
+    // bet_debit ledger rows on those wallets). user→wallet/profile + wallet→ledger/bet are now
+    // RESTRICT, so a bare user.deleteMany is REJECTED (and swallowed) and would leak — delete
+    // the child rows first, scoped to the tracked ids: bet → ledger → profile → wallet → user.
+    if (createdUserIds.length) {
+      await prisma.bet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: { userId: { in: createdUserIds } } } });
+      await prisma.profile.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.wallet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    }
     if (createdOperatorIds.length) await prisma.operator.deleteMany({ where: { id: { in: createdOperatorIds } } });
   } catch {
     // never fail the suite on cleanup

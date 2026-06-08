@@ -234,11 +234,28 @@ afterAll(async () => {
       : [];
     const allOpIds = [...createdOperatorIds, ...provOps.map((o) => o.id)];
     for (const operatorId of allOpIds) {
+      // F-017: user→wallet (+ wallet→ledger/bet) is now RESTRICT (was CASCADE) — delete the
+      // child rows first, then the users (mirrors reserving-backlog-low4 child-first teardown).
+      const opUser = { user: { username: { startsWith: `op:${operatorId}:` } } } as const;
+      await prisma.bet.deleteMany({ where: { wallet: opUser } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: opUser } });
+      await prisma.profile.deleteMany({ where: opUser });
+      await prisma.wallet.deleteMany({ where: opUser });
       await prisma.user.deleteMany({ where: { username: { startsWith: `op:${operatorId}:` } } });
     }
     if (createdOperatorIds.length) await prisma.operator.deleteMany({ where: { id: { in: createdOperatorIds } } });
     if (createdOperatorCodes.length) await prisma.operator.deleteMany({ where: { code: { in: createdOperatorCodes } } });
-    if (createdUserIds.length) await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    // F-017: the audit_int_* internal players carry a wallet + profile (and settledInternalBet
+    // writes bet_debit/payout_credit ledger rows + bets). user→wallet/profile +
+    // wallet→ledger/bet are now RESTRICT, so a bare user.deleteMany is REJECTED (and swallowed)
+    // and would leak — delete the child rows first: bet → ledger → profile → wallet → user.
+    if (createdUserIds.length) {
+      await prisma.bet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.ledgerTransaction.deleteMany({ where: { wallet: { userId: { in: createdUserIds } } } });
+      await prisma.profile.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.wallet.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    }
   } catch {
     /* never fail the suite on cleanup */
   }

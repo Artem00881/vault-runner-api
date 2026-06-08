@@ -52,6 +52,13 @@ afterAll(async () => {
   // Resolve ids first so we can also sweep any journal users defensively.
   const ops = await prisma.operator.findMany({ where: { code: { in: createdCodes } } });
   for (const op of ops) {
+    // F-017: user→wallet (+ wallet→ledger/bet) is now RESTRICT (was CASCADE) — delete the
+    // child rows first, then the users (mirrors reserving-backlog-low4 child-first teardown).
+    const opUser = { user: { username: { startsWith: `op:${op.id}:` } } } as const;
+    await prisma.bet.deleteMany({ where: { wallet: opUser } });
+    await prisma.ledgerTransaction.deleteMany({ where: { wallet: opUser } });
+    await prisma.profile.deleteMany({ where: opUser });
+    await prisma.wallet.deleteMany({ where: opUser });
     await prisma.user.deleteMany({ where: { username: { startsWith: `op:${op.id}:` } } });
   }
   if (createdCodes.length) {

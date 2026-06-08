@@ -70,6 +70,10 @@ async function purgeSynthetic() {
   });
   if (chains.length === 0) return;
   const ids = chains.map((c) => c.id);
+  // F-017: Bet.round is now RESTRICT (was CASCADE) — delete any bets on these synthetic
+  // rounds BEFORE the rounds (a stray bet from a cross-contaminating run would otherwise
+  // block the round delete). Then rounds → seeds → chains.
+  await prisma.bet.deleteMany({ where: { round: { seed: { chainId: { in: ids } } } } });
   await prisma.round.deleteMany({ where: { seed: { chainId: { in: ids } } } });
   await prisma.fairnessSeed.deleteMany({ where: { chainId: { in: ids } } });
   await prisma.fairnessChain.deleteMany({ where: { id: { in: ids } } });

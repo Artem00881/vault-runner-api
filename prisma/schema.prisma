@@ -61,10 +61,11 @@ model GameSession {
 }
 
 model User {
-  id        String   @id @default(uuid()) @db.Uuid
-  username  String   @unique
-  isGuest   Boolean  @default(true) @map("is_guest")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id           String    @id @default(uuid()) @db.Uuid
+  username     String    @unique
+  isGuest      Boolean   @default(true) @map("is_guest")
+  anonymizedAt DateTime? @map("anonymized_at") @db.Timestamptz(6) // F-017: PII scrubbed in place; ledger/bets retained. null = not anonymized.
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   wallets Wallet[]
   bets    Bet[]
@@ -80,7 +81,7 @@ model Wallet {
   balance   BigInt   @default(0)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User                @relation(fields: [userId], references: [id], onDelete: Restrict) // F-017: a wallet anchors money records — never cascade-delete
   transactions LedgerTransaction[]
   bets         Bet[]
 
@@ -99,7 +100,7 @@ model LedgerTransaction {
   idempotencyKey String   @unique @map("idempotency_key")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Restrict) // F-017: the money journal is retained — never cascade-delete
 
   @@index([walletId, createdAt(sort: Desc)])
   @@map("ledger_transactions")
@@ -185,9 +186,9 @@ model Bet {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   settledAt    DateTime? @map("settled_at") @db.Timestamptz(6)
 
-  round  Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  round  Round  @relation(fields: [roundId], references: [id], onDelete: Restrict) // F-017: bets are money records — never cascade-delete with their round
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict) // F-017: never cascade-delete a player's bet history
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Restrict) // F-017: never cascade-delete a wallet's bet history
 
   @@unique([roundId, userId, panel])
   @@index([userId, createdAt(sort: Desc)])
@@ -219,7 +220,7 @@ model Profile {
   totalLoot         BigInt   @default(0) @map("total_loot")
   updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict) // F-017: anonymize the profile in place (displayName scrub) rather than cascade-delete
 
   @@index([biggestMultiplier(sort: Desc), totalLoot(sort: Desc)])
   @@map("profiles")
