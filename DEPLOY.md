@@ -932,7 +932,8 @@ Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION"
 
 The pre-cert **audit-fix result** is now LIVE on prod: **9/10 HIGH fixed + the M/L
 remediation batches + the governance docs.** Prod api walked **`6bfda18` → `2f3b082`**
-(the same `2f3b082` that is api `origin/main` HEAD). **Staging-first**, both via the
+(prod has since moved on to **`cadb118`** via the **D2 follow-up deploy — see §16.2**;
+`cadb118` is the current api `origin/main` HEAD). **Staging-first**, both via the
 normal `./op-compose[.staging].sh up -d --build`. Deployed ~**00:50 box time, 2026-06-09**.
 **Posture UNCHANGED:** single-node, operator default-off (`WALLET_PROVIDER_TYPE=internal`),
 DEMO play-money, **H5 still active**. **Web is NOT part of this deploy** — web local `main`
@@ -989,6 +990,54 @@ code never triggers.
 Full per-fix detail (per-finding, commits, test counts): `project_production_roadmap.md` →
 "2026-06-09 — AUDIT-FIX PROD DEPLOY" + the "FIX MODE — BATCH" sections; the authoritative
 per-fix record is `/Users/artem/Documents/crash game/audit/audit_findings.md`.
+
+### 16.2 D2 — Audit-fix FOLLOW-UP prod deploy (2026-06-09) — `2f3b082` → `cadb118`, migration #18 ✅ DEPLOYED + VERIFIED
+
+The post-D1 follow-up tail (the D1-FOLLOWUP residual-LOW/MED batch + the new post-fix
+re-audit's two code fixes) is now LIVE on prod: prod api walked **`2f3b082` → `cadb118`**
+(the current api `origin/main` HEAD). **Staging-first**, both via the normal
+`./op-compose[.staging].sh up -d --build`; **`deploy-verifier` = GO**. **Posture UNCHANGED:**
+single-node, operator default-off (`WALLET_PROVIDER_TYPE=internal`), DEMO play-money,
+**H5 still active**. **Web is NOT part of this deploy** (web is deployed separately via
+Lovable — see the roadmap "2026-06-09 — TWO PROD DEPLOYS").
+
+**Commits folded in (past the D1 tip `2f3b082`):** `b244ae2` (the §16.1 D1 runbook record) →
+`c2ec633` (D1-FOLLOWUP fix batch **F-010/047/082/083/084/021** + migration #18) →
+`6e7434f` (follow-up tooling/docs **F-078/052/057/077**) → `cadb118` (NEW-AUDIT
+**F-088** cancelBet claim-first CAS + **F-089** reconcile-check 1a refinement). All were
+PUSHED-not-deployed before this deploy.
+
+**Migration applied on boot: 17 → 18** (ONE new, **additive / forward-only**;
+prod tables tiny ⇒ sub-second locks):
+- **`20260609140000_bet_currency_notnull_round_status_index`** — **`Bet.currency` NOT NULL**
+  (with a wallet-join **backfill** for any legacy null rows; F-084) **+** a
+  **`@@index([round_id,status])`** for the engine's per-round/per-status hot reads (F-021).
+  Composes cleanly on the D1 #13–#17 set.
+
+**Post-deploy verification (ALL PASS, on prod):**
+- `curl localhost:3001/health` → **`{"status":"ok"}`**; PUBLIC edge
+  `https://api.vaultrun.app/health` → **`{"status":"ok"}`** (Cloudflare → Caddy :443 mTLS →
+  `127.0.0.1:3001` intact).
+- Boot log: **"All migrations have been successfully applied"** (migration #18 applied),
+  **Sentry enabled**, **ElectionService acquired leadership (fence = 5)**,
+  **GameEngineService became leader → round loop** (engine producing rounds, multiplier
+  observed climbing to **10.04**), **no boot errors**.
+- Schema confirmed on prod: `game_bets.currency` `is_nullable = NO`.
+
+**Rollback = IMAGE-ONLY to `2f3b082`** — do **NOT** down-migrate. Migration #18 is additive
+and the `2f3b082` code is **schema-compatible** (it never references the new NOT-NULL
+constraint as a write precondition — every code path already stamps `currency` — and an
+extra index is transparent to it).
+
+**Current prod posture after D2:** api **`cadb118`** (single-node, operator-OFF, DEMO, H5
+active) — the full re-audited HEAD; the post-fix re-audit
+(`/Users/artem/Documents/crash game/audit/new_audit_2026-06-09.md`) found **0 errors remain**
+on this posture. Verdict unchanged: **GO B2B-eval/sandbox; NO-GO real-money** (the standing
+real-money gates — F-025 H7 lock + multi-node + WAL/PITR + the paid GLI-19/iTech cert + a B2B
+license + a third-party pentest — are unchanged). Full per-fix detail:
+`project_production_roadmap.md` → "2026-06-09 — TWO PROD DEPLOYS" + "AUDIT-FIX FOLLOW-UP
+(D1-FOLLOWUP)" + "NEW FULL PRE-CERT AUDIT (re-audit)"; authoritative per-fix record =
+`/Users/artem/Documents/crash game/audit/audit_findings.md`.
 
 ---
 
@@ -1151,7 +1200,7 @@ docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox --profile e
 (Include `--profile edge` so the `caddy` service is brought down too; omit it and Caddy
 keeps running. `down -v` also drops `caddydata`/`caddyconfig`, forcing a fresh Let's Encrypt
 issuance on the next `up` — fine, but mind Let's Encrypt rate limits on repeated wipes.)
-This touches ONLY the sandbox box — **prod (now `2f3b082`, single-node, operator-OFF; see §16.1)
+This touches ONLY the sandbox box — **prod (now `cadb118`, single-node, operator-OFF; see §16.2)
 and staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
 
 ### 17.6 Demo data + the operator console (2026-06-08 — for the `/console` showcase)
