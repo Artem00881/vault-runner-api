@@ -40,7 +40,13 @@ is cycling before trusting a number.
 
 ## 4.5c.3 drill harness — failover + operator-mode + reconciliation soak
 
-Three dev-only tools (`load/`, run via `bun`; outside the tsc CI typecheck):
+> **Canonical failover record:** `load/CHAOS-FAILOVER.md` — the single reproducible
+> write-up of the "failover < 5 s + 0-discrepancy" claim (exact local + at-scale commands,
+> PASS criteria, the on-record staging numbers, and why this is a **manual multi-node run,
+> not a single-node CI gate**).
+
+Three dev-only tools (`load/`, run via `bun`; **typechecked in CI** via `tsconfig.scripts.json`,
+but the multi-node *runs* below are manual — CI is single-node):
 
 | Tool | Proves | One-liner |
 |---|---|---|

@@ -291,7 +291,7 @@
     },
     {
       "name": "4. Public (no auth)",
-      "description": "Public, unauthenticated endpoints (spec §8, §13.3, §13.4). Currency precision, round history/current snapshot, and provably-fair verification. Crash points are never leaked before the crash; a round's seed/salt are disclosed only after its seed is revealed.",
+      "description": "Public, unauthenticated endpoints (spec §8, §13.5, §13.6). Currency precision, round history/current snapshot, and provably-fair verification. Crash points are never leaked before the crash; a round's seed/salt are disclosed only after its seed is revealed.",
       "item": [
         {
           "name": "GET /api/currencies",
@@ -317,7 +317,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "rounds", "history"]
             },
-            "description": "The last 30 finished rounds: `[{ id, crashMult, endedAt }]`. Use a returned `id` as `{{fairnessRoundId}}` for the fairness round endpoint. See spec §13.3."
+            "description": "The last 30 finished rounds: `[{ id, crashMult, endedAt }]`. Use a returned `id` as `{{fairnessRoundId}}` for the fairness round endpoint. See spec §13.5."
           },
           "response": []
         },
@@ -331,7 +331,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "round", "current"]
             },
-            "description": "Current public round snapshot — `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` (or `{ phase:\"waiting\", multiplier:1.0 }` when idle). **No crash leak** — only the live climbing multiplier while running. See spec §13.3, §6.2."
+            "description": "Current public round snapshot — `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` (or `{ phase:\"waiting\", multiplier:1.0 }` when idle). **No crash leak** — only the live climbing multiplier while running. See spec §13.5, §6.2."
           },
           "response": []
         },
@@ -345,7 +345,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "fairness", "current"]
             },
-            "description": "The active fairness chain's public commitment (commit hash, epoch, salt source). The crash point for upcoming rounds is bound by this commitment before betting closes. See spec §13.4 and `provably-fair-guide.md`."
+            "description": "The active fairness chain's public commitment (commit hash, epoch, salt source). The crash point for upcoming rounds is bound by this commitment before betting closes. See spec §13.6 and `provably-fair-guide.md`."
           },
           "response": []
         },
@@ -359,7 +359,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "fairness", "round", "{{fairnessRoundId}}"]
             },
-            "description": "Reveal + verification data for a finished round: revealed `seed` + `salt`, `commitHash`, `chainIndex`, `prevSeed`, the on-chain `crashPoint`, the independently `recomputedCrash`, `matches`, and `linkVerified` (SHA256 chain link). If the round's seed is not yet revealed, returns `{ roundId, status, revealed:false }`. Set `{{fairnessRoundId}}` from `GET /api/rounds/history`. See spec §13.4 and `provably-fair-guide.md`."
+            "description": "Reveal + verification data for a finished round: revealed `seed` + `salt`, `commitHash`, `chainIndex`, `prevSeed`, the on-chain `crashPoint`, the independently `recomputedCrash`, `matches`, and `linkVerified` (SHA256 chain link). If the round's seed is not yet revealed, returns `{ roundId, status, revealed:false }`. Set `{{fairnessRoundId}}` from `GET /api/rounds/history`. See spec §13.6 and `provably-fair-guide.md`."
           },
           "response": []
         },
@@ -373,7 +373,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "fairness", "epochs"]
             },
-            "description": "Public commitments for ALL fairness epochs (chain-of-custody, including exhausted chains). Use an epoch number as `{{fairnessEpoch}}` for the seed dump. See spec §13.4."
+            "description": "Public commitments for ALL fairness epochs (chain-of-custody, including exhausted chains). Use an epoch number as `{{fairnessEpoch}}` for the seed dump. See spec §13.6."
           },
           "response": []
         },
@@ -387,7 +387,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "fairness", "epoch", "{{fairnessEpoch}}", "seeds"]
             },
-            "description": "Per-epoch **revealed** seed dump for chain-of-custody reconstruction. Never returns an unrevealed (future) seed. `400 invalid_epoch` for a non-integer/negative epoch; `404 epoch_not_found` if unknown. See spec §13.4 and `provably-fair-guide.md`."
+            "description": "Per-epoch **revealed** seed dump for chain-of-custody reconstruction. Never returns an unrevealed (future) seed. `400 invalid_epoch` for a non-integer/negative epoch; `404 epoch_not_found` if unknown. See spec §13.6 and `provably-fair-guide.md`."
           },
           "response": []
         },
@@ -408,7 +408,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "fairness", "verify"]
             },
-            "description": "Recompute a crash point from a `seed` + `salt` (and optional `prevSeed` for the chain-link check) — exactly what a client can also do offline. Returns `{ crash, linkVerified }`.\n\n**Body:** `{ \"seed\": \"<hex>\", \"salt\": \"<string>\", \"prevSeed\": \"<hex, optional>\" }`. `seed`/`prevSeed` must be hex and `salt` non-empty, else **400**. Fill `seed`/`salt` from a `GET /api/fairness/round/:id` reveal. See spec §13.4 and `provably-fair-guide.md`."
+            "description": "Recompute a crash point from a `seed` + `salt` (and optional `prevSeed` for the chain-link check) — exactly what a client can also do offline. Returns `{ crash, linkVerified }`.\n\n**Body:** `{ \"seed\": \"<hex>\", \"salt\": \"<string>\", \"prevSeed\": \"<hex, optional>\" }`. `seed`/`prevSeed` must be hex and `salt` non-empty, else **400**. Fill `seed`/`salt` from a `GET /api/fairness/round/:id` reveal. See spec §13.6 and `provably-fair-guide.md`."
           },
           "response": []
         }

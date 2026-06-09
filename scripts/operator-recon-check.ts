@@ -40,7 +40,11 @@ const STUB_URL = process.env.STUB_URL ?? "http://localhost:4001";
 const STUB_KEY = process.env.STUB_KEY ?? "stub-key";
 const OPERATOR_CODE = process.env.OPERATOR_CODE ?? "load-stub";
 
-interface BookEntry { bet: number; win: number; rollback: number; player: string; currency: string }
+// F-001b/c, F-078: the operator book dumps bet/win/rollback as BigInt-safe DECIMAL
+// STRINGS (a high-decimal-currency total can exceed 2^53). Parse every one with
+// BigInt — never Number — exactly like the production wire client. `counts` are
+// plain call tallies (small ints), so they stay number.
+interface BookEntry { bet: string; win: string; rollback: string; player: string; currency: string }
 interface StubBook { counts: Record<string, number>; players: number; book: Record<string, BookEntry> }
 
 interface Check { name: string; ok: boolean; detail: string }
@@ -84,7 +88,7 @@ async function main() {
   const o1mismatch: string[] = [];
   for (const b of cashed) {
     const e = book[b.id];
-    if (!e || e.win <= 0) o1miss.push(b.id);
+    if (!e || BigInt(e.win) <= 0n) o1miss.push(b.id);
     else if (BigInt(e.win) !== BigInt(b.payout)) o1mismatch.push(`${b.id}(book=${e.win} vs payout=${b.payout})`);
   }
   checks.push({
@@ -96,7 +100,7 @@ async function main() {
   });
 
   // O2 — BUSTED PURITY (busted ⇒ a bet but NO win on the operator book).
-  const o2paid = busted.filter((b) => book[b.id] && book[b.id].win > 0).map((b) => b.id);
+  const o2paid = busted.filter((b) => book[b.id] && BigInt(book[b.id].win) > 0n).map((b) => b.id);
   checks.push({
     name: "O2. busted purity (no busted op-bet got an operator win)",
     ok: o2paid.length === 0,
@@ -108,9 +112,9 @@ async function main() {
   const o3mismatch: string[] = [];
   for (const b of wagered) {
     const e = book[b.id];
-    const net = e ? e.bet - e.rollback : 0;
-    if (!e || net <= 0) o3miss.push(b.id);
-    else if (BigInt(net) !== BigInt(b.amount)) o3mismatch.push(`${b.id}(book=${net} vs amount=${b.amount})`);
+    const net = e ? BigInt(e.bet) - BigInt(e.rollback) : 0n;
+    if (!e || net <= 0n) o3miss.push(b.id);
+    else if (net !== BigInt(b.amount)) o3mismatch.push(`${b.id}(book=${net} vs amount=${b.amount})`);
   }
   checks.push({
     name: "O3. stake linkage (wagered op-bet ⇒ operator bet debit == stake)",
