@@ -622,7 +622,7 @@ restart the Prometheus container, see §10).
 
 ---
 
-## 16. Scale-out foundation + HA core (Phase 4) — built 2026-06-05, ✅ DEPLOYED single-node on staging + PROD (prod `6bfda18`)
+## 16. Scale-out foundation + HA core (Phase 4) — built 2026-06-05, ✅ DEPLOYED single-node on staging + PROD (this Phase-4 deploy = `6bfda18`; prod has since moved to `2f3b082` via D1 — see §16.1)
 
 > **State:** the Phase-4 **foundation** (4.0–4.4) **plus the HA core**
 > (**4.5a** leader-election primitives + split-brain DB belts, **4.5b** wire election
@@ -662,7 +662,8 @@ restart the Prometheus container, see §10).
 > **`bet_failed` backpressure fix** (PgBouncer tx pool) before a real betting 10k, and
 > `deploy-verifier` + sign-off. (They do not pinch today's single-node/internal/demo prod and are only
 > needed for real operator betting at 10k, itself gated on a real operator + GLI cert.) **api
-> `origin/main` is now `99db480` (web HEAD `74bbd93`); prod still runs `6bfda18`** — the post-deploy
+> `origin/main` is now `99db480` (web HEAD `74bbd93`); prod ran `6bfda18` at this Phase-4 deploy
+> (**SUPERSEDED 2026-06-09: prod api now runs `2f3b082`, migrations 12 → 17 — see §16.1**)** — the post-deploy
 > `0c58e93` + `bb6bed6` + `a180a45` + `a1b628b` + `51f45ba` + `99db480` (this §16 + the STOP-decision)
 > + `163d459` (the Race-1 test/comment) + `e573c8f` + `c0dfb47` (the dev-only `load/`+`scripts/` 10k-run
 > tooling) are **docs/test/tooling-only → NO prod redeploy needed**. The deploy facts are recorded below for
@@ -927,6 +928,68 @@ Full per-commit detail: `project_production_roadmap.md` → "PHASE 4 FOUNDATION"
 "PHASE 4.5a + 4.5b — HA CORE" + "PHASE 4.5c.1" + "PHASE 4.5c.2" + "PHASE 4.5c.3" +
 "PHASE 4.5c.3 — STAGING SLA RUNS + CONCURRENT-LEADER-FLIP MONEY-PATH AUDIT".
 
+### 16.1 D1 — Audit-fix prod deploy (2026-06-09) — `6bfda18` → `2f3b082`, migrations 12 → 17 ✅ DEPLOYED + VERIFIED
+
+The pre-cert **audit-fix result** is now LIVE on prod: **9/10 HIGH fixed + the M/L
+remediation batches + the governance docs.** Prod api walked **`6bfda18` → `2f3b082`**
+(the same `2f3b082` that is api `origin/main` HEAD). **Staging-first**, both via the
+normal `./op-compose[.staging].sh up -d --build`. Deployed ~**00:50 box time, 2026-06-09**.
+**Posture UNCHANGED:** single-node, operator default-off (`WALLET_PROVIDER_TYPE=internal`),
+DEMO play-money, **H5 still active**. **Web is NOT part of this deploy** — web local `main`
+(`f441f0c`, Phase-6 #9) stays HELD/unpushed; **prod web unchanged.**
+
+**Staging-first (validated CLEAN).** Deployed staging to `2f3b082` via
+**`./op-compose.staging.sh up -d --build`**. ⚠️ **Wrapper gotcha — on staging use ONLY the
+`.staging` wrapper:** `op-compose.staging.sh` sets `OP_ENV_FILE=op.staging.env` → vault
+**`VaultRun-Staging`**; the prod `./op-compose.sh` uses `op.prod.env` → **`VaultRun-Prod`**,
+which the **staging service-account token cannot read** (the staging box's SA is scoped to
+`VaultRun-Staging` only) — running the prod wrapper on staging fails the secret resolve.
+Staging validated: all **5** new migrations applied; the `audit_events` table present; HA
+**election acquired**; the engine **cleanly resumed an in-flight round** (the H5 resume
+logic); `/health` ok.
+
+**Prod deploy.** On `ssh vaultrun` (dir `/root/vault-runner-api`):
+`git pull --ff-only && ./op-compose.sh up -d --build`. Boot log: **"All migrations have
+been successfully applied"** (5 files), **Sentry enabled**, **ElectionService acquired
+leadership (fence = 2)**, **GameEngineService became leader → round loop**, **"Nest
+application successfully started"**.
+
+**Migrations applied on boot: 12 → 17** (FIVE new, all **additive / forward-only**;
+prod tables tiny so every lock was **sub-second** — `ledger_transactions`=117,
+`game_bets`=22, `users`=302):
+- **`20260608000000_audit_events`** — append-only `audit_events` table + **3 immutability
+  triggers** (block UPDATE/DELETE/TRUNCATE on the significant-event trail). Ops follow-up:
+  once the app DB role is provisioned, also `REVOKE UPDATE, DELETE ON "audit_events" FROM
+  <app_role>;` (see §5).
+- **`20260608120000_fk_restrict_money_records`** — **6 money FKs CASCADE → RESTRICT**
+  (money records can no longer be silently cascade-deleted) + **`users.anonymized_at`**
+  (H4 GDPR erasure-as-anonymization). NOTE for rollback: this only changes **DELETE**
+  behaviour, which the old `6bfda18` code never triggers.
+- **`20260609000000_wallet_rollback_ledger`** — the once-only operator-rollback marker /
+  durable discrepancy ledger (M1, `47c0344`).
+- **`20260609120000_rg_reality_check_state`** — **3 nullable `GameSession` columns** for
+  reality-check reconnect-persistence (M3, `cf74013`).
+- **`20260609130000_ledger_ref_index`** — `CREATE INDEX` on the ledger ref (L1/L2,
+  `2f3b082`).
+
+**Post-deploy verification (ALL PASS).**
+- Prod loopback `curl localhost:3001/health` → **`{"status":"ok"}`**.
+- Engine producing rounds (multiplier climbed **1.41 → 2.02 over ~3 s**).
+- PUBLIC edge `https://api.vaultrun.app/health` → **`{"status":"ok"}`** (Cloudflare → Caddy
+  :443 mTLS → `127.0.0.1:3001` intact); `vaultrun.app` serves the web app.
+- New routes LIVE: **`/version`** (F-059 — behind the **`METRICS_TOKEN`** guard, so it
+  returns **401 without a token, by design**), **`/api/operator/audit-events`** (F-058),
+  **`/api/operator/bets/:betId/void`** (#5).
+
+**Rollback = IMAGE-ONLY to `6bfda18`** — do **NOT** down-migrate. The 12 → 17 migrations are
+additive and the `6bfda18` code is **schema-compatible**: it references **none** of the new
+objects, and the FK **CASCADE → RESTRICT** change only alters DELETE behaviour, which old
+code never triggers.
+
+Full per-fix detail (per-finding, commits, test counts): `project_production_roadmap.md` →
+"2026-06-09 — AUDIT-FIX PROD DEPLOY" + the "FIX MODE — BATCH" sections; the authoritative
+per-fix record is `/Users/artem/Documents/crash game/audit/audit_findings.md`.
+
 ---
 
 ## 17. Hosted operator-mode SANDBOX (Phase 6 #3) — built 2026-06-07, ✅ DONE — PUBLICLY LIVE at https://sandbox.vaultrun.app + externally e2e-VERIFIED
@@ -1088,8 +1151,8 @@ docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox --profile e
 (Include `--profile edge` so the `caddy` service is brought down too; omit it and Caddy
 keeps running. `down -v` also drops `caddydata`/`caddyconfig`, forcing a fresh Let's Encrypt
 issuance on the next `up` — fine, but mind Let's Encrypt rate limits on repeated wipes.)
-This touches ONLY the sandbox box — **prod (`6bfda18`, single-node, operator-OFF) and
-staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
+This touches ONLY the sandbox box — **prod (now `2f3b082`, single-node, operator-OFF; see §16.1)
+and staging are untouched.** The sandbox is operator-mode + STUB ONLY, never a real wallet.
 
 ### 17.6 Demo data + the operator console (2026-06-08 — for the `/console` showcase)
 The greenfield **operator console** (web repo `vault-runner-main`, route `/console`) reads
