@@ -98,6 +98,8 @@ async function openSession(opts: { rgConfig?: unknown; currency?: string; player
  *  accounting has prior activity. */
 async function seedBet(walletId: string, userId: string, o: { amount: bigint; status: string; payout?: bigint; createdAt?: Date; panel?: Panel }) {
   const roundId = await makeRound("crashed");
+  // Match the live placeBet, which stamps the wallet's canonical currency.
+  const { currency } = await prisma.wallet.findUniqueOrThrow({ where: { id: walletId }, select: { currency: true } });
   await prisma.bet.create({
     data: {
       id: randomUUID(),
@@ -108,6 +110,7 @@ async function seedBet(walletId: string, userId: string, o: { amount: bigint; st
       amount: o.amount,
       status: o.status,
       payout: o.payout ?? 0n,
+      currency: currency.toUpperCase(),
       ...(o.createdAt ? { createdAt: o.createdAt } : {}),
     },
   });
@@ -378,7 +381,7 @@ describe("RG.2b TOCTOU hard-cap closure (concurrent same-session)", () => {
     await bettingRound();
     // A concurrent in-flight reservation on the CURRENT round (different panel, same wallet).
     await prisma.bet.create({
-      data: { id: randomUUID(), roundId: activeRoundId, userId: s.userId, walletId: s.walletId, panel: "B", amount: 1500n, status: "reserving" },
+      data: { id: randomUUID(), roundId: activeRoundId, userId: s.userId, walletId: s.walletId, panel: "B", amount: 1500n, status: "reserving", currency: s.currency.toUpperCase() },
     });
 
     // sessionAccounting alone EXCLUDES reserving (sees only 3000) → would wrongly allow 600.

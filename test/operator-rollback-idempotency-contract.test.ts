@@ -502,3 +502,103 @@ describe("M1.F drain race — concurrent drain + live void-resume emit exactly o
     expect(finalized2).toBeGreaterThanOrEqual(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCENARIO G — F-082 INTENT-DISTINCT REFUND DEDUPE. Two reversals of the SAME bet's stake
+// DEBIT (both originalDirection: "debit") — a round-restart refund (intent "restart_refund",
+// the engine's closeAndRefundRound / recoverStrandedActiveBets) and an operator void refund
+// (intent default → "void_refund", performVoidReversals) — must NOT collide on the once-only
+// dedupeKey. Each gets its own intent-distinct reason, so each derives a DISTINCT dedupeKey
+// ({betId}#restart_refund vs {betId}#void_refund) → BOTH emit + persist their own confirmed
+// row; neither permanently suppresses the other. WHEREAS two reversals with the SAME intent
+// dedupe to ONE row + ONE emit (the once-only guard still holds within an intent).
+//
+// FAILS-FIRST against the pre-F-082 code (reason derived ONLY from originalDirection): both
+// debit-refunds would share {betId}#void_refund, so whichever ran first would suppress the
+// other — the assertion that the second refund EMITS (calls.rollback advances) fails.
+describe("M1.G F-082 intent-distinct refund — restart_refund and void_refund of one bet both emit; same intent dedupes", () => {
+  const operatorApi = new NonIdempotentMockOperator();
+  const seamless = new SeamlessOperatorWallet(operatorApi, sessions.resolver(), {}, rollbackStore);
+
+  test("restart_refund and the default void_refund of the SAME bet create TWO distinct rows + emit; a repeat of an intent does NOT re-emit", async () => {
+    const startBalance = 100_000;
+    const { op, playerId, currency, walletId, userId } = await launchReal(operatorApi, "G", "EUR", startBalance);
+    const roundId = await makeRound();
+    const panel = "A";
+    const K = debitKey(roundId, userId, panel); // the stake debit's original key (the operator's reverse target)
+    const betId = randomUUID();
+    createdBetIds.push(betId);
+
+    // The session resolver maps this wallet for the direct reverse() calls below.
+    const sessionForBet: OperatorSession = { operatorId: op.id, playerId, currency, roundId };
+    const wallet = new SeamlessOperatorWallet(operatorApi, async (_w) => sessionForBet, {}, rollbackStore);
+
+    // Apply the stake debit at the operator (−1000) so the refund reversals have something to undo.
+    await operatorApi.bet(op.id, { playerId, currency, amount: "1000", transactionId: K, roundId, betId });
+    expect(operatorApi.balanceOf(playerId, currency)).toBe(BigInt(startBalance - 1000));
+    const rollbacksStart = operatorApi.calls.rollback;
+
+    // --- Leg 1: the ROUND-RESTART refund (intent "restart_refund"), as closeAndRefundRound /
+    // recoverStrandedActiveBets issue it. Logical reversal = {betId}#restart_refund.
+    await wallet.reverse(walletId, {
+      originalKey: K,
+      reverseKey: `bet:${betId}:restart_refund`,
+      amount: 1000n,
+      originalDirection: "debit",
+      type: "refund",
+      intent: "restart_refund",
+      ref: { refType: "bet", refId: betId },
+    });
+    expect(operatorApi.calls.rollback).toBe(rollbacksStart + 1); // it emitted
+    const restartRow = await findRow(op.id, { betId, transactionId: K, reason: "restart_refund" });
+    expect(restartRow?.status).toBe("confirmed");
+    expect(restartRow?.reason).toBe("restart_refund");
+    expect(restartRow?.betId).toBe(betId);
+
+    // --- Leg 2: the OPERATOR VOID refund of the SAME bet's SAME stake debit on the SAME key K,
+    // with NO intent → the originalDirection-derived default "void_refund". Logical reversal =
+    // {betId}#void_refund — DISTINCT from {betId}#restart_refund. It must NOT be suppressed by
+    // Leg 1's confirmed row: it EMITS and persists its OWN confirmed row.
+    await wallet.reverse(walletId, {
+      originalKey: K,
+      reverseKey: `bet:${betId}:refund`,
+      amount: 1000n,
+      originalDirection: "debit",
+      type: "refund",
+      // intent omitted → default void_refund
+      ref: { refType: "bet", refId: betId },
+    });
+    // THE F-082 INVARIANT: the second refund EMITTED (pre-fix it would be SKIPPED — same key).
+    expect(operatorApi.calls.rollback).toBe(rollbacksStart + 2);
+    const voidRow = await findRow(op.id, { betId, transactionId: K, reason: "void_refund" });
+    expect(voidRow?.status).toBe("confirmed");
+    expect(voidRow?.reason).toBe("void_refund");
+    expect(voidRow?.betId).toBe(betId);
+
+    // TWO DISTINCT rows coexist for the same (betId, key K) — different dedupeKeys.
+    expect(restartRow?.id).not.toBe(voidRow?.id);
+    expect(dedupeKeyOf({ betId, transactionId: K, reason: "restart_refund" })).not.toBe(
+      dedupeKeyOf({ betId, transactionId: K, reason: "void_refund" }),
+    );
+    const rowCount = await prisma.walletRollback.count({ where: { operatorId: op.id, betId } });
+    expect(rowCount).toBe(2);
+
+    // --- Same-intent REPEAT: re-issuing the restart_refund (e.g. a boot crash-loop re-runs
+    // recoverStrandedActiveBets) must NOT re-emit — the once-only guard still holds WITHIN the
+    // intent (its {betId}#restart_refund row is already confirmed).
+    await wallet.reverse(walletId, {
+      originalKey: K,
+      reverseKey: `bet:${betId}:restart_refund`,
+      amount: 1000n,
+      originalDirection: "debit",
+      type: "refund",
+      intent: "restart_refund",
+      ref: { refType: "bet", refId: betId },
+    });
+    expect(operatorApi.calls.rollback).toBe(rollbacksStart + 2); // STILL 2 — the repeat was deduped/skipped
+    expect(await prisma.walletRollback.count({ where: { operatorId: op.id, betId } })).toBe(2); // no third row
+
+    // Nothing left owed for this operator.
+    expect(await prisma.walletRollback.count({ where: { operatorId: op.id, status: { in: ["pending", "draining"] } } })).toBe(0);
+  });
+});

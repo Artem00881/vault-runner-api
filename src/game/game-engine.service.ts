@@ -176,6 +176,12 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
     this.steppingDown = false;
     this.armDeadman();
     await this.fairness.ensureChain();
+    // F-083: on EVERY production boot, finalize any bet stranded 'active' on a prior refund-all
+    // (completed/pre-outcome) round whose closeAndRefundRound reverse() had failed. This is the
+    // authoritative boot heal (start() resumes via resumeOrRecover() below, which does NOT call the
+    // test-only recoverInterruptedRounds()). No age gate — boot recovery is single-threaded, not
+    // racing a live close; the periodic gateway sweep continues to heal at runtime. Idempotent.
+    await this.recoverStrandedActiveBets(0);
     // Phase 4.5c.2: RESUME the in-flight round (seamless failover) instead of always
     // close+refunding it. resumeOrRecover() either re-attaches the loop to the persisted
     // round and continues from the correct phase, or — for an anomalous/corrupt/ancient
@@ -202,6 +208,10 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
   private async recoverInterruptedRounds() {
     // H1: refund/clear stale 'reserving' bets first (regardless of round status).
     await this.recoverReservingBets();
+    // F-083: also heal stranded-'active' refund-all bets here (this method is the test entry point
+    // AND the resume-anomaly fallback primitive). The authoritative production boot heal is in
+    // start() before resumeOrRecover(); this call is idempotent so the overlap is harmless.
+    await this.recoverStrandedActiveBets(0);
     const stuck = await this.prisma.round.findMany({
       where: { status: { in: OPEN_PHASES as string[] } },
       select: { id: true },
@@ -247,6 +257,9 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
           amount: bet.amount,
           originalDirection: "debit",
           type: "refund",
+          // F-082: intent-distinct dedupe (vs the void-refund leg, which is also a debit-refund of
+          // the same bet) — matches the already-distinct reverseKey above.
+          intent: "restart_refund",
           ref: { refType: "bet", refId: bet.id },
         });
         await this.prisma.bet.update({
@@ -628,6 +641,60 @@ export class GameEngineService implements OnModuleInit, OnModuleDestroy {
       }
     }
     return recovered;
+  }
+
+  /**
+   * F-083: finalize bets stranded `active` on a force-`completed`, pre-outcome (refund-all) round.
+   * This can happen ONLY if closeAndRefundRound's reverse() threw on its first try: the round is
+   * force-`completed` but the bet row stays `active`, and neither recoverReservingBets
+   * (reserving/cancelling only) nor recoverInterruptedRounds (OPEN rounds only) rescans it. The
+   * owed refund is durable (operator mode: the wallet_rollbacks outbox re-driven by drainPending;
+   * internal/demo mode: re-posted idempotently here). We target ONLY `completed` + `crashedAt:null`
+   * — the refund-all terminal: a normally-settled round always passes through `crashed` (crashedAt
+   * stamped) before `completed`, so an outcome-bearing round's winners/losers are NEVER touched here
+   * — plus an age gate so we never race a live close. Re-run the SAME idempotent restart-refund (no
+   * double-pay: keyed on `bet:{id}:restart_refund` + the operator originalKey) then CAS-finalize
+   * `active` → `cancelled`. Leader-gated by the caller (shared DB + money).
+   */
+  async recoverStrandedActiveBets(olderThanMs = 60_000): Promise<number> {
+    const cutoff = new Date(Date.now() - olderThanMs);
+    const stranded = await this.prisma.bet.findMany({
+      where: {
+        status: "active",
+        round: { status: "completed", crashedAt: null, settledAt: { lt: cutoff } },
+      },
+      select: { id: true, walletId: true, amount: true, roundId: true, userId: true, panel: true },
+      take: 100,
+    });
+    if (stranded.length === 0) return 0;
+    this.log.warn(
+      `F-083: finalizing ${stranded.length} bet(s) stranded 'active' on a refund-all (completed/pre-outcome) round`,
+    );
+    let healed = 0;
+    for (const bet of stranded) {
+      try {
+        await this.wallet$.reverse(bet.walletId, {
+          originalKey: `bet:${bet.roundId}:${bet.userId}:${bet.panel}:debit`,
+          reverseKey: `bet:${bet.id}:restart_refund`,
+          amount: bet.amount,
+          originalDirection: "debit",
+          type: "refund",
+          intent: "restart_refund", // F-082: matches closeAndRefundRound's intent-distinct dedupe
+          ref: { refType: "bet", refId: bet.id },
+        });
+        // CAS on status so a concurrent path that already finalized this bet wins (no double work).
+        const flip = await this.prisma.bet.updateMany({
+          where: { id: bet.id, status: "active" },
+          data: { status: "cancelled", settledAt: new Date() },
+        });
+        if (flip.count > 0) healed++;
+      } catch (e: any) {
+        this.log.error(
+          `F-083 stranded-active finalize failed for bet ${bet.id}: ${e?.message} — left for the next sweep`,
+        );
+      }
+    }
+    return healed;
   }
 
   stop() {

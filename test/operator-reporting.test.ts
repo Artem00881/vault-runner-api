@@ -559,11 +559,45 @@ describe("R.10 per-currency decimals on report rows (Phase 3.6)", () => {
     expect(usdtRow.decimals).toBe(6); // non-2 canary on a bet row
   });
 
-  test("a bet with a NULL currency → decimals falls back to 2 (never throws)", async () => {
-    // Bet.currency is nullable in the schema; a legacy/internal row with no stamped
-    // currency must still produce a row with the 2-dp fallback, not a 500.
+  test("F-084: a NULL Bet.currency is REJECTED by the DB (NOT NULL constraint enforced)", async () => {
+    // F-084 hardened Bet.currency to NOT NULL: the live placeBet always stamps the
+    // wallet's canonical code, so a null can only be a code path that forgot to — and
+    // the constraint now fails it loud (no schema default). A NULL insert must throw.
     const op = await freshOperator(["EUR"]);
     const p = await makePlayer(op.id, "row-nullccy", "EUR");
+    const roundId = await makeRound();
+    const betId = randomUUID();
+    // Wrap in an async IIFE so we await a real Promise (prisma returns a thenable
+    // PrismaPromise, which bun's `.rejects` matcher rejects as not-a-Promise).
+    await expect(
+      (async () =>
+        prisma.bet.create({
+          data: {
+            id: betId,
+            roundId,
+            userId: p.userId,
+            walletId: p.walletId,
+            panel: "A",
+            amount: 100n,
+            status: "busted",
+            payout: 0n,
+            demo: false,
+            operatorId: op.id,
+            currency: null as unknown as string, // F-084: no longer allowed — must be rejected
+            settledAt: new Date(),
+          },
+        }))(),
+    ).rejects.toThrow();
+    // Nothing was persisted (the row never made it past the constraint).
+    expect(await prisma.bet.findUnique({ where: { id: betId } })).toBeNull();
+  });
+
+  test("an UNKNOWN (unseeded) Bet.currency → decimals falls back to 2 (never throws)", async () => {
+    // The decimals-fallback path still matters now that currency is NOT NULL: a row can
+    // carry a stamped-but-unseeded code (a currency the operator offers that isn't yet in
+    // the canonical table). currencyMeta() returns the 2-dp fallback rather than a 500.
+    const op = await freshOperator(["EUR"]);
+    const p = await makePlayer(op.id, "row-unknownccy", "EUR");
     const roundId = await makeRound();
     const betId = randomUUID();
     await prisma.bet.create({
@@ -578,13 +612,13 @@ describe("R.10 per-currency decimals on report rows (Phase 3.6)", () => {
         payout: 0n,
         demo: false,
         operatorId: op.id,
-        currency: null, // explicitly unstamped
+        currency: "XYZ", // valid (non-null) but not in the canonical decimals table
         settledAt: new Date(),
       },
     });
     const res = await reporting.bets(op.id, parseBetsQuery({ from: FROM.toISOString(), to: TO.toISOString() }));
     const row = res.bets.find((b) => b.id === betId)!;
-    expect(row.currency).toBeNull();
-    expect(row.decimals).toBe(2); // fallback for a null/unknown currency
+    expect(row.currency).toBe("XYZ");
+    expect(row.decimals).toBe(2); // fallback for an unknown currency
   });
 });

@@ -132,6 +132,9 @@ async function reservingBet(opts: {
   debitTxId?: string | null;
 }): Promise<string> {
   const id = randomUUID();
+  // Match the live placeBet, which stamps the wallet's canonical currency (this suite
+  // launches EUR/USD players, so derive it from the wallet rather than hardcode).
+  const { currency } = await prisma.wallet.findUniqueOrThrow({ where: { id: opts.walletId }, select: { currency: true } });
   await prisma.bet.create({
     data: {
       id,
@@ -141,6 +144,7 @@ async function reservingBet(opts: {
       panel: opts.panel,
       amount: opts.amount,
       status: "reserving",
+      currency: currency.toUpperCase(),
       debitTxId: opts.debitTxId ?? null,
     },
   });

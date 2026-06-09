@@ -103,6 +103,9 @@ async function pendingBet(opts: {
   cashoutMult: number;
 }): Promise<string> {
   const id = randomUUID();
+  // Match the live placeBet, which stamps the wallet's canonical currency (this suite
+  // launches EUR/USD/GBP players, so derive it from the wallet rather than hardcode).
+  const { currency } = await prisma.wallet.findUniqueOrThrow({ where: { id: opts.walletId }, select: { currency: true } });
   await prisma.bet.create({
     data: {
       id,
@@ -114,6 +117,7 @@ async function pendingBet(opts: {
       status: "payout_pending",
       cashoutMult: opts.cashoutMult,
       payout: opts.payout,
+      currency: currency.toUpperCase(),
       debitTxId: null,
       payoutTxId: null,
       settledAt: new Date(),

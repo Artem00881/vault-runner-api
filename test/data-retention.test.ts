@@ -76,7 +76,7 @@ async function freshFixture(opts: { withLedgerAndBet: boolean }): Promise<{
     const roundId = await freshRound();
     betId = randomUUID();
     await prisma.bet.create({
-      data: { id: betId, roundId, userId: user.id, walletId, panel: "A", amount: 100n, status: "busted", payout: 0n },
+      data: { id: betId, roundId, userId: user.id, walletId, panel: "A", amount: 100n, status: "busted", payout: 0n, currency: "DEMO" },
     });
     createdBetIds.push(betId);
     // A debit ledger row referencing the wallet (the money journal we must retain).

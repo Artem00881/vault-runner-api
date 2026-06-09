@@ -150,7 +150,7 @@ test("H1: a debited 'reserving' bet (debit applied, never activated) is refunded
   // row never flipped to 'active'. ledger.debit reduces the balance to 9900 and
   // writes the bet_debit row under the deterministic key recovery looks up.
   await prisma.bet.create({
-    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving" },
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving", currency: "DEMO" },
   });
   const tx = await ledger.debit(walletId, 100n, "bet_debit", debitKey(roundId, userId, "A"), {
     refType: "bet",
@@ -192,7 +192,7 @@ test("H1: a 'reserving' bet with NO ledger debit moved no money — recovery del
   // A reservation that never debited (e.g. crashed between insert and debit, or a
   // debit that threw and the slot wasn't yet dropped). No bet_debit row exists.
   await prisma.bet.create({
-    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving" },
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving", currency: "DEMO" },
   });
   expect(await ledger.getBalance(walletId)).toBe(10_000n);
 

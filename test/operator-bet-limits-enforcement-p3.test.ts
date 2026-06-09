@@ -138,6 +138,9 @@ async function activeBet(opts: {
   maxWinPerBet?: bigint | null;
 }): Promise<string> {
   const betId = randomUUID();
+  // Match the live placeBet, which stamps the wallet's canonical currency (this suite
+  // launches EUR/GBP players, so derive it from the wallet rather than hardcode).
+  const { currency } = await prisma.wallet.findUniqueOrThrow({ where: { id: opts.walletId }, select: { currency: true } });
   await prisma.bet.create({
     data: {
       id: betId,
@@ -148,6 +151,7 @@ async function activeBet(opts: {
       amount: opts.amount,
       autoCashout: opts.autoCashout ?? null,
       status: "active",
+      currency: currency.toUpperCase(),
       maxWinPerBet: opts.maxWinPerBet ?? null,
     },
   });

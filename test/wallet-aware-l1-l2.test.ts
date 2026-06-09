@@ -257,7 +257,7 @@ test("L-1 / 3. CROSS-USER: balance/transactions with another user's walletId →
 // L-2 — distinct rejected metric for a cross-user / mismatched session walletId.
 // ---------------------------------------------------------------------------
 
-test("L-2 / 4. cross-user walletId → reason=wallet_owner_mismatch; non-existent walletId → reason=bet_failed", async () => {
+test("L-2 / F-047. cross-user walletId → metric=wallet_owner_mismatch; non-existent walletId → metric=wallet_unavailable; both client-reason=bet_failed", async () => {
   activeRoundId = await freshRound();
   const a = await freshUser(10_000n);
   const b = await freshUser(10_000n);
@@ -265,6 +265,7 @@ test("L-2 / 4. cross-user walletId → reason=wallet_owner_mismatch; non-existen
 
   // --- cross-user: A bets presenting B's walletId → WalletOwnershipError path ---
   const mismatchBefore = await rejectedCount("wallet_owner_mismatch");
+  const unavailBefore = await rejectedCount("wallet_unavailable");
   const failedBefore = await rejectedCount("bet_failed");
 
   const r1 = await bets.placeBet(a.userId, "A", amount, undefined, b.walletId);
@@ -273,12 +274,15 @@ test("L-2 / 4. cross-user walletId → reason=wallet_owner_mismatch; non-existen
   expect(r1.reason).toBe("bet_failed");
 
   const mismatchAfter1 = await rejectedCount("wallet_owner_mismatch");
+  const unavailAfter1 = await rejectedCount("wallet_unavailable");
   const failedAfter1 = await rejectedCount("bet_failed");
   // THE INVARIANT: the DISTINCT series incremented for the mismatch. Pre-L-2 both
   // failures mapped to bet_failed, so wallet_owner_mismatch stays 0 here → FAILS.
   expect(mismatchAfter1).toBe(mismatchBefore + 1);
-  // ...and the generic bet_failed counter did NOT move for a mismatch.
+  // ...and NEITHER the generic bet_failed NOR the wallet_unavailable counter moved
+  // for an ownership mismatch (F-047: the resolution-failure buckets are distinct).
   expect(failedAfter1).toBe(failedBefore);
+  expect(unavailAfter1).toBe(unavailBefore);
 
   // No cross-user debit happened.
   expect(await ledger.getBalance(b.walletId)).toBe(10_000n);
@@ -286,19 +290,24 @@ test("L-2 / 4. cross-user walletId → reason=wallet_owner_mismatch; non-existen
   const aBets = await prisma.bet.findMany({ where: { roundId: activeRoundId, userId: a.userId } });
   expect(aBets.length).toBe(0);
 
-  // --- contrast: a NON-EXISTENT walletId (findUnique throws not-found, NOT a
-  // mismatch) must increment bet_failed, NOT wallet_owner_mismatch. ---
+  // --- contrast: a NON-EXISTENT walletId (findUnique throws not-found, NOT an
+  // ownership mismatch) increments the F-047 wallet_unavailable series, NOT
+  // wallet_owner_mismatch and NOT the generic bet_failed. ---
   const missingWalletId = randomUUID(); // valid UUID shape, no such wallet
   const r2 = await bets.placeBet(a.userId, "B", amount, undefined, missingWalletId);
   expect(r2.ok).toBe(false);
-  expect(r2.reason).toBe("bet_failed");
+  expect(r2.reason).toBe("bet_failed"); // client-facing reason is UNCHANGED
 
   const mismatchAfter2 = await rejectedCount("wallet_owner_mismatch");
+  const unavailAfter2 = await rejectedCount("wallet_unavailable");
   const failedAfter2 = await rejectedCount("bet_failed");
   // The mismatch series did NOT move (a not-found is not an ownership violation).
   expect(mismatchAfter2).toBe(mismatchAfter1);
-  // The generic series DID move for the not-found case.
-  expect(failedAfter2).toBe(failedAfter1 + 1);
+  // F-047: the not-found path increments the DISTINCT wallet_unavailable series...
+  expect(unavailAfter2).toBe(unavailAfter1 + 1);
+  // ...and the generic bet_failed series did NOT move for it (it's no longer the
+  // bucket for a wallet-resolution failure).
+  expect(failedAfter2).toBe(failedAfter1);
 
   // Still no bet for A this round (panel B not created either).
   const aBetsAfter = await prisma.bet.findMany({ where: { roundId: activeRoundId, userId: a.userId } });

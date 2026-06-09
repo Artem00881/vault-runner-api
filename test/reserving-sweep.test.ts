@@ -134,6 +134,7 @@ async function reservingBet(opts: {
       panel: opts.panel,
       amount: opts.amount,
       status: "reserving",
+      currency: "DEMO",
       debitTxId: opts.debitTxId ?? null,
       ...(opts.ageMs ? { createdAt: new Date(Date.now() - opts.ageMs) } : {}),
     },
@@ -230,7 +231,7 @@ test("TEETH: age gate spares a young in-flight reserving slot (sweep no-ops) but
   // i.e. mid-placeBet, right after the debit, about to flip to 'active'. createdAt
   // is ≈ now (no ageMs). Balance is down 100 (money out, as in a live placeBet).
   await prisma.bet.create({
-    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving" },
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "reserving", currency: "DEMO" },
   });
   createdBetIds.push(betId);
   await ledger.debit(walletId, 100n, "bet_debit", debitKey(roundId, userId, "A"), {

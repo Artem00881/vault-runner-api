@@ -110,7 +110,7 @@ test("recovery refunds active bets of an interrupted round and closes it", async
   const userId = (await prisma.wallet.findUniqueOrThrow({ where: { id: walletId } })).userId;
   const betId = randomUUID();
   await prisma.bet.create({
-    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "active" },
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 100n, status: "active", currency: "DEMO" },
   });
 
   await recover();
@@ -127,7 +127,7 @@ test("recovery is idempotent — a second run does not double-refund", async () 
   const userId = (await prisma.wallet.findUniqueOrThrow({ where: { id: walletId } })).userId;
   const betId = randomUUID();
   await prisma.bet.create({
-    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 200n, status: "active" },
+    data: { id: betId, roundId, userId, walletId, panel: "A", amount: 200n, status: "active", currency: "DEMO" },
   });
 
   await recover();

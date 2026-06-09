@@ -116,6 +116,7 @@ async function reservingBet(opts: {
       panel: "A",
       amount: opts.amount ?? 100n,
       status: opts.status,
+      currency: "DEMO",
       createdAt: new Date(Date.now() - (opts.ageMs ?? 0)),
     },
   });

@@ -41,17 +41,17 @@ model Operator {
 // Binds an operator-side player+currency to a local wallet (the per-operator
 // reconciliation journal anchor) and records the token jti for one-time use.
 model GameSession {
-  id         String    @id @default(uuid()) @db.Uuid
-  operatorId String    @map("operator_id") @db.Uuid
-  playerId   String    @map("player_id") // operator-side player id
-  currency   String
-  locale     String    @default("en")
-  walletId   String    @map("wallet_id") @db.Uuid // local journal wallet
-  demo       Boolean   @default(false) // play-money "fun mode" session: money routes to the internal ledger, NEVER the operator wallet (Phase 3)
-  launchJti  String    @unique @map("launch_jti") // token id → one-time use
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
-  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
+  id                    String    @id @default(uuid()) @db.Uuid
+  operatorId            String    @map("operator_id") @db.Uuid
+  playerId              String    @map("player_id") // operator-side player id
+  currency              String
+  locale                String    @default("en")
+  walletId              String    @map("wallet_id") @db.Uuid // local journal wallet
+  demo                  Boolean   @default(false) // play-money "fun mode" session: money routes to the internal ledger, NEVER the operator wallet (Phase 3)
+  launchJti             String    @unique @map("launch_jti") // token id → one-time use
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt            DateTime  @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt             DateTime? @map("revoked_at") @db.Timestamptz(6) // set to revoke a live session (L-C2.2 trigger); soft so the operator-wallet resolver still serves in-flight settlement
   // F-067 (M3) — reality-check state PERSISTED on the session so the hard-pause survives a
   // socket reconnect (a player can't dodge a pending reality check by reconnecting). The
   // session TIME limit stays derived from the immutable signed-token sessionStartedAt — NOT
@@ -190,7 +190,7 @@ model Bet {
   payout       BigInt    @default(0)
   demo         Boolean   @default(false) // play-money bet (fun-mode session) — descriptive audit stamp; money routing is by wallet (Phase 3)
   operatorId   String?   @map("operator_id") @db.Uuid // denormalised from the session for per-operator REPORTING (Phase 3.5); null = internal/guest play (excluded from operator reports). Stamped from the verified play token; never client-supplied.
-  currency     String? // denormalised journal currency (canonical UPPERCASE) for per-currency reporting (Phase 3.5)
+  currency     String // F-084: denormalised journal currency (canonical UPPERCASE), NOT NULL — every live insert stamps the wallet's code (bets.service), so this hardens the F-004 per-currency exposure-cap filter against a future code path that forgets to stamp. Legacy rows backfilled from the wallet in migration 20260609140000.
   maxWinPerBet BigInt?   @map("max_win_per_bet") // operator per-currency single-bet win cap (Phase 3); null = global house default
   debitTxId    String?   @map("debit_tx_id") // operator tx id = arbitrary string (NOT a uuid)
   payoutTxId   String?   @map("payout_tx_id") // operator tx id = arbitrary string (NOT a uuid)
@@ -206,6 +206,7 @@ model Bet {
   @@index([walletId, createdAt]) // per-session RG accounting: sum a wallet's bets since session start (Phase 3)
   @@index([operatorId, currency, createdAt]) // per-operator reporting: scope by operator + currency over a date range (Phase 3.5)
   @@index([status]) // reserving/cancelling sweep + payout_pending reconcile + backlog gauges scan the (rare) transient statuses — index-served (Phase 4.3). A partial index on just the transient set would be leaner at very large scale (revisit with partitioning, Phase 4.7).
+  @@index([roundId, status]) // F-021: the engine hot path reads `where {roundId, status in [...]}` (per-round exposure read in placeBet + settlement/recovery sweeps) — a composite (round_id, status) is more selective than the round-prefix of the unique above plus the standalone status index. Additive.
   @@map("game_bets")
 }
 

@@ -102,8 +102,12 @@ const WS_MSG_LIMIT = 15; // messages per second per socket
 const rawWsCors = process.env.CORS_ORIGIN?.trim();
 const WS_CORS_ORIGIN: boolean | string[] =
   !rawWsCors || rawWsCors === "*" ? true : rawWsCors.split(",").map((s) => s.trim());
+// F-010 (R1): mirror the HTTP CORS credentials decoupling (main.ts) — never reflect an arbitrary
+// origin WITH credentials. Socket.IO auth uses the handshake token (not cookies), so this is
+// defense-in-depth; prod sets an allowlist → credentials stay enabled there, dev/sandbox (*) drops them.
+const WS_CORS_CREDENTIALS = WS_CORS_ORIGIN !== true;
 
-@WebSocketGateway({ cors: { origin: WS_CORS_ORIGIN, credentials: true } })
+@WebSocketGateway({ cors: { origin: WS_CORS_ORIGIN, credentials: WS_CORS_CREDENTIALS } })
 export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server!: Server;
   private readonly log = new Logger(GameGateway.name);
@@ -242,6 +246,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     this.sweeping = true;
     try {
       await this.engine.recoverReservingBets(olderThanMs);
+      // F-083: finalize any bet stranded 'active' on a refund-all (completed/pre-outcome) round
+      // whose closeAndRefundRound reverse() had failed — idempotent restart-refund + CAS finalize.
+      await this.engine.recoverStrandedActiveBets();
       await this.bets.reportReservingBacklog(); // refresh the backlog gauges + alert on stuck (Low-4)
       // Phase 6: self-heal any operator void stranded mid-reversal (status 'voiding') by
       // re-running its idempotent reversals + finalising — both wallet modes. Leader-gated

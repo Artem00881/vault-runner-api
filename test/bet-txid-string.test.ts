@@ -99,7 +99,7 @@ async function fundedUser(balance: bigint): Promise<{ userId: string; walletId: 
 async function seedBet(roundId: string, userId: string, walletId: string, panel: "A" | "B"): Promise<string> {
   const id = randomUUID();
   await prisma.bet.create({
-    data: { id, roundId, userId, walletId, panel, amount: 100n, status: "active" },
+    data: { id, roundId, userId, walletId, panel, amount: 100n, status: "active", currency: "DEMO" },
   });
   createdBetIds.push(id);
   return id;

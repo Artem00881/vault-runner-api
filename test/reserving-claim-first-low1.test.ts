@@ -152,6 +152,9 @@ async function seedBet(opts: {
   debitTxId?: string | null;
 }): Promise<string> {
   const id = randomUUID();
+  // Stamp the wallet's canonical currency (matches the live placeBet, which writes
+  // wallet.currency.toUpperCase()) — this helper serves both DEMO and operator (EUR) wallets.
+  const { currency } = await prisma.wallet.findUniqueOrThrow({ where: { id: opts.walletId }, select: { currency: true } });
   await prisma.bet.create({
     data: {
       id,
@@ -161,6 +164,7 @@ async function seedBet(opts: {
       panel: opts.panel,
       amount: opts.amount,
       status: opts.status,
+      currency: currency.toUpperCase(),
       debitTxId: opts.debitTxId ?? null,
     },
   });

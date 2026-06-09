@@ -103,7 +103,10 @@ export class SeamlessOperatorWallet implements WalletProvider {
     // void). Once-only on the original key: a void resume (e.g. interrupted between the
     // reclaim and refund legs) that re-runs this sees the confirmed row and SKIPS the
     // operator emit — so it can't double-reverse even against a non-idempotent operator.
-    const reason = p.originalDirection === "credit" ? "void_reclaim" : "void_refund";
+    // F-082: prefer the caller's intent-distinct label (e.g. "restart_refund") so two debit-
+    // refunds of the same bet don't collide on the once-only dedupeKey; fall back to the
+    // originalDirection-derived default for callers that don't set one.
+    const reason = p.intent ?? (p.originalDirection === "credit" ? "void_reclaim" : "void_refund");
     await this.rollbackOnce(s, p.originalKey, p.ref, reason, true, p.amount);
   }
 

@@ -201,7 +201,7 @@ export class BetsService {
       this.log.warn(`placeBet wallet resolution failed for user ${shortId(userId)}: ${e?.message}`); // F-069: redact pseudonymous userId in logs
       // Distinct label for a cross-user/mismatched walletId so it's alertable (L-2);
       // the client still sees a generic bet_failed (no info leak).
-      this.metrics.recordRejected(e instanceof WalletOwnershipError ? "wallet_owner_mismatch" : "bet_failed");
+      this.metrics.recordRejected(e instanceof WalletOwnershipError ? "wallet_owner_mismatch" : "wallet_unavailable"); // F-047: distinct from reserve/debit failures
       return null;
     });
     if (!wallet) return { ok: false, reason: "bet_failed", panel };
@@ -297,7 +297,7 @@ export class BetsService {
       if (rejectReason) { this.metrics.recordRejected(rejectReason); return { ok: false, reason: rejectReason, panel }; }
       // Lost a concurrent race for the same (round,user,panel) — the slot exists.
       if (e?.code === "P2002") return { ok: false, reason: "already_bet", panel };
-      this.metrics.recordRejected("bet_failed");
+      this.metrics.recordRejected("reserve_failed"); // F-047: reserve-tx failure, distinct metric (client still sees generic bet_failed)
       return { ok: false, reason: "bet_failed", panel };
     }
 
@@ -316,7 +316,9 @@ export class BetsService {
       // its exposure is freed for other bets).
       await this.prisma.bet.delete({ where: { id: betId } }).catch(() => {});
       const reason = e?.message === "insufficient_balance" ? "insufficient_balance" : "bet_failed";
-      this.metrics.recordRejected(reason);
+      // F-047: label the metric distinctly (debit_failed) so operator/infra debit failures are
+      // observable apart from the generic bet_failed bucket; the client-facing reason is unchanged.
+      this.metrics.recordRejected(reason === "bet_failed" ? "debit_failed" : reason);
       return { ok: false, reason, panel };
     }
 

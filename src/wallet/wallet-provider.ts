@@ -47,6 +47,17 @@ export interface ReverseParams {
   /** Ledger type for the internal inverse entry. */
   type: LedgerType;
   ref?: LedgerRef;
+  /**
+   * F-082: intent label for the operator-mode once-only rollback dedupe. Two reversals of the
+   * SAME bet's stake debit with the SAME `originalDirection: "debit"` — a round-restart refund
+   * (closeAndRefundRound) and an operator void refund (performVoidReversals) — otherwise both
+   * derive reason "void_refund" and share the dedupeKey `{betId}#void_refund`, so whichever ran
+   * first would permanently suppress the other. They are mutually exclusive by bet status today,
+   * but giving each its intent-distinct reason (matching its already-distinct reverseKey) makes
+   * the dedupe correct by construction. Omitted → the originalDirection-derived default. Ledger/
+   * demo mode ignores it (it dedupes on the already-distinct reverseKey).
+   */
+  intent?: string;
 }
 
 export interface WalletProvider {

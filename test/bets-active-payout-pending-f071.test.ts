@@ -93,15 +93,15 @@ test("F-071: /api/bets/active returns BOTH active and payout_pending (owed win),
   const pendingId = randomUUID();
   const bustedId = randomUUID();
   await prisma.bet.create({
-    data: { id: activeId, roundId, userId, walletId, panel: "A", amount: 100n, status: "active" },
+    data: { id: activeId, roundId, userId, walletId, panel: "A", amount: 100n, status: "active", currency: "DEMO" },
   });
   // A won-but-unconfirmed payout: payout_pending carries a real owed payout.
   await prisma.bet.create({
-    data: { id: pendingId, roundId, userId, walletId, panel: "B", amount: 50n, status: "payout_pending", payout: 175n, cashoutMult: 3.5 },
+    data: { id: pendingId, roundId, userId, walletId, panel: "B", amount: 50n, status: "payout_pending", payout: 175n, cashoutMult: 3.5, currency: "DEMO" },
   });
   // A terminal busted bet must NOT appear in the resync.
   await prisma.bet.create({
-    data: { id: bustedId, roundId: roundId2, userId, walletId, panel: "A", amount: 25n, status: "busted" },
+    data: { id: bustedId, roundId: roundId2, userId, walletId, panel: "A", amount: 25n, status: "busted", currency: "DEMO" },
   });
 
   const rows = await controller.active(userId);
@@ -122,7 +122,7 @@ test("F-071: a user with ONLY a payout_pending bet still sees it on resync (was 
   const { userId, walletId } = await freshUserWallet();
   const pendingId = randomUUID();
   await prisma.bet.create({
-    data: { id: pendingId, roundId, userId, walletId, panel: "A", amount: 80n, status: "payout_pending", payout: 240n },
+    data: { id: pendingId, roundId, userId, walletId, panel: "A", amount: 80n, status: "payout_pending", payout: 240n, currency: "DEMO" },
   });
 
   const rows = await controller.active(userId);

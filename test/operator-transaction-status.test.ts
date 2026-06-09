@@ -102,7 +102,7 @@ interface SeedBet {
   status: string;
   payout?: bigint;
   panel?: "A" | "B";
-  currency?: string | null; // null → exercise the decimals fallback
+  currency?: string | null; // undefined → "EUR"; an unseeded code (e.g. "XYZ") exercises the decimals fallback; null is rejected by the NOT NULL constraint (F-084)
   cashoutMult?: number | null;
   demo?: boolean;
   debitTxId?: string | null;
@@ -379,19 +379,37 @@ describe("TXS.3 state mapping on real rows (debit/refund/payout dispositions)", 
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe("TXS.4 null handling — never throws on nullable columns", () => {
-  test("null currency → decimals fallback 2, currency null", async () => {
+  test("F-084: a NULL Bet.currency is REJECTED by the DB (NOT NULL constraint enforced)", async () => {
+    // F-084 hardened Bet.currency to NOT NULL — the live placeBet always stamps the
+    // wallet's code, so a null can only be a forgotten stamp; the constraint fails it loud.
     const op = await freshOperator(["EUR"]);
     const p = await makePlayer(op.id, "null-ccy", "EUR");
+    await expect(
+      seedBet(p.walletId, p.userId, {
+        operatorId: op.id,
+        amount: 100n,
+        status: "busted",
+        currency: null, // F-084: no longer allowed — must be rejected
+        settledAt: new Date(),
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("an UNKNOWN (unseeded) currency → decimals fallback 2, currency reflected", async () => {
+    // The decimals fallback still matters with currency NOT NULL: a stamped-but-unseeded
+    // code (offered by the operator, not yet in the canonical table) must not 500 the report.
+    const op = await freshOperator(["EUR"]);
+    const p = await makePlayer(op.id, "unknown-ccy", "EUR");
     const bet = await seedBet(p.walletId, p.userId, {
       operatorId: op.id,
       amount: 100n,
       status: "busted",
-      currency: null,
+      currency: "XYZ", // valid (non-null) but not in the canonical decimals table
       settledAt: new Date(),
     });
     const r = await reporting.transactionStatus(op.id, parseTransactionQuery({ betId: bet.betId }));
-    expect(r.currency).toBeNull();
-    expect(r.decimals).toBe(2); // fallback for null/unknown currency
+    expect(r.currency).toBe("XYZ");
+    expect(r.decimals).toBe(2); // fallback for an unknown currency
   });
 
   test("null cashoutMult and null settledAt serialize as null (active, unsettled)", async () => {

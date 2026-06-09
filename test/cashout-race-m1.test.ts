@@ -107,6 +107,7 @@ async function activeBet(opts: {
       amount: opts.amount,
       autoCashout: opts.autoCashout ?? null,
       status: "active",
+      currency: "DEMO",
     },
   });
   return betId;
