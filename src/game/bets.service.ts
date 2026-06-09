@@ -371,11 +371,24 @@ export class BetsService {
     });
     if (!bet || bet.status !== "active") return { ok: false, reason: "no_active_bet", panel };
 
+    // Atomically CLAIM the bet (active → cancelled) BEFORE refunding — mirrors cashOut's
+    // claim-first CAS (line ~434). A manual cancel can race the leader's server-driven
+    // auto-cashout of the SAME bet across nodes (a follower's CACHED phase may still read
+    // 'betting' while the leader is 'running'); without this claim, cancelBet's refund and
+    // cashOut's payout could BOTH land on one bet (money created). The loser of the CAS stops
+    // here before any credit. Single-node is unaffected (the phase gates are mutually exclusive),
+    // but this makes cancel pay-exactly-once node-independent, like cashOut. Refund key is
+    // idempotent (bet:{id}:refund), so a retry after a claim can't double-credit.
+    const claim = await this.prisma.bet.updateMany({
+      where: { id: bet.id, status: "active" },
+      data: { status: "cancelled", settledAt: new Date() },
+    });
+    if (claim.count === 0) return { ok: false, reason: "no_active_bet", panel };
+
     const refund = await this.wallet$.credit(bet.walletId, bet.amount, "refund", `bet:${bet.id}:refund`, {
       refType: "bet",
       refId: bet.id,
     });
-    await this.prisma.bet.update({ where: { id: bet.id }, data: { status: "cancelled", settledAt: new Date() } });
     return { ok: true, panel, balance: Number(refund.balanceAfter), currency: bet.wallet.currency };
   }
 

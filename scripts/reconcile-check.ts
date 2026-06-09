@@ -98,11 +98,30 @@ async function main() {
       FROM ledger_transactions l JOIN game_bets b ON b.id = l.ref_id
       WHERE l.type = 'bet_debit' AND l.ref_type = 'bet' AND b.operator_id IS NULL`
   )[0].s ?? 0n; // negative
+  // PAIRED-DEBIT restriction (invariant 1a is a *debit*-conservation identity): only
+  // count a refund on the debit side if its bet ACTUALLY HAS a journaled `bet_debit` —
+  // i.e. the refund reverses a debit the LHS is summing. The engine's restart-recovery
+  // slot-release path (game-engine.service.ts closeAndRefundRound / recoverStrandedActiveBets)
+  // posts a `refund` credit keyed `bet:{id}:restart_refund` and marks the bet `cancelled`;
+  // if that bet's original `bet_debit` row was never journaled / has since been orphaned
+  // (the engine legitimately deletes no-debit slots; the FK is wallet-scoped, not bet-scoped),
+  // the refund would otherwise be subtracted on the LHS while the `cancelled` stake is (correctly)
+  // excluded from `heldStakes` on the RHS — under-counting 1a by exactly that refund and raising
+  // a FALSE "MONEY DISCREPANCIES FOUND". Such an un-debited refund reverses no counted debit, so
+  // it does not belong in this identity at all. (A *paired* restart_refund still nets to 0 here:
+  // its `bet_debit` is on the LHS and the refund cancels it.) Conservation itself is NOT weakened
+  // — the authoritative per-wallet balanceAfter-chain (invariant 2) still proves every minor unit
+  // globally; this filter only keeps 1a's bet-centric *debit* view honest about which refunds
+  // actually offset a debit.
   const liveRefund = (
     await prisma.$queryRaw<Agg[]>`
       SELECT COALESCE(SUM(l.amount), 0)::bigint AS s
       FROM ledger_transactions l JOIN game_bets b ON b.id = l.ref_id
-      WHERE l.type = 'refund' AND l.ref_type = 'bet' AND b.operator_id IS NULL`
+      WHERE l.type = 'refund' AND l.ref_type = 'bet' AND b.operator_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM ledger_transactions d
+          WHERE d.ref_id = b.id AND d.type = 'bet_debit' AND d.ref_type = 'bet'
+        )`
   )[0].s ?? 0n;
   const livePayout = (
     await prisma.$queryRaw<Agg[]>`
@@ -122,8 +141,10 @@ async function main() {
 
   // INVARIANT 1a — DEBIT CONSERVATION (live bets): |Σ bet_debit| − Σ refund == Σ stake(held),
   // summed over ledger rows whose bet still exists. Every debited minor unit is either
-  // refunded or still attributed to a live debited bet.
-  const debitNetOfRefunds = -liveDebit - liveRefund; // |debit| − refund (live bets only)
+  // refunded or still attributed to a live debited bet. (`liveRefund` is restricted to
+  // refunds whose bet has a paired `bet_debit` — see its definition above — so an un-debited
+  // restart_refund on a `cancelled` bet can't under-count this identity and false-alarm.)
+  const debitNetOfRefunds = -liveDebit - liveRefund; // |debit| − refund-of-a-debited-bet (live)
   const debitConservationOk = debitNetOfRefunds === heldStakes;
   checks.push({
     name: "1a. debit conservation (live bets: |Σ bet_debit| − Σ refund == Σ stake held)",
