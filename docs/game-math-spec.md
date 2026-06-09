@@ -40,14 +40,14 @@ salt — the server cannot change it after betting closes.
 
 Phases and durations (from `game-engine.service.ts`, `PHASE_MS`):
 
-| Phase | Duration | Description |
-|---|---|---|
-| `waiting` | 3.0 s | Inter-round pause; next round id + seed allocated. |
-| `betting` | 5.0 s | Bets accepted on both panels. |
-| `running` | variable | Multiplier rises until the crash point is reached. |
-| `crashed` | 2.5 s | Crash shown; active bets settled as busted. |
-| `settling` | 0.5 s | Bookkeeping. |
-| `completed` | ~0.6 s | Seed revealed; round closed. |
+| Phase       | Duration | Description                                       |
+|-------------|----------|---------------------------------------------------|
+| `waiting`   | 3.0 s    | Inter-round pause; next round id + seed allocated. |
+| `betting`   | 5.0 s    | Bets accepted on both panels.                     |
+| `running`   | variable | Multiplier rises until the crash point is reached. |
+| `crashed`   | 2.5 s    | Crash shown; active bets settled as busted.       |
+| `settling`  | 0.5 s    | Bookkeeping.                                      |
+| `completed` | ~0.6 s   | Seed revealed; round closed.                      |
 
 **Multiplier pacing:** `multiplier(t) = e^(GROWTH · elapsedMs)`, `GROWTH = 0.00012`,
 floored to 2 decimals: `max(1.00, floor(e^(GROWTH·Δt) · 100) / 100)`. Pacing is
@@ -78,7 +78,7 @@ Enforced uniqueness: one bet per `(roundId, userId, panel)`.
 - Distribution: `P(crash ≥ x) = 0.97 / x` for `x ≥ 1.00`.
 - For any auto-cashout target `t > 1`, expected return `= t · P(crash ≥ t) = 0.97`
   — RTP is constant across strategies (hallmark of a fair crash curve).
-- Empirically validated to **97.0% ± 0.02%** over **1e9** rounds (observed
+- Empirically validated at **96.998%** over **1e9** rounds (97.0% ± 0.02%; observed
   96.99–97.00% across all cash-out targets) — see `simulation-report.md` v1.1.
 
 ---
@@ -186,20 +186,20 @@ it offers; each carries its own row.
 
 **Currency-independent:**
 
-| Parameter | Value |
-|---|---|
-| Max multiplier | 10,000x (real-money) / 1,000,000x (demo) |
+| Parameter      | Value                                     |
+|----------------|-------------------------------------------|
+| Max multiplier | 10,000x (real-money) / 1,000,000x (demo)  |
 
 **Per-currency limits (bet-level tables).** EUR is the **reference** row; other
 rows are set per FX/operator policy and stored in minor units. Indicative values:
 
-| Currency | Minor unit | Min bet | Max bet | Max win / bet | Max win / player·round | Exposure cap / round |
-|---|---|---|---|---|---|---|
-| EUR (ref) | cent (10⁻²) | €0.10 | €100 | €10,000 | €20,000 | €100,000 |
-| USD | cent (10⁻²) | $0.10 | $100 | $10,000 | $20,000 | $100,000 |
-| USDT | 10⁻⁶ | 0.10 | 100 | 10,000 | 20,000 | 100,000 |
-| BTC | sat (10⁻⁸) | per FX | per FX | per FX | per FX | per FX |
-| ETH | wei-scaled | per FX | per FX | per FX | per FX | per FX |
+| Currency  | Minor unit  | Min bet | Max bet | Max win / bet | Max win / player·round | Exposure cap / round |
+|-----------|-------------|---------|---------|---------------|------------------------|----------------------|
+| EUR (ref) | cent (10⁻²) | €0.10   | €100    | €10,000       | €20,000                | €100,000             |
+| USD       | cent (10⁻²) | $0.10   | $100    | $10,000       | $20,000                | $100,000             |
+| USDT      | 10⁻⁶        | 0.10    | 100     | 10,000        | 20,000                 | 100,000              |
+| BTC       | sat (10⁻⁸)  | per FX  | per FX  | per FX        | per FX                 | per FX               |
+| ETH       | wei-scaled  | per FX  | per FX  | per FX        | per FX                 | per FX               |
 
 - **Effective max multiplier per bet** = `maxWinPerBet / bet` (currency-relative).
   E.g. on the EUR row: €0.10→100,000x, €1→10,000x, €10→1,000x, €100→100x. The

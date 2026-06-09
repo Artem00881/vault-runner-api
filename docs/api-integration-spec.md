@@ -52,18 +52,18 @@ reference operator wallet: `load/operator-wallet-stub.ts`.
 
 Responsibilities at a glance:
 
-| Concern | Operator (you) | Vault Run (RGS) |
-|---|---|---|
-| Player funds / balances | **Authoritative ledger** | Local journal only |
-| Player identity | `playerId` (your id) | Local journal user keyed to `op:{operatorId}:{playerId}:{currency}` |
-| Launch token signing | **Sign with your `launchSecret`** | Verify + open session |
-| Game logic, RNG, crash point | — | **Authoritative** |
-| Stake debit / payout credit | **Implement `/bet`, `/win`, `/rollback`, `/balance`** | Call them idempotently |
-| Idempotency / dedup of money moves | **Dedup on `transactionId`** | Send a unique `transactionId` per move |
-| Bet/round limits | Provide per-currency config at onboarding | Enforce them server-side |
-| Responsible gambling | Provide RG config at onboarding | Emit reality checks / session limits |
-| Reconciliation | Match against our reports / your book | Provide reporting API + round history |
-| Data protection (GDPR) | **Controller** — owns player identity, KYC/AML, consent, data-subject requests | **Processor** — stores only the pseudonymous `playerId` + derivatives; no name/email/payment/KYC (§17) |
+| Concern                            | Operator (you)                                                                 | Vault Run (RGS)                                                                                        |
+| ---------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Player funds / balances            | **Authoritative ledger**                                                       | Local journal only                                                                                     |
+| Player identity                    | `playerId` (your id)                                                           | Local journal user keyed to `op:{operatorId}:{playerId}:{currency}`                                    |
+| Launch token signing               | **Sign with your `launchSecret`**                                              | Verify + open session                                                                                  |
+| Game logic, RNG, crash point       | —                                                                              | **Authoritative**                                                                                      |
+| Stake debit / payout credit        | **Implement `/bet`, `/win`, `/rollback`, `/balance`**                          | Call them idempotently                                                                                 |
+| Idempotency / dedup of money moves | **Dedup on `transactionId`**                                                   | Send a unique `transactionId` per move                                                                 |
+| Bet/round limits                   | Provide per-currency config at onboarding                                      | Enforce them server-side                                                                               |
+| Responsible gambling               | Provide RG config at onboarding                                                | Emit reality checks / session limits                                                                   |
+| Reconciliation                     | Match against our reports / your book                                          | Provide reporting API + round history                                                                  |
+| Data protection (GDPR)             | **Controller** — owns player identity, KYC/AML, consent, data-subject requests | **Processor** — stores only the pseudonymous `playerId` + derivatives; no name/email/payment/KYC (§17) |
 
 ---
 
@@ -125,26 +125,26 @@ exchange.
 
 **What you (the operator) provide us:**
 
-| Item | Required | Notes |
-|---|---|---|
-| Operator code | yes | Short stable slug (`--code`), e.g. `demo-casino`. |
-| Display name | optional | `--name`. |
-| Wallet API base URL | yes (real money) | `--wallet-url`, e.g. `https://op.example/wallet`. The RGS POSTs `/bet`, `/win`, `/rollback`, `/balance` under it. |
-| Wallet API key | recommended | `--wallet-key`. Sent as `Authorization: Bearer <key>` on every wallet call (omitted if not configured). |
-| Currency allow-list | yes | `--currencies EUR,USDT`. Canonicalised to uppercase (ISO-4217). A launch whose currency is not in this list is rejected. An **empty list rejects every launch** (fail-closed). |
-| Per-currency bet limits | recommended | `--bet-limits` JSON (or `@file.json`): per-currency `minBet`, `maxBet`, `maxWinPerBet` in minor units. Absent → global house defaults (which are demo-grade — see §8). |
-| Responsible-gambling config | optional | `--rg-config` JSON: reality-check interval, max session duration, per-currency session loss/wager caps (§11). |
-| Return-to-lobby URL | optional | `--callback-url`. Returned to the client at launch so it knows where to send the player on exit. |
-| IP allow-list | optional | `--ip-whitelist` for the **reporting** API (the wallet calls are outbound from us to you). |
-| Demo (fun-mode) capability | optional | `--demo-enabled` if your jurisdiction permits play-money demo launches. Off by default. |
+| Item                        | Required         | Notes                                                                                                                                                                          |
+| --------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Operator code               | yes              | Short stable slug (`--code`), e.g. `demo-casino`.                                                                                                                              |
+| Display name                | optional         | `--name`.                                                                                                                                                                      |
+| Wallet API base URL         | yes (real money) | `--wallet-url`, e.g. `https://op.example/wallet`. The RGS POSTs `/bet`, `/win`, `/rollback`, `/balance` under it.                                                              |
+| Wallet API key              | recommended      | `--wallet-key`. Sent as `Authorization: Bearer <key>` on every wallet call (omitted if not configured).                                                                        |
+| Currency allow-list         | yes              | `--currencies EUR,USDT`. Canonicalised to uppercase (ISO-4217). A launch whose currency is not in this list is rejected. An **empty list rejects every launch** (fail-closed). |
+| Per-currency bet limits     | recommended      | `--bet-limits` JSON (or `@file.json`): per-currency `minBet`, `maxBet`, `maxWinPerBet` in minor units. Absent → global house defaults (which are demo-grade — see §8).         |
+| Responsible-gambling config | optional         | `--rg-config` JSON: reality-check interval, max session duration, per-currency session loss/wager caps (§11).                                                                  |
+| Return-to-lobby URL         | optional         | `--callback-url`. Returned to the client at launch so it knows where to send the player on exit.                                                                               |
+| IP allow-list               | optional         | `--ip-whitelist` for the **reporting** API (the wallet calls are outbound from us to you).                                                                                     |
+| Demo (fun-mode) capability  | optional         | `--demo-enabled` if your jurisdiction permits play-money demo launches. Off by default.                                                                                        |
 
 **What we issue back to you:**
 
-| Item | When | Notes |
-|---|---|---|
-| `operatorId` | on create | A UUID — our routing / tenant key. Appears in reporting tokens and is the `operatorId` the RGS uses internally to route wallet calls; it is **not** part of the wallet request bodies (you already know who you are). |
-| `launchSecret` | on create / `--rotate-secret` | A 32-byte hex HMAC secret. **You sign launch tokens with it (HMAC-SHA256).** Shown **once** — store it securely. Rotating it invalidates outstanding launch tokens. |
-| Reporting API key | on `--rotate-reporting-key` | `vrk_<operatorId>.<secret>` — used as `Authorization: Bearer <key>` against the reporting API (§13). Shown once. |
+| Item              | When                          | Notes                                                                                                                                                                                                                 |
+| ----------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `operatorId`      | on create                     | A UUID — our routing / tenant key. Appears in reporting tokens and is the `operatorId` the RGS uses internally to route wallet calls; it is **not** part of the wallet request bodies (you already know who you are). |
+| `launchSecret`    | on create / `--rotate-secret` | A 32-byte hex HMAC secret. **You sign launch tokens with it (HMAC-SHA256).** Shown **once** — store it securely. Rotating it invalidates outstanding launch tokens.                                                   |
+| Reporting API key | on `--rotate-reporting-key`   | `vrk_<operatorId>.<secret>` — used as `Authorization: Bearer <key>` against the reporting API (§13). Shown once.                                                                                                      |
 
 > Secrets are printed once by the CLI and must be stored in your secret manager.
 > The example commands and tokens in this document use placeholders only.
@@ -162,16 +162,16 @@ single operator-held secret, short expiry, one-time use.
 
 **JWT claims:**
 
-| Claim | Type | Required | Meaning |
-|---|---|---|---|
-| `operatorId` | string | yes | Your `operatorId` (UUID). Tells the RGS which secret to verify with. |
-| `playerId` | string | yes | Your player/account/session id. The RGS uses this as the wallet `playerId`. |
-| `currency` | string | yes | ISO-4217 code. Must be in your allow-list (case-insensitive). |
-| `locale` | string | optional | BCP-47-ish; normalized server-side. |
-| `demo` | boolean | optional | `true` = play-money "fun mode" (settles on our internal ledger, never your wallet). Requires `demoEnabled`. Default `false`. |
-| `ctx` | object | optional | Free-form per-launch context (e.g. limit/round hints). Echoed nowhere security-sensitive. |
-| `jti` | string (UUID) | yes | Unique token id. **Consumed exactly once.** |
-| `exp` | number | yes | Expiry. TTL is **120 seconds** (`TTL_SECONDS`). |
+| Claim        | Type          | Required | Meaning                                                                                                                      |
+| ------------ | ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `operatorId` | string        | yes      | Your `operatorId` (UUID). Tells the RGS which secret to verify with.                                                         |
+| `playerId`   | string        | yes      | Your player/account/session id. The RGS uses this as the wallet `playerId`.                                                  |
+| `currency`   | string        | yes      | ISO-4217 code. Must be in your allow-list (case-insensitive).                                                                |
+| `locale`     | string        | optional | BCP-47-ish; normalized server-side.                                                                                          |
+| `demo`       | boolean       | optional | `true` = play-money "fun mode" (settles on our internal ledger, never your wallet). Requires `demoEnabled`. Default `false`. |
+| `ctx`        | object        | optional | Free-form per-launch context (e.g. limit/round hints). Echoed nowhere security-sensitive.                                    |
+| `jti`        | string (UUID) | yes      | Unique token id. **Consumed exactly once.**                                                                                  |
+| `exp`        | number        | yes      | Expiry. TTL is **120 seconds** (`TTL_SECONDS`).                                                                              |
 
 **Signing (operator side):** HMAC-SHA256 over the standard JWT structure with
 `secret = launchSecret`, a unique `jti`, and `exp = now + 120s`.
@@ -244,15 +244,15 @@ Success **200** response:
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `token` | The **session (play) token** the game client uses as the WebSocket `auth.token`. Signed with **our** JWT secret (not your launch secret). Short-lived (see below). |
-| `sessionId` | The `GameSession` id. Re-validated as live at WS connect; revoking it (see below) disconnects/blocks the player even before the JWT expires. |
-| `walletId` | Our local journal wallet id (one per `operator`+`player`+`currency`). Not authoritative for balance in operator mode. |
-| `currency` | Canonical uppercase currency for this session. |
-| `decimals` | Display precision for `currency` (so the client renders minor units correctly from first paint). |
-| `locale` | Normalized locale. |
-| `callbackUrl` | Your return-to-lobby URL, or `null` if unset. |
+| Field         | Meaning                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `token`       | The **session (play) token** the game client uses as the WebSocket `auth.token`. Signed with **our** JWT secret (not your launch secret). Short-lived (see below). |
+| `sessionId`   | The `GameSession` id. Re-validated as live at WS connect; revoking it (see below) disconnects/blocks the player even before the JWT expires.                       |
+| `walletId`    | Our local journal wallet id (one per `operator`+`player`+`currency`). Not authoritative for balance in operator mode.                                              |
+| `currency`    | Canonical uppercase currency for this session.                                                                                                                     |
+| `decimals`    | Display precision for `currency` (so the client renders minor units correctly from first paint).                                                                   |
+| `locale`      | Normalized locale.                                                                                                                                                 |
+| `callbackUrl` | Your return-to-lobby URL, or `null` if unset.                                                                                                                      |
 
 Session-token lifetime: `SESSION_TOKEN_TTL_SEC`, **default 4 hours**, clamped to
 **60 s … 24 h** (out-of-range/non-numeric falls back to 4 h). To refresh, re-launch.
@@ -339,14 +339,14 @@ and the emitted event carry the **same** result object.
 
 ### 6.1 Client → server messages
 
-| Message | Payload | Ack / result |
-|---|---|---|
-| `subscribe_round` | _(none)_ | `{ ok:true }`; also (re)emits `round_state`. |
-| `time_sync` | `{ t0?: number }` | `{ ok:true, t0, serverTime }` — NTP-style clock sync; `t0` is echoed, `serverTime` = server epoch ms. No auth. |
-| `place_bet` | `{ panel:"A"\|"B", amount:number, autoCashout?:number }` | `BetResult` (see below). Emits `bet_accepted` or `bet_rejected` + `balance_updated` on success. |
-| `cancel_bet` | `{ panel:"A"\|"B" }` | `BetResult`. Emits `bet_cancelled` or `bet_rejected` + `balance_updated`. |
-| `cash_out` | `{ panel:"A"\|"B" }` | `CashoutResult`. Emits `cashout_accepted` or `cashout_rejected` + `balance_updated`. |
-| `reality_check_ack` | _(none)_ | `{ ok:true }` — acknowledges a reality check (§11); unblocks new bets in enforce mode. |
+| Message             | Payload                                                  | Ack / result                                                                                                   |
+| ------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `subscribe_round`   | _(none)_                                                 | `{ ok:true }`; also (re)emits `round_state`.                                                                   |
+| `time_sync`         | `{ t0?: number }`                                        | `{ ok:true, t0, serverTime }` — NTP-style clock sync; `t0` is echoed, `serverTime` = server epoch ms. No auth. |
+| `place_bet`         | `{ panel:"A"\|"B", amount:number, autoCashout?:number }` | `BetResult` (see below). Emits `bet_accepted` or `bet_rejected` + `balance_updated` on success.                |
+| `cancel_bet`        | `{ panel:"A"\|"B" }`                                     | `BetResult`. Emits `bet_cancelled` or `bet_rejected` + `balance_updated`.                                      |
+| `cash_out`          | `{ panel:"A"\|"B" }`                                     | `CashoutResult`. Emits `cashout_accepted` or `cashout_rejected` + `balance_updated`.                           |
+| `reality_check_ack` | _(none)_                                                 | `{ ok:true }` — acknowledges a reality check (§11); unblocks new bets in enforce mode.                         |
 
 **`place_bet` payload validation** (`placeSchema`, Zod):
 
@@ -397,21 +397,21 @@ credit could not yet be confirmed; the RGS reconciler re-issues it (§9). When
 
 ### 6.2 Server → client events
 
-| Event | Payload | When |
-|---|---|---|
-| `round_state` | `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` | On connect, on `subscribe_round`, and on every phase transition. `phase` ∈ `waiting`\|`betting`\|`running`\|`crashed`\|`settling`\|`completed`. `phaseEndsAt`/`serverTime` are epoch ms. |
-| `multiplier_update` | `{ roundId, multiplier, serverTime }` | ~Every 120 ms while `running`. Cosmetic pacing; never trusted for payout. |
-| `round_crashed` | `{ roundId, crashMultiplier }` | At the crash. `crashMultiplier` is now public (the round's final multiplier). |
-| `round_settled` | `{ roundId }` | After settlement bookkeeping completes (round fully closed). |
-| `bet_accepted` | `BetResult` (`ok:true`) | A `place_bet` succeeded. |
-| `bet_rejected` | `BetResult` / result (`ok:false, reason`) | A `place_bet`/`cancel_bet` was rejected. |
-| `bet_cancelled` | `BetResult` (`ok:true`) | A `cancel_bet` refunded successfully. |
-| `cashout_accepted` | `CashoutResult` (`ok:true`, may include `auto:true`, `pending`) | A manual OR auto cash-out paid. Auto-cashouts add `"auto": true`. |
-| `cashout_rejected` | `CashoutResult` (`ok:false, reason`) | A `cash_out` was rejected (e.g. `too_late`). |
-| `bet_busted` | `{ panel }` | The round crashed with this bet still active (stake lost). |
-| `balance_updated` | `{ currency, balance }` | After any successful money move (bet/cancel/cash-out). `balance` is minor units; `currency` defaults to `"DEMO"` for play-money. |
-| `reality_check` | `{ elapsedSec, wagered, won, net, currency, enforce }` | Responsible gambling — periodic reality check (§11). `enforce:true` ⇒ new bets blocked until `reality_check_ack`. |
-| `session_time_limit` | `{ maxSessionSec }` | Responsible gambling — the session duration limit was reached; new bets are blocked (§11). |
+| Event                | Payload                                                         | When                                                                                                                                                                                     |
+| -------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `round_state`        | `{ roundId, phase, phaseEndsAt, multiplier, serverTime }`       | On connect, on `subscribe_round`, and on every phase transition. `phase` ∈ `waiting`\|`betting`\|`running`\|`crashed`\|`settling`\|`completed`. `phaseEndsAt`/`serverTime` are epoch ms. |
+| `multiplier_update`  | `{ roundId, multiplier, serverTime }`                           | ~Every 120 ms while `running`. Cosmetic pacing; never trusted for payout.                                                                                                                |
+| `round_crashed`      | `{ roundId, crashMultiplier }`                                  | At the crash. `crashMultiplier` is now public (the round's final multiplier).                                                                                                            |
+| `round_settled`      | `{ roundId }`                                                   | After settlement bookkeeping completes (round fully closed).                                                                                                                             |
+| `bet_accepted`       | `BetResult` (`ok:true`)                                         | A `place_bet` succeeded.                                                                                                                                                                 |
+| `bet_rejected`       | `BetResult` / result (`ok:false, reason`)                       | A `place_bet`/`cancel_bet` was rejected.                                                                                                                                                 |
+| `bet_cancelled`      | `BetResult` (`ok:true`)                                         | A `cancel_bet` refunded successfully.                                                                                                                                                    |
+| `cashout_accepted`   | `CashoutResult` (`ok:true`, may include `auto:true`, `pending`) | A manual OR auto cash-out paid. Auto-cashouts add `"auto": true`.                                                                                                                        |
+| `cashout_rejected`   | `CashoutResult` (`ok:false, reason`)                            | A `cash_out` was rejected (e.g. `too_late`).                                                                                                                                             |
+| `bet_busted`         | `{ panel }`                                                     | The round crashed with this bet still active (stake lost).                                                                                                                               |
+| `balance_updated`    | `{ currency, balance }`                                         | After any successful money move (bet/cancel/cash-out). `balance` is minor units; `currency` defaults to `"DEMO"` for play-money.                                                         |
+| `reality_check`      | `{ elapsedSec, wagered, won, net, currency, enforce }`          | Responsible gambling — periodic reality check (§11). `enforce:true` ⇒ new bets blocked until `reality_check_ack`.                                                                        |
+| `session_time_limit` | `{ maxSessionSec }`                                             | Responsible gambling — the session duration limit was reached; new bets are blocked (§11).                                                                                               |
 
 > Note: `multiplier`/`crashMultiplier` are 2-decimal numbers (e.g. `2.45`). The
 > crash point itself is **never** exposed before the crash — `round_state` while
@@ -465,15 +465,15 @@ Insufficient funds — respond with **HTTP 402** or **409**, OR **200/4xx** with
 `{ "error": "insufficient_funds" }`. Any of these is treated as a clean business
 rejection (the bet is rejected, not retried).
 
-| Field | Meaning |
-|---|---|
-| `playerId` | Your player id (from the launch token). |
-| `currency` | ISO-4217 code (uppercase). |
-| `amount` | Positive minor units to debit (the stake), as a **BigInt-safe decimal string**. |
-| `transactionId` | **Unique per money-move; dedup on this** (idempotency key). |
-| `roundId`, `betId` | Our round/bet ids — context for your statement and reconciliation (key your book by `betId`). |
-| `operatorTxId` (resp) | Your reference id for the applied transaction. |
-| `balance` (resp) | Player balance after the move, minor units, as a **BigInt-safe decimal string**. |
+| Field                 | Meaning                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `playerId`            | Your player id (from the launch token).                                                       |
+| `currency`            | ISO-4217 code (uppercase).                                                                    |
+| `amount`              | Positive minor units to debit (the stake), as a **BigInt-safe decimal string**.               |
+| `transactionId`       | **Unique per money-move; dedup on this** (idempotency key).                                   |
+| `roundId`, `betId`    | Our round/bet ids — context for your statement and reconciliation (key your book by `betId`). |
+| `operatorTxId` (resp) | Your reference id for the applied transaction.                                                |
+| `balance` (resp)      | Player balance after the move, minor units, as a **BigInt-safe decimal string**.              |
 
 ### 7.2 `POST /win` — credit the payout
 
@@ -602,14 +602,14 @@ so a retried bet dedups instead of charging twice.
 
 **RGS-side response → outcome mapping (`/bet`, `/win`, `/rollback`):**
 
-| Operator response | RGS interpretation |
-|---|---|
-| `200` + valid JSON | Applied. Continue. |
-| `402` / `409` / body `{error:"insufficient_funds"}` | **Insufficient funds** — clean rejection (bet rejected; no retry). |
-| `408` / `504` | **Operator-side timeout** — ambiguous (see below). |
-| Other non-2xx (`4xx`/`5xx`) | **Operator error** — transient; retried a couple of times, then compensated/failed. |
-| Client-side request timeout (AbortController, default 3000 ms) | **Ambiguous timeout** (the operator may or may not have applied it). |
-| Other network failure (DNS, connection refused) | **Did not reach the operator** → definitely not applied → safe to retry. |
+| Operator response                                              | RGS interpretation                                                                  |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `200` + valid JSON                                             | Applied. Continue.                                                                  |
+| `402` / `409` / body `{error:"insufficient_funds"}`            | **Insufficient funds** — clean rejection (bet rejected; no retry).                  |
+| `408` / `504`                                                  | **Operator-side timeout** — ambiguous (see below).                                  |
+| Other non-2xx (`4xx`/`5xx`)                                    | **Operator error** — transient; retried a couple of times, then compensated/failed. |
+| Client-side request timeout (AbortController, default 3000 ms) | **Ambiguous timeout** (the operator may or may not have applied it).                |
+| Other network failure (DNS, connection refused)                | **Did not reach the operator** → definitely not applied → safe to retry.            |
 
 **The critical rule — ambiguous timeout on a DEBIT.** When a `/bet` call times out,
 the RGS does **not** know whether you applied the debit, and it does **not**
@@ -665,13 +665,13 @@ You keep your own ledger ("operator book"), ideally keyed by our **`betId`** (se
 on every `/bet`, `/win`, `/rollback`). Reconcile your book against our reporting
 (§13) — and your own statement — on these invariants:
 
-| Invariant | Statement |
-|---|---|
-| **Win linkage** | Every `cashed_out` bet got **exactly one** `/win`, with `win amount == bet.payout`. |
-| **Busted purity** | Every `busted` bet got a `/bet` (debit) but **no** `/win`. |
-| **Stake linkage** | Every wagered bet (`active`/`cashed_out`/`busted`/`payout_pending`) has a matching `/bet` debit `== amount`, net of any `/rollback`. |
-| **Backlog drained** | No bet stuck in a transient state (`reserving`/`cancelling`/`payout_pending`) once the dust settles. |
-| **Conservation** | On your book, `Σ(bet) − Σ(win) − Σ(rollback)` equals the net balance drop for those players, which equals `Σ stake(wagered) − Σ payout(cashed)`. (Note: a win pays the full `stake × multiplier`, not just the stake.) |
+| Invariant           | Statement                                                                                                                                                                                                              |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Win linkage**     | Every `cashed_out` bet got **exactly one** `/win`, with `win amount == bet.payout`.                                                                                                                                    |
+| **Busted purity**   | Every `busted` bet got a `/bet` (debit) but **no** `/win`.                                                                                                                                                             |
+| **Stake linkage**   | Every wagered bet (`active`/`cashed_out`/`busted`/`payout_pending`) has a matching `/bet` debit `== amount`, net of any `/rollback`.                                                                                   |
+| **Backlog drained** | No bet stuck in a transient state (`reserving`/`cancelling`/`payout_pending`) once the dust settles.                                                                                                                   |
+| **Conservation**    | On your book, `Σ(bet) − Σ(win) − Σ(rollback)` equals the net balance drop for those players, which equals `Σ stake(wagered) − Σ payout(cashed)`. (Note: a win pays the full `stake × multiplier`, not just the stake.) |
 
 `scripts/operator-recon-check.ts` implements exactly these (`O1`–`O5`) against the
 reference stub's `/debug/book`; for a real operator the equivalent input is your
@@ -694,13 +694,13 @@ RG applies to **real-money sessions only** (demo and guests never carry RG). Con
 is per-operator (with optional per-currency limits) and rides the signed session
 token, so it cannot be stripped client-side. Supported controls:
 
-| Control | Effect |
-|---|---|
+| Control                | Effect                                                                                                         |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Reality-check interval | Emits `reality_check` every N seconds with the session's `wagered`/`won`/`net` (minor units) and `elapsedSec`. |
-| Reality-check enforce | If `enforce:true`, new bets are blocked (`reality_check_pending`) until the client sends `reality_check_ack`. |
-| Max session duration | Emits `session_time_limit` once when reached; new bets are then blocked (`session_time_limit`). |
-| Max session loss | Blocks a new bet that would push session net loss over the cap (`session_loss_limit`). |
-| Max session wager | Blocks a new bet that would push session turnover over the cap (`session_wager_limit`). |
+| Reality-check enforce  | If `enforce:true`, new bets are blocked (`reality_check_pending`) until the client sends `reality_check_ack`.  |
+| Max session duration   | Emits `session_time_limit` once when reached; new bets are then blocked (`session_time_limit`).                |
+| Max session loss       | Blocks a new bet that would push session net loss over the cap (`session_loss_limit`).                         |
+| Max session wager      | Blocks a new bet that would push session turnover over the cap (`session_wager_limit`).                        |
 
 **Cash-out and cancel are never RG-blocked** — an at-risk player can always retrieve
 their money; RG only gates *new* bets. The client should render reality-check and
@@ -720,37 +720,37 @@ All strings below are emitted verbatim by the code (no paraphrase).
 
 **Launch / session (`POST /api/operator/launch`, HTTP 401 unless noted):**
 
-| Code | Meaning |
-|---|---|
-| `invalid_body` | Missing/short `token` (HTTP **400**). |
-| `invalid_launch_token` | Bad/expired signature, missing `operatorId`, or missing `jti`. |
-| `unknown_operator` | Operator not found or disabled. |
-| `currency_not_allowed` | `currency` not in the operator's allow-list. |
-| `demo_not_allowed` | `demo:true` but the operator lacks `demoEnabled`. |
-| `launch_token_already_used` | `jti` already consumed (replay). |
-| `operator_disabled` | Operator disabled (also at token issue). |
+| Code                        | Meaning                                                        |
+| --------------------------- | -------------------------------------------------------------- |
+| `invalid_body`              | Missing/short `token` (HTTP **400**).                          |
+| `invalid_launch_token`      | Bad/expired signature, missing `operatorId`, or missing `jti`. |
+| `unknown_operator`          | Operator not found or disabled.                                |
+| `currency_not_allowed`      | `currency` not in the operator's allow-list.                   |
+| `demo_not_allowed`          | `demo:true` but the operator lacks `demoEnabled`.              |
+| `launch_token_already_used` | `jti` already consumed (replay).                               |
+| `operator_disabled`         | Operator disabled (also at token issue).                       |
 
 **WebSocket message rejections** (in the ack `{ ok:false, reason }` and/or
 `bet_rejected`/`cashout_rejected`):
 
-| Code | Source | Meaning |
-|---|---|---|
-| `rate_limited` | gateway | > 15 msg/s on this socket. |
-| `not_authenticated` | gateway | No/invalid session token for a money action. |
-| `invalid_payload` | gateway | Payload failed schema (bad panel, non-finite/non-positive amount, `autoCashout ≤ 1`). |
-| `betting_closed` | bets | `place_bet`/`cancel_bet` outside the `betting` phase. |
-| `invalid_amount` | bets/risk | Stake below min or above max for the currency. |
-| `already_bet` | bets | A bet already exists for this `(round, panel)`. |
-| `insufficient_balance` | bets | Operator/ledger rejected the debit for funds. |
-| `bet_failed` | bets | Generic bet failure (wallet resolution, exposure-lock contention, transient DB/activation error). |
-| `round_exposure_cap` | bets/risk | The round's aggregate potential payout would exceed the operator exposure cap. |
-| `reality_check_pending` | bets | RG: a reality check is awaiting `reality_check_ack` (enforce mode). |
-| `session_time_limit` | bets | RG: session duration limit reached. |
-| `session_loss_limit` | bets | RG: session loss cap would be exceeded. |
-| `session_wager_limit` | bets | RG: session wager cap would be exceeded. |
-| `no_active_bet` | bets | Cancel/cash-out with no active bet for that panel (or lost a claim race). |
-| `too_late` | bets | Cash-out outside `running`, or at/after the (authoritative) crash. |
-| `session_revoked` | gateway | The operator session was revoked (logout or operator `sessions/revoke`); a new bet on a still-connected socket is rejected. The socket is then dropped. |
+| Code                    | Source    | Meaning                                                                                                                                                 |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rate_limited`          | gateway   | > 15 msg/s on this socket.                                                                                                                              |
+| `not_authenticated`     | gateway   | No/invalid session token for a money action.                                                                                                            |
+| `invalid_payload`       | gateway   | Payload failed schema (bad panel, non-finite/non-positive amount, `autoCashout ≤ 1`).                                                                   |
+| `betting_closed`        | bets      | `place_bet`/`cancel_bet` outside the `betting` phase.                                                                                                   |
+| `invalid_amount`        | bets/risk | Stake below min or above max for the currency.                                                                                                          |
+| `already_bet`           | bets      | A bet already exists for this `(round, panel)`.                                                                                                         |
+| `insufficient_balance`  | bets      | Operator/ledger rejected the debit for funds.                                                                                                           |
+| `bet_failed`            | bets      | Generic bet failure (wallet resolution, exposure-lock contention, transient DB/activation error).                                                       |
+| `round_exposure_cap`    | bets/risk | The round's aggregate potential payout would exceed the operator exposure cap.                                                                          |
+| `reality_check_pending` | bets      | RG: a reality check is awaiting `reality_check_ack` (enforce mode).                                                                                     |
+| `session_time_limit`    | bets      | RG: session duration limit reached.                                                                                                                     |
+| `session_loss_limit`    | bets      | RG: session loss cap would be exceeded.                                                                                                                 |
+| `session_wager_limit`   | bets      | RG: session wager cap would be exceeded.                                                                                                                |
+| `no_active_bet`         | bets      | Cancel/cash-out with no active bet for that panel (or lost a claim race).                                                                               |
+| `too_late`              | bets      | Cash-out outside `running`, or at/after the (authoritative) crash.                                                                                      |
+| `session_revoked`       | gateway   | The operator session was revoked (logout or operator `sessions/revoke`); a new bet on a still-connected socket is rejected. The socket is then dropped. |
 
 > `bet_failed` is intentionally generic to the client (no internal-state leak);
 > internally distinct causes (`wallet_owner_mismatch`, exposure-lock contention,
@@ -761,13 +761,13 @@ All strings below are emitted verbatim by the code (no paraphrase).
 
 **Bet void (`POST /api/operator/bets/:betId/void`, §13.3):**
 
-| Code | HTTP | Meaning |
-|---|---|---|
-| `invalid betId` | **400** | `:betId` is not a UUID. |
-| `bet_not_found` | **404** | The bet is unknown, is not in **your** operator scope, or is internal/guest play. Returned identically in all three cases (no cross-tenant existence oracle). |
-| `bet_not_settled` | **409** | The bet is still `active` (live in the round) — settle it first, then void. |
-| `bet_transient` | **409** | The bet is in a transient money state (`reserving` / `cancelling` / `payout_pending`) — retry the void once it settles. |
-| `bet_state_changed` | **409** | The settle-state CAS lost a race (the bet changed under us) — safe to retry. |
+| Code                | HTTP    | Meaning                                                                                                                                                       |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid betId`     | **400** | `:betId` is not a UUID.                                                                                                                                       |
+| `bet_not_found`     | **404** | The bet is unknown, is not in **your** operator scope, or is internal/guest play. Returned identically in all three cases (no cross-tenant existence oracle). |
+| `bet_not_settled`   | **409** | The bet is still `active` (live in the round) — settle it first, then void.                                                                                   |
+| `bet_transient`     | **409** | The bet is in a transient money state (`reserving` / `cancelling` / `payout_pending`) — retry the void once it settles.                                       |
+| `bet_state_changed` | **409** | The settle-state CAS lost a race (the bet changed under us) — safe to retry.                                                                                  |
 
 > The void route is authenticated by the **reporting API key** (§13.1), so the
 > launch/session and WebSocket error tables above do not apply to it; failures
@@ -788,13 +788,13 @@ only from the key, never from the query). Optional IP allow-list applies if
 configured. Money is summed in minor units and returned as decimal **strings** (sums
 can exceed 2^53); demo bets are excluded unless `includeDemo=true`.
 
-| Route | Purpose |
-|---|---|
-| `GET /api/operator/reports/summary?from&to[&currency][&includeDemo]` | Per-currency totals: `betCount`, `wagered`, `won`, `ggr`, `uniquePlayers`, `rtp`, `decimals`. |
-| `GET /api/operator/reports/daily?from&to[&currency][&includeDemo]` | The same, bucketed per UTC day. |
-| `GET /api/operator/reports/bets?from&to[&currency][&includeDemo][&cursor][&limit]` | Paginated per-bet rows (id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo, timestamps) with `nextCursor`. |
-| `GET /api/operator/reports/transaction?transactionId=…` (or `?betId=…`) | Single-transaction status lookup (§13.2) — the disposition of one money-move when a wallet response was lost. |
-| `POST /api/operator/bets/:betId/void` | **Money-write** — fully reverse a settled bet so it is as if it never happened (refund the stake; reclaim the payout if it won). Idempotent, tenant-scoped (§13.3). |
+| Route                                                                              | Purpose                                                                                                                                                             |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/operator/reports/summary?from&to[&currency][&includeDemo]`               | Per-currency totals: `betCount`, `wagered`, `won`, `ggr`, `uniquePlayers`, `rtp`, `decimals`.                                                                       |
+| `GET /api/operator/reports/daily?from&to[&currency][&includeDemo]`                 | The same, bucketed per UTC day.                                                                                                                                     |
+| `GET /api/operator/reports/bets?from&to[&currency][&includeDemo][&cursor][&limit]` | Paginated per-bet rows (id, roundId, playerId, currency, panel, amount, status, cashoutMult, payout, demo, timestamps) with `nextCursor`.                           |
+| `GET /api/operator/reports/transaction?transactionId=…` (or `?betId=…`)            | Single-transaction status lookup (§13.2) — the disposition of one money-move when a wallet response was lost.                                                       |
+| `POST /api/operator/bets/:betId/void`                                              | **Money-write** — fully reverse a settled bet so it is as if it never happened (refund the stake; reclaim the payout if it won). Idempotent, tenant-scoped (§13.3). |
 
 Example `summary` response:
 
@@ -859,15 +859,15 @@ Success **200**:
 
 **Read the disposition by the `*State` fields — never infer it from a single boolean.**
 
-| Field | Value | Meaning |
-|---|---|---|
-| `debitState` | `pending` | The stake debit is **being reconciled** — it MAY already be applied on your wallet. Do **not** read this as "no charge"; the RGS will roll back any applied debit. (status `reserving`.) |
-|  | `applied` | The stake was debited (status `active`/`cashed_out`/`busted`/`payout_pending`/`cancelling`). |
-|  | `reversed` | The stake was debited and then fully **refunded** (status `cancelled`). |
-| `refundState` | `none` / `pending` / `applied` | Refund not applicable / in flight / completed. |
-| `payoutState` | `none` | No payout (lost, or no win). |
-|  | `pending` | A win is **owed**; our credit is unconfirmed and MAY already be applied on your wallet. We retry the idempotent `/win` until confirmed — do **not** credit it yourself; dedup on the `transactionId`. (status `payout_pending`.) |
-|  | `paid` | The payout was credited and confirmed (status `cashed_out`). |
+| Field         | Value                          | Meaning                                                                                                                                                                                                                          |
+| ------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `debitState`  | `pending`                      | The stake debit is **being reconciled** — it MAY already be applied on your wallet. Do **not** read this as "no charge"; the RGS will roll back any applied debit. (status `reserving`.)                                         |
+|               | `applied`                      | The stake was debited (status `active`/`cashed_out`/`busted`/`payout_pending`/`cancelling`).                                                                                                                                     |
+|               | `reversed`                     | The stake was debited and then fully **refunded** (status `cancelled`).                                                                                                                                                          |
+| `refundState` | `none` / `pending` / `applied` | Refund not applicable / in flight / completed.                                                                                                                                                                                   |
+| `payoutState` | `none`                         | No payout (lost, or no win).                                                                                                                                                                                                     |
+|               | `pending`                      | A win is **owed**; our credit is unconfirmed and MAY already be applied on your wallet. We retry the idempotent `/win` until confirmed — do **not** credit it yourself; dedup on the `transactionId`. (status `payout_pending`.) |
+|               | `paid`                         | The payout was credited and confirmed (status `cashed_out`).                                                                                                                                                                     |
 
 > **Critical reading rules (avoid a double-credit / missed refund):**
 > - `debitTxId` / `payoutTxId` are **best-effort references**. A `null` does **NOT** mean
@@ -916,17 +916,17 @@ Content-Type: application/json
 The action depends on the bet's current status. Only **settled** bets can be voided;
 everything else is either an idempotent no-op or a retryable conflict.
 
-| Bet status | Behaviour | Result |
-|---|---|---|
-| `busted` (lost) | Refund the stake. | **200**, `status:"voided"`, `reversed:true`. |
-| `cashed_out` (won) | Reclaim the payout **first**, then refund the stake. | **200**, `status:"voided"`, `reversed:true`. |
-| `active` (live in the round) | Not settled — settle it first. | **409** `bet_not_settled`. |
-| `reserving` / `cancelling` / `payout_pending` | Transient money state — retry once settled. | **409** `bet_transient`. |
-| `voided` | Already voided — idempotent no-op. | **200**, `status:"voided"`, `reversed:false`. |
-| `cancelled` (player pre-settlement cancel) | Already net-zero (stake was refunded at cancel) — no-op. | **200**, `status:"cancelled"`, `reversed:false`. |
-| not yours / not found / internal or guest | No such bet **in your scope**. | **404** `bet_not_found`. |
-| (path) non-UUID `betId` | Malformed request. | **400** `invalid betId`. |
-| (race) settle-state CAS lost a race | The bet changed under us — retry. | **409** `bet_state_changed`. |
+| Bet status                                    | Behaviour                                                | Result                                           |
+| --------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ |
+| `busted` (lost)                               | Refund the stake.                                        | **200**, `status:"voided"`, `reversed:true`.     |
+| `cashed_out` (won)                            | Reclaim the payout **first**, then refund the stake.     | **200**, `status:"voided"`, `reversed:true`.     |
+| `active` (live in the round)                  | Not settled — settle it first.                           | **409** `bet_not_settled`.                       |
+| `reserving` / `cancelling` / `payout_pending` | Transient money state — retry once settled.              | **409** `bet_transient`.                         |
+| `voided`                                      | Already voided — idempotent no-op.                       | **200**, `status:"voided"`, `reversed:false`.    |
+| `cancelled` (player pre-settlement cancel)    | Already net-zero (stake was refunded at cancel) — no-op. | **200**, `status:"cancelled"`, `reversed:false`. |
+| not yours / not found / internal or guest     | No such bet **in your scope**.                           | **404** `bet_not_found`.                         |
+| (path) non-UUID `betId`                       | Malformed request.                                       | **400** `invalid betId`.                         |
+| (race) settle-state CAS lost a race           | The bet changed under us — retry.                        | **409** `bet_state_changed`.                     |
 
 > The reclaim of a won bet runs **before** the stake refund by design: if the
 > operator rejects the clawback (see note 2), nothing has been refunded yet and the
@@ -948,14 +948,14 @@ everything else is either an idempotent no-op or a retryable conflict.
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `ok` | Always `true` on a 200 (failures are HTTP 4xx with an error string per §12). |
-| `betId` | Echoes the path `betId`. |
-| `status` | The bet's **final** status — `voided` (a settled bet was reversed, or a prior void replayed) or `cancelled` (a player-cancelled bet, already net-zero). |
-| `reversed` | Did **this** call perform the reversal? `true` = this call moved money; `false` = the bet was already net-zero before this call (an idempotent replay of a `voided`/`cancelled` bet). Use this to distinguish a first void from a retry. |
-| `refundedStake` | The bet's **lifetime** void outcome — minor units returned to the player (the stake). A **minor-unit string**. |
-| `reclaimedPayout` | The bet's **lifetime** void outcome — minor units reclaimed from the player (the original payout; `"0"` if the bet never won). A **minor-unit string**. |
+| Field             | Meaning                                                                                                                                                                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`              | Always `true` on a 200 (failures are HTTP 4xx with an error string per §12).                                                                                                                                                             |
+| `betId`           | Echoes the path `betId`.                                                                                                                                                                                                                 |
+| `status`          | The bet's **final** status — `voided` (a settled bet was reversed, or a prior void replayed) or `cancelled` (a player-cancelled bet, already net-zero).                                                                                  |
+| `reversed`        | Did **this** call perform the reversal? `true` = this call moved money; `false` = the bet was already net-zero before this call (an idempotent replay of a `voided`/`cancelled` bet). Use this to distinguish a first void from a retry. |
+| `refundedStake`   | The bet's **lifetime** void outcome — minor units returned to the player (the stake). A **minor-unit string**.                                                                                                                           |
+| `reclaimedPayout` | The bet's **lifetime** void outcome — minor units reclaimed from the player (the original payout; `"0"` if the bet never won). A **minor-unit string**.                                                                                  |
 
 > `refundedStake` / `reclaimedPayout` describe the bet's **lifetime** void outcome,
 > not necessarily what this specific call moved. On an idempotent replay
@@ -1028,9 +1028,9 @@ access — until they are in place, treat void as a privileged, secured operatio
 
 Source of truth: `src/wallet/wallet.controller.ts`.
 
-| Route | Purpose |
-|---|---|
-| `GET /api/wallet/balance` | Returns `{ currency, balance }`. In operator mode this is **your authoritative balance** (via `/balance`), not our journal. |
+| Route                          | Purpose                                                                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /api/wallet/balance`      | Returns `{ currency, balance }`. In operator mode this is **your authoritative balance** (via `/balance`), not our journal.                                                    |
 | `GET /api/wallet/transactions` | Returns our **local journal** (last 50 ledger rows). In operator mode this is a reconciliation aid, **not** the player's authoritative statement (that lives at the operator). |
 
 ### 13.5 Round history (public)
@@ -1056,10 +1056,10 @@ The hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app`; 
 `*.vaultrun.example` hostnames below are placeholders for request examples — the
 **wire contract is real and stable**.
 
-| Environment | REST base | WS base | Status |
-|---|---|---|---|
-| Sandbox | `https://sandbox.vaultrun.app` | `wss://sandbox.vaultrun.app` | **Live** — hosted operator-mode sandbox (operator-wallet stub) for integration testing. **Not** under the production SLA (`commercial/sla.md` §9). |
-| Production | `https://api.vaultrun.example` | `wss://api.vaultrun.example` | Live, but currently running **operator-mode OFF** (internal play-money demo). Hostname is a placeholder. |
+| Environment | REST base                      | WS base                      | Status                                                                                                                                             |
+| ----------- | ------------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sandbox     | `https://sandbox.vaultrun.app` | `wss://sandbox.vaultrun.app` | **Live** — hosted operator-mode sandbox (operator-wallet stub) for integration testing. **Not** under the production SLA (`commercial/sla.md` §9). |
+| Production  | `https://api.vaultrun.example` | `wss://api.vaultrun.example` | Live, but currently running **operator-mode OFF** (internal play-money demo). Hostname is a placeholder.                                           |
 
 > Important: production today runs with `WALLET_PROVIDER_TYPE=internal` (play-money,
 > the public demo) — the operator seamless-wallet path is built, tested, and dormant.
@@ -1258,13 +1258,13 @@ Source of truth (what is actually stored): `prisma/schema.prisma`,
 
 **Stored (the complete list):**
 
-| Data | Where |
-|---|---|
-| Pseudonymous **`playerId`** (your own id, from the launch token) | `game_sessions.player_id`; embedded in `users.username` = `op:{operatorId}:{playerId}:{currency}` |
-| Derived **display name** `Player <playerId[0:6]>` | `profiles.display_name` |
-| Session **`locale`** | `game_sessions.locale` |
-| Operator-scoped **game/financial records** (bets, rounds, cash-outs, local journal) — integer minor units, linked to the pseudonymous id | `game_bets`, `game_rounds`, `wallets`, `ledger_transactions` |
-| Transient **client IP** — rate-limit bucket key, **in memory only, never persisted** | `src/common/client-ip.ts` (throttler); **not** in the database |
+| Data                                                                                                                                     | Where                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Pseudonymous **`playerId`** (your own id, from the launch token)                                                                         | `game_sessions.player_id`; embedded in `users.username` = `op:{operatorId}:{playerId}:{currency}` |
+| Derived **display name** `Player <playerId[0:6]>`                                                                                        | `profiles.display_name`                                                                           |
+| Session **`locale`**                                                                                                                     | `game_sessions.locale`                                                                            |
+| Operator-scoped **game/financial records** (bets, rounds, cash-outs, local journal) — integer minor units, linked to the pseudonymous id | `game_bets`, `game_rounds`, `wallets`, `ledger_transactions`                                      |
+| Transient **client IP** — rate-limit bucket key, **in memory only, never persisted**                                                     | `src/common/client-ip.ts` (throttler); **not** in the database                                    |
 
 **Never stored:** real name, email, phone, postal address, date of birth,
 government ID / KYC documents, **payment instrument (card / bank / crypto wallet
@@ -1301,16 +1301,16 @@ the other operator money-write surface — a **per-operator rate limit** and a
 Defaults/maximums **absent a different instruction from you** (full table in
 `commercial/data-protection-policy.md` §B):
 
-| Data | Default retention |
-|---|---|
-| Financial ledger + bets | **≥ 5 years** (AML/bookkeeping; your legal hold), de-identified on erasure |
-| Game rounds + fairness records | Retained with the ledger |
+| Data                                         | Default retention                                                                                                      |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Financial ledger + bets                      | **≥ 5 years** (AML/bookkeeping; your legal hold), de-identified on erasure                                             |
+| Game rounds + fairness records               | Retained with the ledger                                                                                               |
 | Significant-event audit log (`audit_events`) | Long-term, immutable (append-only) — **no player IP** (only the operator caller IP on operator-initiated HTTP actions) |
-| Player identity | Anonymized on erasure request, or after defined dormancy |
-| Game sessions | Short (session lifecycle + reconciliation) |
-| Rate-limit IP | Ephemeral — in memory only |
-| App logs / Sentry | 30–90 days, errors only (Sentry only when enabled) |
-| Encrypted off-site backups | Rolling 30 days, client-side encrypted (ciphertext at the store) |
+| Player identity                              | Anonymized on erasure request, or after defined dormancy                                                               |
+| Game sessions                                | Short (session lifecycle + reconciliation)                                                                             |
+| Rate-limit IP                                | Ephemeral — in memory only                                                                                             |
+| App logs / Sentry                            | 30–90 days, errors only (Sentry only when enabled)                                                                     |
+| Encrypted off-site backups                   | Rolling 30 days, client-side encrypted (ciphertext at the store)                                                       |
 
 A scheduled retention **sweep** (auto-anonymize at end-of-dormancy) is a **future
 item**, not yet built; retention/erasure is operator-initiated today.

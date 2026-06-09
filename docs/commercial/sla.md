@@ -38,10 +38,10 @@ WebSocket game, reporting, and provably-fair surfaces (`../api-integration-spec.
 
 ## 2. Availability targets
 
-| Scope | Target | Approx. allowed downtime |
-|---|---|---|
-| **Overall Service** | **99.9%** ("three nines") | ≈ 43 min / month (≈ 8.7 h / year) |
-| **Money path** (settlement-critical, multi-node topology) | **≥ 99.95%** | ≈ 21.6 min / month (≈ 4.4 h / year) |
+| Scope                                                     | Target                    | Approx. allowed downtime             |
+|-----------------------------------------------------------|---------------------------|--------------------------------------|
+| **Overall Service**                                       | **99.9%** ("three nines") | ≈ 43 min / month (≈ 8.7 h / year)    |
+| **Money path** (settlement-critical, multi-node topology) | **≥ 99.95%**              | ≈ 21.6 min / month (≈ 4.4 h / year)  |
 
 > **What is benchmarked vs. a Vault Run convention.** The headline figures here —
 > **99.9% uptime**, the **P1–P4** response tiers, and the **5–25% service-credit
@@ -159,12 +159,12 @@ The ladder mirrors common cloud/SaaS practice (tiered to how far below target th
 month fell):
 
 | Monthly availability (Overall Service) | Service credit (% of monthly fees) |
-|---|---|
-| ≥ 99.9% (target met) | 0% |
-| 99.0% – < 99.9% | **5%** |
-| 95.0% – < 99.0% | **10%** |
-| 90.0% – < 95.0% | **15%** |
-| < 90.0% | **25%** |
+|----------------------------------------|------------------------------------|
+| ≥ 99.9% (target met)                   | 0%                                 |
+| 99.0% – < 99.9%                        | **5%**                             |
+| 95.0% – < 99.0%                        | **10%**                            |
+| 90.0% – < 95.0%                        | **15%**                            |
+| < 90.0%                                | **25%**                            |
 
 - **Money-path credits.** A breach of the **≥ 99.95%** money-path target uses an
   equivalent ladder, agreed per deal (the money path is the more sensitive metric).
@@ -260,18 +260,18 @@ This SLA covers the Vault Run RGS as defined in §1. Availability and credits do
 
 ## 11. Summary of proposed levels (negotiable)
 
-| Item | Proposed level |
-|---|---|
-| Overall uptime | **99.9%** / month |
-| Money-path uptime | **≥ 99.95%** / month (multi-node topology target; **interim single-node target = 99.9%**) |
-| Settlement p99 (objective) | **< 200 ms** (single-node load tests) |
-| P1 response | **15–30 min**, 24/7 |
-| P2 response | **1–2 h** |
-| P3 response | **4–8 h** |
-| P4 response | **1 business day** |
-| Maintenance notice | **≥ 72 h** (standard); emergency as needed |
-| Service credits | **5% / 10% / 15% / 25%** of monthly fees, tiered |
-| RCA | Written RCA for P1 (and material P2), ~5 business days |
+| Item                       | Proposed level                                                                            |
+|----------------------------|-------------------------------------------------------------------------------------------|
+| Overall uptime             | **99.9%** / month                                                                         |
+| Money-path uptime          | **≥ 99.95%** / month (multi-node topology target; **interim single-node target = 99.9%**) |
+| Settlement p99 (objective) | **< 200 ms** (single-node load tests)                                                     |
+| P1 response                | **15–30 min**, 24/7                                                                       |
+| P2 response                | **1–2 h**                                                                                 |
+| P3 response                | **4–8 h**                                                                                 |
+| P4 response                | **1 business day**                                                                        |
+| Maintenance notice         | **≥ 72 h** (standard); emergency as needed                                                |
+| Service credits            | **5% / 10% / 15% / 25%** of monthly fees, tiered                                          |
+| RCA                        | Written RCA for P1 (and material P2), ~5 business days                                    |
 
 > Every figure above is a **negotiable draft proposal**, mirroring general
 > cloud/SaaS norms, with latency/connection figures from Vault Run's own load

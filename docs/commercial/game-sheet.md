@@ -1,6 +1,6 @@
 # Vault Run — B2B Game Sheet
 
-**Version:** 1.0  ·  **Date:** 2026-06-07
+**Version:** 1.0  ·  **Date:** 2026-06-07  ·  **Audience:** operators, aggregators, catalog / onboarding
 
 > One-page specification for catalog/onboarding use. Figures are consistent with
 > `docs/game-math-spec.md`, `docs/simulation-report.md`, `docs/provably-fair-guide.md`,
@@ -8,21 +8,21 @@
 
 ---
 
-| Field | Value |
-|---|---|
-| **Game name** | Vault Run |
-| **Supplier** | Vault Run (RGS) |
-| **Game type** | Crash / instant-win — server-authoritative multiplayer |
-| **Theme** | 3D "vault heist" |
-| **Format** | Single shared round on one server clock; fast rounds; social/multiplayer |
-| **RTP** | **97.00%** (house edge 3.00%) — validated by a 1e9-round simulation (measured **96.998%**) |
-| **Volatility** | High (long-tail crash distribution, `P(crash ≥ x) = 0.97 / x`) |
-| **Max multiplier** | **10,000x** (real-money config) · 1,000,000x (play-money demo) |
-| **Max win** | **€10,000 per bet** (EUR reference); €20,000 per player per round; configurable per currency |
-| **Instant-bust frequency** | **≈ 3.96%** (rounds resolving at 1.00x) |
-| **Bet range** | EUR reference: **min €0.10 · max €100** — configurable per currency at onboarding |
-| **Min/max — other currencies** | Per-currency limits set by the operator in minor units (FX/risk policy) |
-| **Round pacing** | Betting window 5.0 s; inter-round pause 3.0 s; running phase variable until the crash point |
+| Field                          | Value                                                                                        |
+|--------------------------------|----------------------------------------------------------------------------------------------|
+| **Game name**                  | Vault Run                                                                                    |
+| **Supplier**                   | Vault Run (RGS)                                                                              |
+| **Game type**                  | Crash / instant-win — server-authoritative multiplayer                                       |
+| **Theme**                      | 3D "vault heist"                                                                             |
+| **Format**                     | Single shared round on one server clock; fast rounds; social/multiplayer                     |
+| **RTP**                        | **97.00%** (house edge 3.00%) — validated by a 1e9-round simulation (measured **96.998%**)   |
+| **Volatility**                 | High (long-tail crash distribution, `P(crash ≥ x) = 0.97 / x`)                               |
+| **Max multiplier**             | **10,000x** (real-money config) · 1,000,000x (play-money demo)                               |
+| **Max win**                    | **€10,000 per bet** (EUR reference); €20,000 per player per round; configurable per currency |
+| **Instant-bust frequency**     | **≈ 3.96%** (rounds resolving at 1.00x)                                                      |
+| **Bet range**                  | EUR reference: **min €0.10 · max €100** — configurable per currency at onboarding            |
+| **Min/max — other currencies** | Per-currency limits set by the operator in minor units (FX/risk policy)                      |
+| **Round pacing**               | Betting window 5.0 s; inter-round pause 3.0 s; running phase variable until the crash point  |
 
 ---
 

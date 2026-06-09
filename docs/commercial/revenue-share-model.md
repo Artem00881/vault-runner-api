@@ -43,14 +43,14 @@ side (the operator's wallet remains authoritative — see §6).
 
 ### What moves the number
 
-| Lever | Effect on our share |
-|---|---|
-| Monthly GGR volume | Higher committed/observed volume → lower % (volume tiers, §3). |
-| Minimum guarantee (MG) | A committed monthly minimum can buy a lower % or better terms. |
-| Exclusivity | Market/brand exclusivity is a premium → typically a higher %. |
+| Lever                     | Effect on our share                                                                                               |
+|---------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Monthly GGR volume        | Higher committed/observed volume → lower % (volume tiers, §3).                                                    |
+| Minimum guarantee (MG)    | A committed monthly minimum can buy a lower % or better terms.                                                    |
+| Exclusivity               | Market/brand exclusivity is a premium → typically a higher %.                                                     |
 | Direct vs. via aggregator | Direct keeps the full supplier share with us; via an aggregator, the aggregator's layer is added **on top** (§4). |
-| Market & currency mix | Regulated markets, fiat vs. crypto, and FX/settlement handling can shift terms. |
-| Term length & ramp | Longer terms / launch ramps can be reflected in tiering. |
+| Market & currency mix     | Regulated markets, fiat vs. crypto, and FX/settlement handling can shift terms.                                   |
+| Term length & ramp        | Longer terms / launch ramps can be reflected in tiering.                                                          |
 
 ---
 
@@ -114,10 +114,10 @@ A simple monthly-GGR tier ladder we can apply on the direct model (numbers are
 illustrative anchors within the **~10–15%** band, to be set per deal):
 
 | Monthly GGR on Vault Run (per currency or reference) | Indicative royalty |
-|---|---|
-| Launch / lower volume | ~15% of GGR |
-| Mid volume | ~12.5% of GGR |
-| High volume / with minimum guarantee | ~10% of GGR |
+|------------------------------------------------------|--------------------|
+| Launch / lower volume                                | ~15% of GGR        |
+| Mid volume                                           | ~12.5% of GGR      |
+| High volume / with minimum guarantee                 | ~10% of GGR        |
 
 > These tier breakpoints are **placeholders for negotiation**, anchored to the
 > market band in §1. We do not publish fixed breakpoints; they are set with the
@@ -186,21 +186,21 @@ expectation and over sustained volume.
 ### 5.1 Direct deal
 
 | Royalty rate | Vault Run share (of €30,000 GGR) | Operator keeps |
-|---|---|---|
-| 10% | **€3,000** | €27,000 |
-| 12.5% | **€3,750** | €26,250 |
-| 15% | **€4,500** | €25,500 |
+|--------------|----------------------------------|----------------|
+| 10%          | **€3,000**                       | €27,000        |
+| 12.5%        | **€3,750**                       | €26,250        |
+| 15%          | **€4,500**                       | €25,500        |
 
 ### 5.2 Via an aggregator (illustrative)
 
 Add an aggregator layer of, say, **10% of GGR** on top of a **12.5%** Vault Run
 royalty:
 
-| Party | Cut (of €30,000 GGR) | Amount |
-|---|---|---|
-| Vault Run royalty | 12.5% | **€3,750** |
-| Aggregator layer | 10% | **€3,000** |
-| Operator keeps | remainder | **€23,250** |
+| Party             | Cut (of €30,000 GGR) | Amount      |
+|-------------------|----------------------|-------------|
+| Vault Run royalty | 12.5%                | **€3,750**  |
+| Aggregator layer  | 10%                  | **€3,000**  |
+| Operator keeps    | remainder            | **€23,250** |
 
 > The aggregator figure here is **illustrative** and depends on the actual
 > aggregator contract and where GGR is booked (§4 caveat). It is shown only to make
@@ -212,7 +212,7 @@ Because the royalty is a percentage of GGR (which tracks turnover at ~3%), our
 share scales linearly with volume: at **€10,000,000** monthly turnover (≈
 **€300,000** GGR), a 12.5% royalty is **≈ €37,500/month**; a volume tier might move
 that rate toward 10% (≈ €30,000) under a minimum guarantee. Exact tiering is per
-deal (§3.3).
+deal (§3, "Indicative volume tiering").
 
 ---
 

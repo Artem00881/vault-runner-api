@@ -42,20 +42,20 @@ see §6.)
 The environment ships with safe placeholders. Replace the ones we issue you; the
 rest have working defaults.
 
-| Variable | Set to | Notes |
-|---|---|---|
-| `baseUrl` | Your sandbox REST base | Hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app` (we confirm your access). No trailing slash. |
-| `wsUrl` | Your sandbox WS base | `wss://…`. Used for the Socket.IO handshake. |
-| `operatorId` | Your operator UUID | Goes into the launch-token `operatorId` claim. |
-| `launchSecret` | Your 32-byte hex HMAC secret | **Secret.** The pre-request script signs the launch JWT with this. |
-| `currency` | `EUR` (or any allow-listed code) | Must be in your currency allow-list. |
-| `playerId` | Your player id | e.g. `player-42`. |
-| `reportingKey` | `vrk_<operatorId>.<secret>` | **Secret.** For the reporting folder. |
-| `walletApiUrl` | Your wallet base URL | **Folder 5 calls this**, not the RGS. |
-| `walletApiKey` | Your wallet Bearer key | **Secret.** Folder 5 auth. |
-| `roundId`, `userId`, `betId` | Example ids | Build the wallet `transactionId`s in folder 5; defaults are fine for a smoke test. |
-| `fairnessRoundId` | A finished round id | From `GET /api/rounds/history`. |
-| `fairnessEpoch` | A fairness epoch number | From `GET /api/fairness/epochs`. |
+| Variable                     | Set to                           | Notes                                                                                                                   |
+| ---------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`                    | Your sandbox REST base           | Hosted operator-mode sandbox is **live** at `https://sandbox.vaultrun.app` (we confirm your access). No trailing slash. |
+| `wsUrl`                      | Your sandbox WS base             | `wss://…`. Used for the Socket.IO handshake.                                                                            |
+| `operatorId`                 | Your operator UUID               | Goes into the launch-token `operatorId` claim.                                                                          |
+| `launchSecret`               | Your 32-byte hex HMAC secret     | **Secret.** The pre-request script signs the launch JWT with this.                                                      |
+| `currency`                   | `EUR` (or any allow-listed code) | Must be in your currency allow-list.                                                                                    |
+| `playerId`                   | Your player id                   | e.g. `player-42`.                                                                                                       |
+| `reportingKey`               | `vrk_<operatorId>.<secret>`      | **Secret.** For the reporting folder.                                                                                   |
+| `walletApiUrl`               | Your wallet base URL             | **Folder 5 calls this**, not the RGS.                                                                                   |
+| `walletApiKey`               | Your wallet Bearer key           | **Secret.** Folder 5 auth.                                                                                              |
+| `roundId`, `userId`, `betId` | Example ids                      | Build the wallet `transactionId`s in folder 5; defaults are fine for a smoke test.                                      |
+| `fairnessRoundId`            | A finished round id              | From `GET /api/rounds/history`.                                                                                         |
+| `fairnessEpoch`              | A fairness epoch number          | From `GET /api/fairness/epochs`.                                                                                        |
 
 `launchToken` and `sessionToken` are filled **automatically** (see §3/§4) — leave
 them blank. Variables marked secret use Postman's masked `secret` type.
@@ -182,14 +182,14 @@ raw WebSocket).
 **Emit (client → server)** — register each event name in Postman's message
 composer, set the payload to JSON, and Send. Every message returns a Socket.IO ack.
 
-| Event | Payload | Ack |
-|---|---|---|
-| `subscribe_round` | _(none)_ | `{ ok:true }` + (re)emits `round_state` |
-| `time_sync` | `{ "t0": 1750000000000 }` | `{ ok:true, t0, serverTime }` |
-| `place_bet` | `{ "panel":"A", "amount":100, "autoCashout":2.0 }` | `BetResult` |
-| `cancel_bet` | `{ "panel":"A" }` | `BetResult` |
-| `cash_out` | `{ "panel":"A" }` | `CashoutResult` |
-| `reality_check_ack` | _(none)_ | `{ ok:true }` |
+| Event               | Payload                                            | Ack                                     |
+| ------------------- | -------------------------------------------------- | --------------------------------------- |
+| `subscribe_round`   | _(none)_                                           | `{ ok:true }` + (re)emits `round_state` |
+| `time_sync`         | `{ "t0": 1750000000000 }`                          | `{ ok:true, t0, serverTime }`           |
+| `place_bet`         | `{ "panel":"A", "amount":100, "autoCashout":2.0 }` | `BetResult`                             |
+| `cancel_bet`        | `{ "panel":"A" }`                                  | `BetResult`                             |
+| `cash_out`          | `{ "panel":"A" }`                                  | `CashoutResult`                         |
+| `reality_check_ack` | _(none)_                                           | `{ ok:true }`                           |
 
 `place_bet`: `panel` ∈ `"A"` (Quick Grab) | `"B"` (Big Heist); `amount` is a finite
 positive number in minor units; `autoCashout` is optional and must be finite and
@@ -204,21 +204,21 @@ the operator credit isn't yet confirmed — no `balance` is included then.
 
 **Listen (server → client)** — add these as listeners:
 
-| Event | Payload | When |
-|---|---|---|
-| `round_state` | `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` | Connect, `subscribe_round`, every phase change. `phase` ∈ waiting\|betting\|running\|crashed\|settling\|completed |
-| `multiplier_update` | `{ roundId, multiplier, serverTime }` | ~Every 120 ms while running (cosmetic; never trusted for payout) |
-| `bet_accepted` | `BetResult` (`ok:true`) | A `place_bet` succeeded |
-| `bet_rejected` | result (`ok:false, reason`) | A `place_bet`/`cancel_bet` was rejected |
-| `bet_cancelled` | `BetResult` (`ok:true`) | A `cancel_bet` refunded |
-| `cashout_accepted` | `CashoutResult` (`ok:true`, may add `auto:true`) | A manual or auto cash-out paid |
-| `cashout_rejected` | result (`ok:false, reason`) | A `cash_out` was rejected (e.g. `too_late`) |
-| `bet_busted` | `{ panel }` | The round crashed with this bet still active |
-| `round_crashed` | `{ roundId, crashMultiplier }` | At the crash (the point becomes public) |
-| `round_settled` | `{ roundId }` | Settlement bookkeeping complete |
-| `balance_updated` | `{ currency, balance }` | After any successful money move |
-| `reality_check` | `{ elapsedSec, wagered, won, net, currency, enforce }` | Responsible gambling (spec §11) |
-| `session_time_limit` | `{ maxSessionSec }` | RG: session duration limit reached |
+| Event                | Payload                                                   | When                                                                                                              |
+| -------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `round_state`        | `{ roundId, phase, phaseEndsAt, multiplier, serverTime }` | Connect, `subscribe_round`, every phase change. `phase` ∈ waiting\|betting\|running\|crashed\|settling\|completed |
+| `multiplier_update`  | `{ roundId, multiplier, serverTime }`                     | ~Every 120 ms while running (cosmetic; never trusted for payout)                                                  |
+| `bet_accepted`       | `BetResult` (`ok:true`)                                   | A `place_bet` succeeded                                                                                           |
+| `bet_rejected`       | result (`ok:false, reason`)                               | A `place_bet`/`cancel_bet` was rejected                                                                           |
+| `bet_cancelled`      | `BetResult` (`ok:true`)                                   | A `cancel_bet` refunded                                                                                           |
+| `cashout_accepted`   | `CashoutResult` (`ok:true`, may add `auto:true`)          | A manual or auto cash-out paid                                                                                    |
+| `cashout_rejected`   | result (`ok:false, reason`)                               | A `cash_out` was rejected (e.g. `too_late`)                                                                       |
+| `bet_busted`         | `{ panel }`                                               | The round crashed with this bet still active                                                                      |
+| `round_crashed`      | `{ roundId, crashMultiplier }`                            | At the crash (the point becomes public)                                                                           |
+| `round_settled`      | `{ roundId }`                                             | Settlement bookkeeping complete                                                                                   |
+| `balance_updated`    | `{ currency, balance }`                                   | After any successful money move                                                                                   |
+| `reality_check`      | `{ elapsedSec, wagered, won, net, currency, enforce }`    | Responsible gambling (spec §11)                                                                                   |
+| `session_time_limit` | `{ maxSessionSec }`                                       | RG: session duration limit reached                                                                                |
 
 **Limits:** one active socket per user (a second socket for the same user
 disconnects the first); **15 messages/second** per socket (excess →
