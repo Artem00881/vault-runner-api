@@ -23,12 +23,39 @@ const NON_TERMINAL_BET_STATUSES = [
   "voiding",
 ] as const;
 
-/** Pepper for the irreversible tombstone HMAC. A dedicated env wins; else the JWT secret;
- *  else a dev constant (tests / local). The pepper only needs to be stable + non-public —
- *  it makes a tombstone non-reversible without knowing it, and unlinkable across deploys
- *  that rotate it. Read at call time (not module load) so a test/CLI env always applies. */
+/** One-time guard so the JWT_SECRET-fallback warning is emitted at most once per process
+ *  (the pepper is read on every anonymize/sweep call — we don't want to spam the log). */
+let warnedJwtSecretFallback = false;
+
+/** Pepper for the irreversible tombstone HMAC (R-037). Resolution order:
+ *    1. ANONYMIZE_PEPPER — the dedicated, recommended secret (prod: 1Password, see DEPLOY.md §12).
+ *    2. JWT_SECRET       — back-compat fallback so existing deploys / dev keep working, WITH a
+ *                          one-time warning (a dedicated pepper is the correct prod posture; sharing
+ *                          the JWT signing secret as the tombstone pepper couples two unrelated
+ *                          secrets' rotation lifecycles — rotating JWT_SECRET would silently break
+ *                          tombstone idempotency / re-resolution).
+ *    3. a dev constant   — tests / local only (neither env set).
+ *  The pepper only needs to be stable + non-public — it makes a tombstone non-reversible without
+ *  knowing it, and unlinkable across deploys that rotate it. CRITICAL: never rotate it while
+ *  tombstones are live (it would change every future tombstone, breaking idempotent re-resolution
+ *  of already-anonymized players — mirrors the REPORTING_KEY_PEPPER caveat). Read at call time (not
+ *  module load) so a test/CLI env always applies. */
 function anonymizePepper(): string {
-  return process.env.ANONYMIZE_PEPPER || process.env.JWT_SECRET || "vaultrun-anon-dev";
+  if (process.env.ANONYMIZE_PEPPER) return process.env.ANONYMIZE_PEPPER;
+  if (process.env.JWT_SECRET) {
+    if (!warnedJwtSecretFallback) {
+      warnedJwtSecretFallback = true;
+      // eslint-disable-next-line no-console -- standalone-CLI-safe (this module runs without Nest DI
+      // in scripts/anonymize-player.ts + scripts/retention-sweep.ts, so no injected Logger here).
+      console.warn(
+        "[DataErasureService] ANONYMIZE_PEPPER is unset — falling back to JWT_SECRET for the tombstone " +
+          "HMAC. Set a dedicated ANONYMIZE_PEPPER (DEPLOY.md §12) before erasing real-player PII, and " +
+          "NEVER rotate it while tombstones are live (rotation breaks idempotent re-resolution).",
+      );
+    }
+    return process.env.JWT_SECRET;
+  }
+  return "vaultrun-anon-dev";
 }
 
 /** Irreversible, PER-USER tombstone: HMAC-SHA256(pepper, internalUserId), 24 hex chars.
@@ -88,9 +115,11 @@ export interface AnonymizePlayerResult {
  * a second run on an already-tombstoned player resolves the same users (via pass 2), sees
  * every one already has anonymizedAt set, and is a no-op (no audit row, no mutation).
  *
- * NO HTTP controller is wired here on purpose (the route inherits the operator VOID route's
- * prerequisites — per-operator rate limit + read-vs-write key scope, see the roadmap
- * deferred list). Service + CLI only for now.
+ * CALLERS (all reuse this one fail-closed path): the CLI `scripts/anonymize-player.ts` (manual
+ * per-player erasure); the operator-facing HTTP route `POST /api/operator/players/:playerId/erase`
+ * (R-039 — tenant-scoped GDPR data-subject request, behind the write-scope gate); and the
+ * retention sweep `scripts/retention-sweep.ts` (R-038 — dormant-player auto-erasure, dry-run by
+ * default). None of them weaken the money-journal retention or the in-flight pre-condition.
  */
 @Injectable()
 export class DataErasureService {
@@ -217,5 +246,90 @@ export class DataErasureService {
     });
 
     return { ok: true, alreadyAnonymized: false, usersAffected: users.length, scrubbedFields };
+  }
+
+  /**
+   * R-038 retention sweep helper — enumerate the DORMANT operator players eligible for
+   * retention-based erasure: those whose LAST activity is older than `cutoff` and who are not
+   * already anonymized. Used ONLY by `scripts/retention-sweep.ts`; the actual scrub still goes
+   * through anonymizePlayer() (which re-checks the in-flight pre-condition + retains the money
+   * journal), so this method NEVER mutates anything — it is a pure read.
+   *
+   * "Last activity" is the MOST RECENT of (a) any GameSession.createdAt and (b) any Bet.createdAt
+   * across ALL of the player's wallets. We deliberately do NOT use GameSession.lastSeenAt: it is
+   * `@updatedAt` but never written (audit M-C2.2), so it is not a reliable recency signal. A
+   * player with NO bets is judged by their last launch alone; a player with NO sessions at all is
+   * not an operator player and is skipped (the operator+player identity lives on the session).
+   *
+   * Resolution is per (operatorId, playerId) — the same tenant key anonymizePlayer() consumes —
+   * so the sweep can hand each result straight back to anonymizePlayer(). Demo (`:demo`) wallets
+   * are INCLUDED in the recency calc (a player who only ever played demo is still erasable), but a
+   * player is identified by the (operatorId, playerId) pair regardless of currency/mode.
+   *
+   * CONSERVATIVE by construction: a player is returned ONLY if EVERY activity signal is past the
+   * cutoff. Anyone with even one recent session or bet is excluded. Already-anonymized users
+   * (anonymizedAt set) are filtered out so a re-run doesn't re-list them.
+   */
+  async findDormantPlayers(cutoff: Date): Promise<Array<{ operatorId: string; playerId: string; lastActivity: Date }>> {
+    // All operator sessions (every launch, real + demo), grouped per (operatorId, playerId). A
+    // GameSession always carries the raw operatorId; the playerId is the operator-supplied id
+    // BEFORE anonymization and the `anon:{tombstone}` AFTER — we filter the latter out below via
+    // the user's anonymizedAt, so an already-erased player is never re-listed.
+    const sessions = await this.prisma.gameSession.findMany({
+      select: { operatorId: true, playerId: true, walletId: true, createdAt: true },
+    });
+    if (sessions.length === 0) return [];
+
+    // Group sessions by the tenant key; track the latest session time + the wallet set per player.
+    const groups = new Map<string, { operatorId: string; playerId: string; walletIds: Set<string>; lastSession: Date }>();
+    for (const s of sessions) {
+      const key = `${s.operatorId} ${s.playerId}`; // NUL can't appear in a UUID or a username
+      const g = groups.get(key);
+      if (g) {
+        g.walletIds.add(s.walletId);
+        if (s.createdAt > g.lastSession) g.lastSession = s.createdAt;
+      } else {
+        groups.set(key, { operatorId: s.operatorId, playerId: s.playerId, walletIds: new Set([s.walletId]), lastSession: s.createdAt });
+      }
+    }
+
+    // Most-recent bet per wallet (one grouped query for all wallets, not an N+1).
+    const allWalletIds = [...new Set(sessions.map((s) => s.walletId))];
+    const lastBetByWallet = new Map<string, Date>();
+    if (allWalletIds.length > 0) {
+      const grouped = await this.prisma.bet.groupBy({
+        by: ["walletId"],
+        where: { walletId: { in: allWalletIds } },
+        _max: { createdAt: true },
+      });
+      for (const row of grouped) {
+        if (row._max.createdAt) lastBetByWallet.set(row.walletId, row._max.createdAt);
+      }
+    }
+
+    // Which of these wallets belong to an ALREADY-anonymized user → drop those players entirely
+    // (idempotency: a re-run must not re-list an erased player). One query for all wallets.
+    const anonWallets = await this.prisma.wallet.findMany({
+      where: { id: { in: allWalletIds }, user: { anonymizedAt: { not: null } } },
+      select: { id: true },
+    });
+    const anonWalletSet = new Set(anonWallets.map((w) => w.id));
+
+    const dormant: Array<{ operatorId: string; playerId: string; lastActivity: Date }> = [];
+    for (const g of groups.values()) {
+      // Skip a player ANY of whose wallets is already anonymized (the whole player is erased).
+      if ([...g.walletIds].some((id) => anonWalletSet.has(id))) continue;
+      // lastActivity = max(last session launch, last bet over all this player's wallets).
+      let lastActivity = g.lastSession;
+      for (const id of g.walletIds) {
+        const b = lastBetByWallet.get(id);
+        if (b && b > lastActivity) lastActivity = b;
+      }
+      // Conservative: dormant ONLY if the most recent signal is strictly before the cutoff.
+      if (lastActivity < cutoff) dormant.push({ operatorId: g.operatorId, playerId: g.playerId, lastActivity });
+    }
+    // Oldest-dormant first (stable, human-friendly for the dry-run report).
+    dormant.sort((a, b) => a.lastActivity.getTime() - b.lastActivity.getTime());
+    return dormant;
   }
 }

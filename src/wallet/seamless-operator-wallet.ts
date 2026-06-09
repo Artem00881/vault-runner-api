@@ -27,6 +27,23 @@ export interface SeamlessOptions {
   maxRetries?: number;
 }
 
+// #1 — defensive upper bound on the OUTBOUND `transactionId` we put on the operator wire. Our
+// idempotency keys are structured + short (e.g. `bet:{roundId}:{userId}:{panel}:debit` ≈ 88 chars),
+// so 200 is generous head-room. This is NOT operator input (we generate the key) — it's a contract
+// invariant: rather than silently send a malformed/oversized id (or truncate one, which would
+// BREAK idempotent dedup at the operator), we assert it. A breach means a key-format bug upstream.
+const MAX_OUTBOUND_TX_ID_LEN = 200;
+
+/** Assert an internally-generated transactionId stays within the wire contract bound (#1). Throws
+ *  on breach (a programming error) rather than truncating — truncation would change the dedup key. */
+function assertTxIdLength(transactionId: string): void {
+  if (transactionId.length > MAX_OUTBOUND_TX_ID_LEN) {
+    throw new Error(
+      `operator transactionId exceeds ${MAX_OUTBOUND_TX_ID_LEN} chars (len=${transactionId.length}) — refusing to send a malformed idempotency key`,
+    );
+  }
+}
+
 /**
  * `WalletProvider` backed by an OPERATOR's seamless wallet (the operator's
  * balance is the source of truth — we never hold real funds).
@@ -131,6 +148,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
     transactionId: string,
     ref?: LedgerRef,
   ): Promise<WalletTxResult> {
+    assertTxIdLength(transactionId); // #1: invariant on our generated idempotency key (never operator input)
     const req = {
       playerId: s.playerId,
       currency: s.currency,
@@ -219,6 +237,7 @@ export class SeamlessOperatorWallet implements WalletProvider {
     propagate: boolean,
     amount?: bigint,
   ): Promise<void> {
+    assertTxIdLength(transactionId); // #1: invariant on our generated idempotency key (never operator input)
     const emit = () =>
       this.operator.rollback(s.operatorId, {
         playerId: s.playerId,

@@ -36,6 +36,14 @@ export interface VerifiedLaunch extends LaunchClaims {
 
 const TTL_SECONDS = 120;
 
+// #1 — sane upper bound on the operator-supplied `playerId`. This is the one operator-supplied
+// free-string id we accept INBOUND that flows into a persisted, UNIQUE key (the User.username tag
+// `op:{operatorId}:{playerId}:{currency}[:demo]`) and into the per-operator B-tree index lookups
+// (anonymize / session-revoke prefix scans). It is operator-SIGNED (only the operator can mint a
+// launch token), so this is defense-in-depth — not an auth boundary — but an unbounded id would
+// bloat the unique username + every index entry. 200 matches the outbound transactionId cap.
+const MAX_PLAYER_ID_LEN = 200;
+
 @Injectable()
 export class LaunchTokenService {
   constructor(
@@ -105,6 +113,15 @@ export class LaunchTokenService {
       throw new UnauthorizedException("demo_not_allowed");
     }
 
+    // #1 — reject an absurdly-long operator-supplied playerId BEFORE the jti is consumed (no
+    // GameSession is written yet, so the operator can re-issue a corrected token). A missing /
+    // non-string playerId is also rejected here (it would otherwise become the string "undefined"
+    // in the username tag). Bound, not auth — the token is already operator-signed.
+    const playerId = payload.playerId;
+    if (typeof playerId !== "string" || playerId.length < 1 || playerId.length > MAX_PLAYER_ID_LEN) {
+      throw new UnauthorizedException("invalid_launch_token");
+    }
+
     const jti = payload.jti as string | undefined;
     if (!jti) throw new UnauthorizedException("invalid_launch_token");
 
@@ -114,7 +131,7 @@ export class LaunchTokenService {
 
     return {
       operatorId,
-      playerId: payload.playerId,
+      playerId, // validated above: a non-empty string ≤ MAX_PLAYER_ID_LEN
       currency: payload.currency,
       locale: normalizeLocale(payload.locale),
       demo,

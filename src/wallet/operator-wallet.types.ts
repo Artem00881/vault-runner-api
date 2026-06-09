@@ -13,6 +13,15 @@
  * `number` would silently corrupt. Parse with BigInt, never `Number`.
  * Every state-changing call carries a unique `transactionId` so the operator can
  * make it idempotent (a retry must NOT double-apply).
+ *
+ * NOTE on the `transactionId` length cap (#1): these are OUTBOUND requests — the
+ * `transactionId` is OUR internally-generated idempotency key (structured, e.g.
+ * `bet:{roundId}:{userId}:{panel}:debit`, well under 100 chars; see reporting-query.ts),
+ * NOT operator-supplied. So the cap here is a DEFENSIVE contract bound enforced at the
+ * single build choke point (SeamlessOperatorWallet — MAX_OUTBOUND_TX_ID_LEN), guaranteeing
+ * we never put an oversized id on the wire even if a future key format misbehaves. The one
+ * operator-SUPPLIED id we accept INBOUND (the launch-token playerId) is capped at its
+ * acceptance point in LaunchTokenService.verify (#1).
  */
 
 export interface OperatorBetRequest {

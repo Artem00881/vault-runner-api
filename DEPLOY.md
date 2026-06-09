@@ -478,6 +478,25 @@ it in 1Password and share it with the operator.
   silent 401). Rotating/removing the pepper invalidates existing **peppered** keys →
   re-issue them. The provisioning CLI prints which hash mode it used.
 
+**GDPR anonymize pepper — `ANONYMIZE_PEPPER` (R-037, OPTIONAL but RECOMMENDED for real PII).**
+The GDPR erasure-as-anonymization path (`DataErasureService` — the CLI `scripts/anonymize-player.ts`,
+the retention sweep `scripts/retention-sweep.ts`, and the operator route
+`POST /api/operator/players/:playerId/erase`) computes an irreversible **tombstone** HMAC over the
+internal user/player id when it scrubs PII in place.
+- **Unset → it falls back to `JWT_SECRET`** with a **one-time** `ANONYMIZE_PEPPER is unset — falling
+  back to JWT_SECRET` warning, so dev/local + existing deploys keep working. Set a **dedicated**
+  `ANONYMIZE_PEPPER` before erasing real-player PII so the tombstone secret isn't coupled to the JWT
+  signing secret's rotation lifecycle. To enable: create `ANONYMIZE_PEPPER` in `VaultRun-Prod`
+  (*Password*), uncomment `ANONYMIZE_PEPPER=op://VaultRun-Prod/ANONYMIZE_PEPPER/password` in
+  `op.prod.env`, and `./op-compose.sh up -d --force-recreate`. Run the CLI / sweep **via `op run`**
+  so they see the same value the app does.
+- **⚠️ NEVER rotate `ANONYMIZE_PEPPER` while tombstones are live.** The tombstone is deterministic
+  from `(operatorId, playerId)` so a re-run can RE-FIND an already-anonymized player and stay
+  idempotent; rotating the pepper changes every future tombstone, breaking that re-resolution
+  (mirrors the `REPORTING_KEY_PEPPER` "don't drop it while live" caveat). The pepper only needs to
+  be stable + non-public — it makes a tombstone non-reversible, not encrypted. If you set it later,
+  set it ONCE and leave it.
+
 **First-time setup** (already done for prod, 2026-06-02):
 1. Create the vault `VaultRun-Prod` + the three *Password* items.
 2. Create a 1Password **service account** (a Teams/Business feature) with read
@@ -489,6 +508,44 @@ it in 1Password and share it with the operator.
 
 **Recover a `.env`** (emergency/local only): `op inject -i op.prod.env -o .env` with
 the token set — but prefer the wrapper so nothing ever hits disk.
+
+---
+
+## 12.1 GDPR retention sweep (R-038) — CLI + cron SOP
+
+Anonymizes operator players whose sessions have been **dormant** past a retention window.
+There is **no runtime scheduler** in the app — this runs as a **cron-driven CLI**
+(`scripts/retention-sweep.ts`), the batch complement to the per-player
+`scripts/anonymize-player.ts`. It reuses `DataErasureService`, so it **retains the entire money
+journal** (wallets / ledger / bets are byte-identical) and **fails closed** on a player with money
+still in flight (a non-terminal bet or a live session — that player is skipped, never force-erased).
+
+**Run it (always dry-run FIRST):**
+```bash
+# DRY-RUN (default) — lists who WOULD be erased, mutates nothing:
+cd ~/vault-runner-api
+./op-compose.sh run --rm api bun scripts/retention-sweep.ts            # uses RETENTION_DAYS or 365
+# APPLY — actually anonymize the listed players:
+./op-compose.sh run --rm api bun scripts/retention-sweep.ts --apply
+```
+Flags: `--days <n>` (override the window for one run), `--operator-code <c>` (restrict to one
+operator), `--limit <n>` (cap how many are anonymized this run). Run via **`op run`** / the
+`op-compose` wrapper so it gets `DATABASE_URL` + the same `ANONYMIZE_PEPPER` the app uses (see §12).
+
+- **Window = a policy/DPA decision.** Set `RETENTION_DAYS` to whatever the **operator agreement**
+  requires (default 365). "Dormant" = the player's most-recent activity (last session launch OR last
+  bet across all their wallets) is strictly older than `now − RETENTION_DAYS`. Conservative: a player
+  with even one recent session/bet is excluded. (`GameSession.lastSeenAt` is intentionally NOT used —
+  it is `@updatedAt` but never written, so it's not a reliable recency signal.)
+- **Idempotent** — already-anonymized players are filtered out; a re-run is safe.
+- **Cron (run WEEKLY, dry-run first):** schedule the dry-run daily/weekly to a log, review, then run
+  `--apply` on the agreed cadence. Example weekly apply (Sundays 03:30, via the wrapper so secrets
+  inject):
+  ```cron
+  30 3 * * 0  cd /root/vault-runner-api && ./op-compose.sh run --rm api bun scripts/retention-sweep.ts --apply >> /var/log/vaultrun-retention.log 2>&1
+  ```
+  (DORMANT on the current single-node prod: operator mode is OFF, so there are no operator players to
+  sweep — wire the cron when an operator goes live.)
 
 ---
 
