@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Param, Post, UseGuards } from "@nestjs/common";
-import { CurrentOperatorId, OperatorAuthGuard } from "../operator/operator-auth.guard";
+import { CurrentOperatorId, OperatorAuthGuard, RequireWriteScope } from "../operator/operator-auth.guard";
+import { OperatorThrottlerGuard } from "../operator/operator-throttler.guard";
 import { BetsService } from "./bets.service";
 import { UUID_RE } from "../common/uuid";
 
@@ -14,9 +15,14 @@ import { UUID_RE } from "../common/uuid";
  *   POST /api/operator/bets/:betId/void   { reason? }
  *     → fully reverse a SETTLED bet (refund stake; reclaim payout if it won).
  *       Idempotent + tenant-scoped. See bets.service.ts voidBet for the rules.
+ *
+ * WRITE scope (@RequireWriteScope, write-route shared gate): this MOVES money, so it requires the
+ * operator's WRITE key (writeApiKeyHash) — NOT the read/reporting key — and is rate-limited under
+ * the tighter per-operator WRITE budget. Fail-closed if no write key is provisioned.
  */
 @Controller("api/operator/bets")
-@UseGuards(OperatorAuthGuard)
+@UseGuards(OperatorAuthGuard, OperatorThrottlerGuard)
+@RequireWriteScope()
 export class OperatorBetsController {
   constructor(private readonly bets: BetsService) {}
 

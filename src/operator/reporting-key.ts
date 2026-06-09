@@ -32,6 +32,14 @@ import { UUID_RE } from "../common/uuid";
  * diagnosable rather than a generic "wrong key".
  */
 export const REPORTING_TOKEN_PREFIX = "vrk_";
+// WRITE-scope key prefix (write-route shared gate). A higher-privilege key that authorizes the
+// money/state-MOVING operator routes (void / session-revoke / GDPR-erasure) — distinct from the
+// read/reporting key (`vrk_`). The prefix is purely cosmetic/diagnostic: both keys carry the same
+// non-secret <operatorId> lookup prefix and 32-byte secret, and the GUARD enforces scope by
+// matching the presented secret against the column for the route's scope (reportingApiKeyHash for
+// read, writeApiKeyHash for write) — NOT by the token prefix. So a read key (even one literally
+// prefixed `vrw_`) can never satisfy a write route, and vice-versa, regardless of the string.
+export const WRITE_TOKEN_PREFIX = "vrw_";
 
 const ALGO_SHA = "sha256";
 const ALGO_HMAC = "hmac-sha256";
@@ -40,23 +48,45 @@ const sha256 = (secret: string): string => createHash("sha256").update(secret).d
 const hmac256 = (secret: string, pepper: string): string =>
   createHmac("sha256", pepper).update(secret).digest("hex");
 
-/** Mint a fresh key for an operator: returns the one-time plaintext token + its
- *  self-describing stored hash ("<algo>:<hex>"). */
-export function generateReportingKey(operatorId: string): { token: string; hash: string } {
-  const secret = randomBytes(32).toString("hex");
+/** Build the self-describing stored hash ("<algo>:<hex>") for a secret, honouring the optional
+ *  REPORTING_KEY_PEPPER (shared by BOTH the read and write keys — one pepper for the operator-key
+ *  family). Used by both generators below. */
+function hashSecret(secret: string): string {
   const pepper = process.env.REPORTING_KEY_PEPPER;
-  const hash = pepper ? `${ALGO_HMAC}:${hmac256(secret, pepper)}` : `${ALGO_SHA}:${sha256(secret)}`;
-  return { token: `${REPORTING_TOKEN_PREFIX}${operatorId}.${secret}`, hash };
+  return pepper ? `${ALGO_HMAC}:${hmac256(secret, pepper)}` : `${ALGO_SHA}:${sha256(secret)}`;
 }
 
-/** Parse a presented token into { operatorId, secret }, or null if malformed.
- *  Validates the operatorId is a UUID so a garbage id never reaches a @db.Uuid query
- *  (which would throw a 500 instead of a clean 401). */
+/** Mint a fresh READ (reporting) key for an operator: returns the one-time plaintext token + its
+ *  self-describing stored hash ("<algo>:<hex>") for `Operator.reportingApiKeyHash`. */
+export function generateReportingKey(operatorId: string): { token: string; hash: string } {
+  const secret = randomBytes(32).toString("hex");
+  return { token: `${REPORTING_TOKEN_PREFIX}${operatorId}.${secret}`, hash: hashSecret(secret) };
+}
+
+/** Mint a fresh WRITE key for an operator (write-route shared gate): returns the one-time
+ *  plaintext token + its self-describing stored hash for `Operator.writeApiKeyHash`. Same entropy
+ *  and hashing as the read key; only the cosmetic prefix differs. */
+export function generateWriteKey(operatorId: string): { token: string; hash: string } {
+  const secret = randomBytes(32).toString("hex");
+  return { token: `${WRITE_TOKEN_PREFIX}${operatorId}.${secret}`, hash: hashSecret(secret) };
+}
+
+/** Parse a presented token into { operatorId, secret }, or null if malformed. Accepts EITHER the
+ *  read (`vrk_`) or write (`vrw_`) prefix — the guard decides which stored hash to verify against
+ *  based on the ROUTE's scope, not the prefix. Validates the operatorId is a UUID so a garbage id
+ *  never reaches a @db.Uuid query (which would throw a 500 instead of a clean 401). */
 export function parseReportingToken(
   token: string | undefined | null,
 ): { operatorId: string; secret: string } | null {
-  if (typeof token !== "string" || !token.startsWith(REPORTING_TOKEN_PREFIX)) return null;
-  const body = token.slice(REPORTING_TOKEN_PREFIX.length);
+  if (typeof token !== "string") return null;
+  // Cap total token length before any downstream hashing — a real key is `vr{k,w}_<uuid>.<64hex>`
+  // (~110 chars); reject absurdly long input so the unauthenticated 401 path can't be turned into a
+  // CPU-amplification primitive by forcing a hash of a megabyte "secret" (security/code-review LOW).
+  if (token.length > 512) return null;
+  let body: string;
+  if (token.startsWith(REPORTING_TOKEN_PREFIX)) body = token.slice(REPORTING_TOKEN_PREFIX.length);
+  else if (token.startsWith(WRITE_TOKEN_PREFIX)) body = token.slice(WRITE_TOKEN_PREFIX.length);
+  else return null;
   const dot = body.indexOf(".");
   if (dot <= 0 || dot >= body.length - 1) return null;
   const operatorId = body.slice(0, dot);
@@ -67,14 +97,16 @@ export function parseReportingToken(
 
 /** True when the stored hash is peppered but REPORTING_KEY_PEPPER is unset — i.e. the
  *  key CANNOT be verified until the pepper is restored. The guard logs this distinctly
- *  so a pepper-drift outage is diagnosable instead of looking like a wrong key. */
+ *  so a pepper-drift outage is diagnosable instead of looking like a wrong key. Works for
+ *  EITHER scope's hash (read reportingApiKeyHash or write writeApiKeyHash). */
 export function reportingKeyPepperUnavailable(storedHash: string | null | undefined): boolean {
   return typeof storedHash === "string" && storedHash.startsWith(`${ALGO_HMAC}:`) && !process.env.REPORTING_KEY_PEPPER;
 }
 
-/** Constant-time verify a presented secret against the stored "<algo>:<hex>" hash.
- *  ALWAYS computes a hash (even on the not-found / can't-verify paths) to flatten the
- *  timing. Uses the algorithm RECORDED in the hash, not the current env. */
+/** Constant-time verify a presented secret against the stored "<algo>:<hex>" hash. ALWAYS computes
+ *  a hash (even on the not-found / can't-verify paths) to flatten the timing. Uses the algorithm
+ *  RECORDED in the hash, not the current env. SCOPE-AGNOSTIC: the caller passes whichever stored
+ *  hash the route's scope requires (reportingApiKeyHash for read, writeApiKeyHash for write). */
 export function verifyReportingSecret(secret: string, storedHash: string | null | undefined): boolean {
   if (!storedHash) {
     sha256(secret); // hash unconditionally (timing flatten) then bail

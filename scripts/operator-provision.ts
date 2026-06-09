@@ -18,7 +18,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import { validateBetLimits } from "../src/operator/bet-limits";
 import { validateRgConfig, type RgConfig } from "../src/operator/rg-config";
-import { generateReportingKey } from "../src/operator/reporting-key";
+import { generateReportingKey, generateWriteKey } from "../src/operator/reporting-key";
 import { isKnownCurrency } from "../src/common/currency";
 import { readFileSync } from "node:fs";
 
@@ -71,7 +71,8 @@ export interface ProvisionInput {
   enabled?: boolean;
   demoEnabled?: boolean; // may this operator launch play-money "fun mode"? (off by default)
   rotateSecret?: boolean;
-  rotateReportingKey?: boolean; // mint/rotate the inbound REPORTING api key (Phase 3.5)
+  rotateReportingKey?: boolean; // mint/rotate the inbound READ (reporting) api key (Phase 3.5)
+  rotateWriteKey?: boolean; // mint/rotate the inbound WRITE api key — void/revoke/erasure (write-route shared gate)
   strictCurrencies?: boolean; // Phase 3.6: throw (not warn) if a currency isn't in the canonical table
 }
 
@@ -106,7 +107,7 @@ async function recordAudit(
 export async function provisionOperator(
   prisma: Pick<PrismaClient, "operator" | "auditEvent">,
   input: ProvisionInput,
-): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string; unknownCurrencies: string[] }> {
+): Promise<{ operator: any; created: boolean; launchSecret?: string; reportingApiKey?: string; writeApiKey?: string; unknownCurrencies: string[] }> {
   // Canonicalise currency codes to UPPERCASE (ISO-4217) on write so the launch-time
   // allow-list check and the per-currency limit lookup (both case-insensitive /
   // uppercased) always match what the operator stored.
@@ -184,19 +185,35 @@ export async function provisionOperator(
     meta: { code: operator.code, unknownCurrencies },
   });
 
-  // Optional: mint/rotate the inbound REPORTING api key. The token embeds the operator
-  // id (known only after the upsert), so we store its hash in a follow-up update and
-  // return the plaintext token ONCE. Rotating invalidates any prior reporting key.
+  // Optional: mint/rotate the inbound READ (reporting) and/or WRITE api keys. Each token embeds
+  // the operator id (known only after the upsert), so we store its hash in a follow-up update and
+  // return the plaintext token ONCE. Rotating invalidates any prior key of that scope. The two
+  // scopes are INDEPENDENT — an operator can have a read key but no write key (then every write
+  // route fails closed), or rotate one without touching the other. F-058: record the rotation
+  // WITHOUT the token or the hash — only the self-describing algo prefix ("sha256:" /
+  // "hmac-sha256:") so an auditor sees that (and how) it happened.
   let reportingApiKey: string | undefined;
   if (input.rotateReportingKey) {
     const { token, hash } = generateReportingKey(operator.id);
     await prisma.operator.update({ where: { id: operator.id }, data: { reportingApiKeyHash: hash } });
     reportingApiKey = token;
-    // F-058: record the rotation WITHOUT the token or the hash — only the self-describing
-    // algo prefix ("sha256:" / "hmac-sha256:") so an auditor sees that (and how) it happened.
     const hashPrefix = hash.includes(":") ? `${hash.slice(0, hash.indexOf(":"))}:` : "(unknown)";
     await recordAudit(prisma, {
       action: "reporting_key.rotate",
+      targetId: operator.id,
+      operatorId: operator.id,
+      meta: { code: operator.code, hashPrefix },
+    });
+  }
+
+  let writeApiKey: string | undefined;
+  if (input.rotateWriteKey) {
+    const { token, hash } = generateWriteKey(operator.id);
+    await prisma.operator.update({ where: { id: operator.id }, data: { writeApiKeyHash: hash } });
+    writeApiKey = token;
+    const hashPrefix = hash.includes(":") ? `${hash.slice(0, hash.indexOf(":"))}:` : "(unknown)";
+    await recordAudit(prisma, {
+      action: "write_key.rotate",
       targetId: operator.id,
       operatorId: operator.id,
       meta: { code: operator.code, hashPrefix },
@@ -208,6 +225,7 @@ export async function provisionOperator(
     created,
     launchSecret: created || input.rotateSecret ? operator.launchSecret : undefined,
     reportingApiKey,
+    writeApiKey,
     unknownCurrencies,
   };
 }
@@ -240,7 +258,7 @@ async function main() {
     console.error(
       "usage: bun scripts/operator-provision.ts --code <code> [--name ..] [--currencies EUR,USDT]\n" +
         "  [--wallet-url ..] [--wallet-key ..] [--bet-limits '<json>'|@file.json] [--rg-config '<json>'|@file.json]\n" +
-        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret] [--rotate-reporting-key] [--strict-currencies]",
+        "  [--ip-whitelist a,b] [--callback-url ..] [--disabled] [--demo-enabled|--demo-disabled] [--rotate-secret] [--rotate-reporting-key] [--rotate-write-key] [--strict-currencies]",
     );
     process.exit(1);
   }
@@ -261,7 +279,7 @@ async function main() {
 
   const prisma = new PrismaClient();
   try {
-    const { operator, created, launchSecret, reportingApiKey, unknownCurrencies } = await provisionOperator(prisma, {
+    const { operator, created, launchSecret, reportingApiKey, writeApiKey, unknownCurrencies } = await provisionOperator(prisma, {
       code,
       name: str(args.name),
       currencies: list(args.currencies),
@@ -276,6 +294,7 @@ async function main() {
         args["demo-enabled"] === true ? true : args["demo-disabled"] === true ? false : undefined,
       rotateSecret: args["rotate-secret"] === true,
       rotateReportingKey: args["rotate-reporting-key"] === true,
+      rotateWriteKey: args["rotate-write-key"] === true,
       strictCurrencies: args["strict-currencies"] === true,
     });
 
@@ -299,14 +318,24 @@ async function main() {
       console.log(`    ${launchSecret}`);
       console.log(`  ^ store securely (1Password) + share with the operator; it signs their launch tokens. Shown once.`);
     }
+    const keyMode = () => (process.env.REPORTING_KEY_PEPPER ? "HMAC-SHA256 (peppered)" : "SHA-256 (no pepper)");
     if (reportingApiKey) {
-      const mode = process.env.REPORTING_KEY_PEPPER ? "HMAC-SHA256 (peppered)" : "SHA-256 (no pepper)";
-      console.log(`\n  reporting API key (ROTATED — any prior reporting key is now invalid):`);
+      console.log(`\n  READ (reporting) API key (ROTATED — any prior reporting key is now invalid):`);
       console.log(`    ${reportingApiKey}`);
-      console.log(`  ^ the operator sends this as 'Authorization: Bearer <key>' to /api/operator/reports/*. Shown once;`);
-      console.log(`    store in 1Password + share with the operator.`);
-      console.log(`    hash mode: ${mode}. If peppered, the APP must run with the SAME REPORTING_KEY_PEPPER`);
+      console.log(`  ^ the operator sends this as 'Authorization: Bearer <key>' to the READ routes`);
+      console.log(`    (/api/operator/reports/*, /api/operator/audit-events). READ-ONLY — it CANNOT void/revoke.`);
+      console.log(`    Shown once; store in 1Password + share with the operator.`);
+      console.log(`    hash mode: ${keyMode()}. If peppered, the APP must run with the SAME REPORTING_KEY_PEPPER`);
       console.log(`    or the stored hash won't verify (DEPLOY.md §12).`);
+    }
+    if (writeApiKey) {
+      console.log(`\n  WRITE API key (ROTATED — any prior write key is now invalid):`);
+      console.log(`    ${writeApiKey}`);
+      console.log(`  ^ a SEPARATE, higher-privilege key for the WRITE routes (void / session-revoke / erasure):`);
+      console.log(`    'Authorization: Bearer <key>' to e.g. POST /api/operator/bets/:betId/void. Shown once;`);
+      console.log(`    store in 1Password + share with the operator. Keep it MORE restricted than the read key.`);
+      console.log(`    hash mode: ${keyMode()} (same REPORTING_KEY_PEPPER applies). Without a write key provisioned,`);
+      console.log(`    every write route is DENIED (fail-closed).`);
     }
   } finally {
     await prisma.$disconnect();

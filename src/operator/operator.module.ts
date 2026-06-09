@@ -11,6 +11,7 @@ import { ReportingController } from "./reporting.controller";
 import { AuditEventsController } from "./audit-events.controller";
 import { ReportingService } from "./reporting.service";
 import { OperatorAuthGuard } from "./operator-auth.guard";
+import { OperatorThrottlerGuard } from "./operator-throttler.guard";
 
 /**
  * Operator (B2B multi-tenant) surface: launch-token verification and game
@@ -26,12 +27,13 @@ import { OperatorAuthGuard } from "./operator-auth.guard";
     LedgerModule, // GameSessionService seeds/resets demo (fun-mode) play-money wallets
   ],
   controllers: [OperatorController, OperatorSessionsController, ReportingController, AuditEventsController],
-  // ReportingService + OperatorAuthGuard need only PrismaService (global). The guard
-  // is registered so @UseGuards(OperatorAuthGuard) resolves it with its dependency.
-  providers: [LaunchTokenService, GameSessionService, ReportingService, OperatorAuthGuard],
-  // OperatorAuthGuard is exported so the GameModule's operator-facing controllers
-  // (e.g. the bet-void endpoint, which lives with BetsService) can reuse the same
-  // per-operator reporting-key auth + tenant scoping (Phase 6).
-  exports: [LaunchTokenService, GameSessionService, OperatorAuthGuard],
+  // ReportingService + OperatorAuthGuard need only PrismaService (global; Reflector + the
+  // ThrottlerModule providers are global too). Both guards are registered so
+  // @UseGuards(OperatorAuthGuard, OperatorThrottlerGuard) resolves them with their deps.
+  providers: [LaunchTokenService, GameSessionService, ReportingService, OperatorAuthGuard, OperatorThrottlerGuard],
+  // Both guards are exported so the GameModule's operator-facing controllers (e.g. the bet-void
+  // endpoint, which lives with BetsService) can reuse the same per-operator reporting-key auth +
+  // tenant scoping (Phase 6) and the per-operator rate-limit (write-route shared gate).
+  exports: [LaunchTokenService, GameSessionService, OperatorAuthGuard, OperatorThrottlerGuard],
 })
 export class OperatorModule {}

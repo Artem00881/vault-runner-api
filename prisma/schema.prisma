@@ -29,6 +29,7 @@ model Operator {
   betLimits           Json?    @map("bet_limits") // per-currency bet-level tables
   rgConfig            Json?    @map("rg_config") // responsible-gambling config (reality checks + session limits)
   reportingApiKeyHash String?  @map("reporting_api_key_hash") // HASHED inbound API key for the operator REPORTING surface (Phase 3.5); null = no reporting access. Only ever VERIFIED, never used to sign — so it is hashed at rest (unlike launchSecret/walletApiKey).
+  writeApiKeyHash     String?  @map("write_api_key_hash") // HASHED inbound API key for the operator WRITE surface (void/revoke/erasure) — a SEPARATE, higher-privilege scope from the read/reporting key. null = no write access provisioned → every write route fails CLOSED. Same self-describing hash + optional REPORTING_KEY_PEPPER as reportingApiKeyHash (write-route shared gate).
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 

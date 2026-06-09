@@ -1,0 +1,22 @@
+-- Write-route shared gate — SPLIT the operator API key into READ vs WRITE scopes (ADDITIVE,
+-- forward-only). Until now a single reporting key (reporting_api_key_hash) authorized BOTH
+-- reads (the reporting / transaction / audit GETs) AND writes (the bet-void endpoint, and the
+-- upcoming session-revoke / GDPR-erasure write routes). That over-grants: a key handed out for
+-- read-only dashboards could also move money (void) or terminate sessions.
+--
+-- This column holds a SEPARATE, higher-privilege WRITE key hash. WRITE routes
+-- (@RequireWriteScope) require a key that matches THIS column; if it is NULL the operator has no
+-- write key provisioned and every write route is DENIED (fail-closed) — an operator must be
+-- explicitly minted a write key (scripts/operator-provision.ts --rotate-write-key). READ routes
+-- are UNCHANGED and stay 100% back-compatible with the existing reporting key.
+--
+-- Same storage as reporting_api_key_hash: self-describing "<algo>:<hex>" (sha256 / hmac-sha256
+-- with the optional REPORTING_KEY_PEPPER), only ever VERIFIED (never used to sign) so hashed at
+-- rest, verified with the same timing-safe + pepper-aware comparison. ADD COLUMN, nullable, no
+-- backfill, no default write — back-compat for every existing row (NULL = no write scope). No
+-- destructive statement; safe for the test/soak harnesses (no trigger, no FK, no data rewrite).
+-- Rollback = image-only to the prior app build; do NOT down-migrate (the column is additive and
+-- ignored by any build that doesn't read it).
+
+-- AlterTable
+ALTER TABLE "operators" ADD COLUMN "write_api_key_hash" TEXT;

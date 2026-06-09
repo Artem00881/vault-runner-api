@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
-import { CurrentOperatorId, OperatorAuthGuard } from "./operator-auth.guard";
+import { CurrentOperatorId, OperatorAuthGuard, RequireWriteScope } from "./operator-auth.guard";
+import { OperatorThrottlerGuard } from "./operator-throttler.guard";
 import { GameSessionService } from "./game-session.service";
 
 /**
@@ -22,8 +23,12 @@ const revokeSchema = z.object({
   currency: z.string().min(1).max(16).optional(),
 });
 
+// WRITE scope (@RequireWriteScope): terminating a player's live session is a state-MOVING action,
+// so it requires the operator's WRITE key (writeApiKeyHash), not the read/reporting key — and is
+// rate-limited under the tighter per-operator WRITE budget. Fail-closed if no write key is set.
 @Controller("api/operator/sessions")
-@UseGuards(OperatorAuthGuard)
+@UseGuards(OperatorAuthGuard, OperatorThrottlerGuard)
+@RequireWriteScope()
 export class OperatorSessionsController {
   constructor(private readonly sessions: GameSessionService) {}
 

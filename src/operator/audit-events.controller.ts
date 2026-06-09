@@ -1,5 +1,6 @@
 import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import { CurrentOperatorId, OperatorAuthGuard } from "./operator-auth.guard";
+import { OperatorThrottlerGuard } from "./operator-throttler.guard";
 import { ReportingService } from "./reporting.service";
 import { parseAuditQuery } from "./reporting-query";
 
@@ -11,8 +12,9 @@ import { parseAuditQuery } from "./reporting-query";
  *
  *   GET /api/operator/audit-events[?action=…][&from&to][&limit]
  */
+// READ scope: the reporting key authorizes this read of the operator's own audit events.
 @Controller("api/operator/audit-events")
-@UseGuards(OperatorAuthGuard)
+@UseGuards(OperatorAuthGuard, OperatorThrottlerGuard)
 export class AuditEventsController {
   constructor(private readonly reporting: ReportingService) {}
 

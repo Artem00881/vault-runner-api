@@ -1,5 +1,6 @@
 import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import { CurrentOperatorId, OperatorAuthGuard } from "./operator-auth.guard";
+import { OperatorThrottlerGuard } from "./operator-throttler.guard";
 import { ReportingService } from "./reporting.service";
 import { parseBetsQuery, parseDailyQuery, parseReportQuery, parseTransactionQuery } from "./reporting-query";
 
@@ -13,8 +14,10 @@ import { parseBetsQuery, parseDailyQuery, parseReportQuery, parseTransactionQuer
  *   GET /api/operator/reports/bets   ?from&to[&currency][&includeDemo][&cursor][&limit]
  *   GET /api/operator/reports/transaction?transactionId=…  | ?betId=…   (single-tx status, Phase 6)
  */
+// READ scope (no @RequireWriteScope): the reporting key authorizes these. OperatorThrottlerGuard
+// runs AFTER OperatorAuthGuard so it keys the per-operator read budget by the resolved operatorId.
 @Controller("api/operator/reports")
-@UseGuards(OperatorAuthGuard)
+@UseGuards(OperatorAuthGuard, OperatorThrottlerGuard)
 export class ReportingController {
   constructor(private readonly reporting: ReportingService) {}
 
